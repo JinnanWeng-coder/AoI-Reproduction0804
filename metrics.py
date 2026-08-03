@@ -10,9 +10,10 @@ import numpy as np
 
 
 class MetricStore:
-    def __init__(self, number_agents: int, steps_per_episode: int):
+    def __init__(self, number_agents: int, steps_per_episode: int, global_actor_weight: float = 1.0):
         self.number_agents = int(number_agents)
         self.steps_per_episode = int(steps_per_episode)
+        self.global_actor_weight = float(global_actor_weight)
         self.episodes: List[Dict[str, Any]] = []
         self.learning: List[Dict[str, Any]] = []
 
@@ -29,11 +30,18 @@ class MetricStore:
             self.learning.append(diagnostics)
 
     def state_dict(self):
-        return {"episodes": self.episodes, "learning": self.learning, "number_agents": self.number_agents, "steps_per_episode": self.steps_per_episode}
+        return {
+            "episodes": self.episodes,
+            "learning": self.learning,
+            "number_agents": self.number_agents,
+            "steps_per_episode": self.steps_per_episode,
+            "global_actor_weight": self.global_actor_weight,
+        }
 
     def load_state_dict(self, state):
         self.episodes = list(state["episodes"])
         self.learning = list(state["learning"])
+        self.global_actor_weight = float(state.get("global_actor_weight", self.global_actor_weight))
 
     def arrays(self) -> Dict[str, np.ndarray]:
         if not self.episodes:
@@ -45,14 +53,17 @@ class MetricStore:
         task1 = np.stack([item["task1_step"] for item in self.episodes]).astype(np.float32)
         task2 = np.stack([item["task2_step"] for item in self.episodes]).astype(np.float32)
         global_step = np.stack([item["global_step"] for item in self.episodes]).astype(np.float32)
+        local_total = (task1 + task2).mean(axis=1)
+        global_episode_sum = global_step.sum(axis=1)
         arrays = {
             "task1_step": task1,
             "task2_step": task2,
             "global_step": global_step,
             "task1_episode_mean": task1.mean(axis=1),
             "task2_episode_mean": task2.mean(axis=1),
-            "global_episode_sum": global_step.sum(axis=1),
-            "local_total_episode_mean": (task1 + task2).mean(axis=1),
+            "global_episode_sum": global_episode_sum,
+            "local_total_episode_mean": local_total,
+            "training_objective_proxy": local_total + self.global_actor_weight * global_episode_sum[:, None],
         }
         info_keys = sorted(self.episodes[0]["info"])
         for key in info_keys:
@@ -79,4 +90,3 @@ def _json_default(value):
     if isinstance(value, (np.floating, np.integer)):
         return value.item()
     raise TypeError(type(value).__name__)
-

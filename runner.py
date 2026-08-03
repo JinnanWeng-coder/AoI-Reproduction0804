@@ -79,7 +79,7 @@ def _make_system(config):
     agents = [Agent(config, index) for index in range(config.number_agents)]
     learner = Global_Critic(config, agents)
     replay = ReplayBuffer(config.replay_capacity, config.state_dim, config.action_dim, config.number_agents)
-    metrics = MetricStore(config.number_agents, config.steps_per_episode)
+    metrics = MetricStore(config.number_agents, config.steps_per_episode, config.global_actor_weight)
     return environment, agents, learner, replay, metrics, device
 
 

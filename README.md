@@ -50,7 +50,9 @@ Smoke output is always placed under `scratch/` and marked
 `is_formal_result=false`. Existing run and eval directories are rejected; only
 an explicit `--resume` can continue an incomplete run. `latest.pt` contains
 networks, optimizers, replay, environment, metrics, and Python/NumPy/PyTorch RNG
-state.
+state. `train_metrics.npz` keeps separate task1/task2 arrays, the combined
+`local_total_episode_mean`, `global_episode_sum`, and
+`training_objective_proxy`; plotting reads these files only.
 
 The restart-safe matrix entry points are:
 
