@@ -1,0 +1,14 @@
+profile: legacy_release
+tau: 0.005
+global_actor_weight: 2.0
+global_update_mode: legacy_detach
+map_width_m: 375.0
+map_height_m: 649.0
+rsu_position: [375.0, 649.5]
+speed_distribution: legacy_integer_exclusive_high
+slow_update_every_episodes: 20
+power_continuous: false
+previous_interference_dim: 1
+include_remaining_time: false
+current_interference_reward: false
+

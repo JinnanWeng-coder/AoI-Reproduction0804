@@ -1,0 +1,16 @@
+profile: paper_faithful
+tau: 0.0005
+global_actor_weight: 1.0
+global_update_mode: synchronous_joint
+map_width_m: 750.0
+map_height_m: 1299.0
+rsu_position: [375.0, 649.5]
+speed_distribution: continuous_uniform
+slow_update_every_episodes: 1
+power_continuous: true
+power_min_dbm: 1.0
+power_max_dbm: 30.0
+previous_interference_dim: 3
+include_remaining_time: true
+current_interference_reward: true
+
