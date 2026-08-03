@@ -27,7 +27,7 @@ def sha256(path: Path) -> str:
 def git_value(*args: str) -> Optional[str]:
     try:
         result = subprocess.run(
-            ["git", "-C", str(SOURCE_ROOT.parent.parent), *args],
+            ["git", "-C", str(SOURCE_ROOT.parent), *args],
             check=True,
             capture_output=True,
             text=True,

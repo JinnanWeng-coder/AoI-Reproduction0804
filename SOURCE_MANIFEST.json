@@ -127,12 +127,12 @@
       "sha256": "88f57773b34fcce019398f7a0d12ae10f2a231516e09fc96e5a32f8bc33f8ad6"
     }
   ],
-  "generated_at_utc": "2026-08-03T12:50:19.223527+00:00",
+  "generated_at_utc": "2026-08-03T13:26:58.481633+00:00",
   "manifest_version": 1,
   "path_mapping_reason": "The requested -main path was replaced by the clean Git clone -reimplement path.",
   "requested_path_exists": false,
   "requested_source_root": "E:\\Research\\Article_Reimplementation\\src\\AoI-V2X-IEEE-TVT-2023-main\\1-Modified_MADDPG_with_TDec",
-  "source_git_commit": null,
-  "source_git_status": null,
+  "source_git_commit": "974e5f83f3d4f630a88c9a777ec07df33b723e28",
+  "source_git_status": "## main...origin/main",
   "source_root": "E:\\Research\\Article_Reimplementation\\src\\AoI-V2X-IEEE-TVT-2023-reimplement\\1-Modified_MADDPG_with_TDec"
 }

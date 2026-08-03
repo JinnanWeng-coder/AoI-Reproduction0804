@@ -56,6 +56,23 @@ def test_legacy_golden_trace_matches_original_source():
     adapter = LegacyEnviron(config)
     adapter.reset_episode(0)
     reproduced = adapter.step(actions)
+    expected_state = np.asarray([adapter._state_for_agent(index) for index in range(config.number_agents)])
+    np.testing.assert_array_equal(expected_state, reproduced[0])
+    # The copied source and the adapter must expose the same post-step state,
+    # including the original scalar-interference layout.
+    original_state = np.asarray([
+        (lambda idx: np.concatenate((
+            np.reshape((original_env.V2I_channels_abs[idx * config.scenario.platoon_size] - 60) / 60.0, -1),
+            np.reshape((original_env.V2I_channels_with_fastfading[idx * config.scenario.platoon_size, :] - original_env.V2I_channels_abs[idx * config.scenario.platoon_size] + 10) / 35, -1),
+            np.reshape((original_env.V2V_channels_abs[idx * config.scenario.platoon_size, idx * config.scenario.platoon_size + 1 + np.arange(config.scenario.platoon_size - 1)] - 60) / 60.0, -1),
+            np.reshape((original_env.V2V_channels_with_fastfading[idx * config.scenario.platoon_size, idx * config.scenario.platoon_size + 1 + np.arange(config.scenario.platoon_size - 1), :] - original_env.V2V_channels_abs[idx * config.scenario.platoon_size, idx * config.scenario.platoon_size + 1 + np.arange(config.scenario.platoon_size - 1)].reshape(config.scenario.platoon_size - 1, 1) + 10) / 35, -1),
+            np.reshape((original_env.Interference_all[idx] + 60) / 60.0, -1),
+            np.reshape(original_env.AoI[idx] / int(original_env.time_slow / original_env.time_fast), -1),
+            np.asarray([original_env.V2V_demand[idx] / original_env.V2V_demand_size]),
+        )))(idx)
+        for idx in range(config.number_agents)
+    ])
+    np.testing.assert_array_equal(original_state, reproduced[0])
     for expected, actual in zip(original[:2], reproduced[2:4]):
         np.testing.assert_allclose(expected, actual, rtol=0, atol=0)
     np.testing.assert_allclose(original[2], reproduced[1], rtol=0, atol=0)

@@ -56,7 +56,7 @@ class Global_Critic:
             noise = torch.clamp(noise, -float(self.config.target_noise_clip), float(self.config.target_noise_clip))
             return torch.clamp(target_actions + noise, -float(self.config.target_action_clip), float(self.config.target_action_clip))
 
-    def _critic_step(self, states, actions, rewards_g, rewards_t1, rewards_t2, next_states, done):
+    def _critic_step(self, states, actions, rewards_g, rewards_t1, rewards_t2, next_states, done, update_local=True):
         with torch.no_grad():
             target_actions = self._target_joint_actions(next_states)
             q1_next = self.global_target_critic1(next_states, target_actions).view(-1)
@@ -74,27 +74,28 @@ class Global_Critic:
         self.global_critic2.optimizer.step()
 
         local_losses = []
-        local_states = self._split_states(states)
-        local_next_states = self._split_states(next_states)
-        local_actions = self._split_actions(actions)
-        for index, agent in enumerate(self.agents_networks):
-            with torch.no_grad():
-                next_action = agent.target_actor(local_next_states[index])
-                next_q1 = agent.target_critic_task1(local_next_states[index], next_action).view(-1)
-                next_q2 = agent.target_critic_task2(local_next_states[index], next_action).view(-1)
-                target1 = rewards_t1[:, index] + self.config.gamma * (1.0 - done) * next_q1
-                target2 = rewards_t2[:, index] + self.config.gamma * (1.0 - done) * next_q2
-            agent.critic_task1.optimizer.zero_grad(set_to_none=True)
-            agent.critic_task2.optimizer.zero_grad(set_to_none=True)
-            current1 = agent.critic_task1(local_states[index], local_actions[index]).view(-1)
-            current2 = agent.critic_task2(local_states[index], local_actions[index]).view(-1)
-            local_loss1 = F.mse_loss(current1, target1)
-            local_loss2 = F.mse_loss(current2, target2)
-            local_loss1.backward()
-            agent.critic_task1.optimizer.step()
-            local_loss2.backward()
-            agent.critic_task2.optimizer.step()
-            local_losses.append(float((local_loss1.detach() + local_loss2.detach()).cpu()))
+        if update_local:
+            local_states = self._split_states(states)
+            local_next_states = self._split_states(next_states)
+            local_actions = self._split_actions(actions)
+            for index, agent in enumerate(self.agents_networks):
+                with torch.no_grad():
+                    next_action = agent.target_actor(local_next_states[index])
+                    next_q1 = agent.target_critic_task1(local_next_states[index], next_action).view(-1)
+                    next_q2 = agent.target_critic_task2(local_next_states[index], next_action).view(-1)
+                    target1 = rewards_t1[:, index] + self.config.gamma * (1.0 - done) * next_q1
+                    target2 = rewards_t2[:, index] + self.config.gamma * (1.0 - done) * next_q2
+                agent.critic_task1.optimizer.zero_grad(set_to_none=True)
+                agent.critic_task2.optimizer.zero_grad(set_to_none=True)
+                current1 = agent.critic_task1(local_states[index], local_actions[index]).view(-1)
+                current2 = agent.critic_task2(local_states[index], local_actions[index]).view(-1)
+                local_loss1 = F.mse_loss(current1, target1)
+                local_loss2 = F.mse_loss(current2, target2)
+                local_loss1.backward()
+                agent.critic_task1.optimizer.step()
+                local_loss2.backward()
+                agent.critic_task2.optimizer.step()
+                local_losses.append(float((local_loss1.detach() + local_loss2.detach()).cpu()))
 
         return {
             "global_critic_loss": float((loss1.detach() + loss2.detach()).cpu()),
@@ -141,7 +142,13 @@ class Global_Critic:
         norms = [float(np.sqrt(np.sum(np.square(values)))) for values in offsets]
         return {"mode": self.config.global_update_mode, "global_gradient_norms": norms, "per_parameter_norms": offsets, "finite": bool(np.all(np.isfinite(norms)))}
 
-    def _actor_step(self, states):
+    def _actor_step(self, states, actor_step_order=None):
+        if actor_step_order is None:
+            actor_step_order = list(range(len(self.agents_networks)))
+        else:
+            actor_step_order = [int(index) for index in actor_step_order]
+            if sorted(actor_step_order) != list(range(len(self.agents_networks))):
+                raise ValueError("actor_step_order must be a permutation of agent indices")
         critics = [self.global_critic1, self.global_critic2]
         for agent in self.agents_networks:
             critics.extend([agent.critic_task1, agent.critic_task2])
@@ -168,8 +175,8 @@ class Global_Critic:
                 global_grads = torch.autograd.grad(global_loss, gradients, retain_graph=True, allow_unused=True)
                 total_loss = global_loss + local_loss
                 total_loss.backward()
-                for agent in self.agents_networks:
-                    agent.actor.optimizer.step()
+                for index in actor_step_order:
+                    self.agents_networks[index].actor.optimizer.step()
             per_agent = []
             cursor = 0
             for agent in self.agents_networks:
@@ -196,9 +203,20 @@ class Global_Critic:
         rewards_t2_t = torch.as_tensor(rewards_t2, dtype=torch.float32, device=self.device)
         next_states_t = torch.as_tensor(next_states, dtype=torch.float32, device=self.device)
         done_t = torch.as_tensor(done, dtype=torch.float32, device=self.device).view(-1)
-        diagnostics = self._critic_step(states_t, actions_t, rewards_g_t, rewards_t1_t, rewards_t2_t, next_states_t, done_t)
+        next_learn_step = self.learn_step_counter + 1
+        update_local = next_learn_step % int(self.config.policy_delay) == 0
+        diagnostics = self._critic_step(
+            states_t,
+            actions_t,
+            rewards_g_t,
+            rewards_t1_t,
+            rewards_t2_t,
+            next_states_t,
+            done_t,
+            update_local=update_local,
+        )
         self.learn_step_counter += 1
-        if self.learn_step_counter % int(self.config.policy_delay) == 0:
+        if update_local:
             diagnostics.update(self._actor_step(states_t))
         else:
             diagnostics.update({"actor_loss": None, "global_actor_gradient_norms": [], "actor_parameter_deltas": []})
@@ -230,4 +248,3 @@ class Global_Critic:
         self.global_critic1.optimizer.load_state_dict(state["global_critic1_optimizer"])
         self.global_critic2.optimizer.load_state_dict(state["global_critic2_optimizer"])
         self.learn_step_counter = int(state["learn_step_counter"])
-
