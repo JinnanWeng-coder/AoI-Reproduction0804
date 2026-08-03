@@ -22,7 +22,7 @@ def plot_run(run_dir: Path, output: Optional[Path] = None) -> Path:
     with np.load(run_dir / "train_metrics.npz", allow_pickle=False) as metrics:
         task1 = metrics["task1_episode_mean"].mean(axis=1)
         task2 = metrics["task2_episode_mean"].mean(axis=1)
-        global_reward = metrics["global_episode_sum"].mean(axis=1)
+        global_reward = metrics["global_episode_sum"]
     figure, axes = plt.subplots(3, 1, figsize=(8, 8), sharex=True)
     axes[0].plot(task1, label="task1")
     axes[1].plot(task2, label="task2")

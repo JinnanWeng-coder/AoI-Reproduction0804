@@ -9,7 +9,7 @@ import json
 import math
 import os
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Union
 
@@ -279,6 +279,14 @@ def resolve_config(profile: str = "paper_faithful", scenario: Optional[str] = No
     config = ExperimentConfig(**values)
     validate_config(config)
     return config
+
+
+def config_from_dict(data: Dict[str, Any]) -> ExperimentConfig:
+    """Reconstruct the exact config embedded in a full checkpoint."""
+    allowed = {item.name for item in fields(ExperimentConfig)}
+    values = {key: value for key, value in data.items() if key in allowed and key not in {"profile", "scenario"}}
+    scenario = data.get("scenario", {}).get("id") if isinstance(data.get("scenario"), dict) else data.get("scenario")
+    return resolve_config(profile=str(data["profile"]), scenario=str(scenario), **values)
 
 
 def validate_config(config: ExperimentConfig) -> None:

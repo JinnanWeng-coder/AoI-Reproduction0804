@@ -79,7 +79,9 @@ def main(argv=None) -> int:
     parser.add_argument("--allow-incomplete", action="store_true")
     args = parser.parse_args(argv)
     path = Path(args.path)
-    if (path / "config.resolved.json").exists():
+    if (path / "EVAL_COMPLETE.json").exists():
+        result = audit_eval(path)
+    elif (path / "config.resolved.json").exists():
         result = audit_run(path, require_complete=not args.allow_incomplete)
     else:
         runs = sorted(child for child in path.iterdir() if child.is_dir()) if path.exists() else []
@@ -91,4 +93,3 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

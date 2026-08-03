@@ -18,7 +18,7 @@ from checkpointing import atomic_torch_save, build_payload, capture_rng_state, r
 from Classes.buffer import ReplayBuffer
 from Classes.Environment_Platoon import PaperEnviron
 from Classes.legacy_adapter import LegacyEnviron
-from config import ExperimentConfig, resolve_config, safe_run_dir
+from config import ExperimentConfig, config_from_dict, resolve_config, safe_run_dir
 from global_critic import Global_Critic
 from local_critic import Agent
 from metrics import MetricStore
@@ -215,6 +215,11 @@ def evaluate_from_checkpoint(config: ExperimentConfig, checkpoint: str, eval_epi
     checkpoint_path = Path(checkpoint).expanduser().resolve()
     run_dir = checkpoint_path.parent.parent
     caller_rng = capture_rng_state()
+    checkpoint_preview = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    saved_config = config_from_dict(checkpoint_preview["config"])
+    if config.device != "auto":
+        saved_config.device = config.device
+    config = saved_config
     if eval_seeds is None:
         eval_seeds = [config.seed + 1000, config.seed + 1001]
     eval_id = _eval_id(eval_seeds, eval_episodes)
