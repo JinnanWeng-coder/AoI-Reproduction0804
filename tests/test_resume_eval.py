@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from config import resolve_config
+from checkpointing import capture_rng_state
 from runner import evaluate_from_checkpoint, train
 
 
@@ -49,9 +50,15 @@ def test_frozen_eval_creates_new_artifact_without_overwriting_checkpoint(tmp_pat
     result = train(config)
     checkpoint = Path(result["run_dir"]) / "checkpoints" / "latest.pt"
     before_hash = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    before_rng = capture_rng_state()
     evaluated = evaluate_from_checkpoint(config, str(checkpoint), eval_episodes=2, eval_seeds=[101, 102])
     after_hash = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    after_rng = capture_rng_state()
     assert before_hash == after_hash
+    assert before_rng["python"] == after_rng["python"]
+    assert np.array_equal(before_rng["numpy"][1], after_rng["numpy"][1])
+    assert before_rng["numpy"][0] == after_rng["numpy"][0]
+    assert before_rng["torch"].equal(after_rng["torch"])
     assert evaluated["is_frozen_eval"] is True
     eval_dir = Path(evaluated["eval_dir"])
     summary = json.loads((eval_dir / "summary.json").read_text(encoding="utf-8"))
@@ -59,4 +66,3 @@ def test_frozen_eval_creates_new_artifact_without_overwriting_checkpoint(tmp_pat
     with np.load(eval_dir / "metrics.npz", allow_pickle=False) as arrays:
         assert arrays["aoi_ms"].shape[:2] == (2, 2)
         assert np.all(np.isfinite(arrays["aoi_ms"]))
-
