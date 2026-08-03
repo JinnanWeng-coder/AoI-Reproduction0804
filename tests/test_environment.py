@@ -53,3 +53,16 @@ def test_remaining_time_reaches_zero_at_deadline():
         _obs, _rg, _t1, _t2, terminated, info = env.step(np.zeros((5, 3), dtype=np.float32))
         assert info["remaining_time_ms"].min() == pytest.approx((2 - step) * 1.0)
     assert terminated is True
+
+
+def test_slow_fading_cadence_moves_positions_only_at_configured_boundary():
+    config = _paper_config(slow_update_every_episodes=2)
+    env = PaperEnviron(config)
+    env.reset(17)
+    initial_positions = [tuple(vehicle.position) for vehicle in env.vehicles]
+    initial_pathloss = env.v2v_pathloss.copy()
+    env.reset_episode(1)
+    assert [tuple(vehicle.position) for vehicle in env.vehicles] == initial_positions
+    np.testing.assert_array_equal(env.v2v_pathloss, initial_pathloss)
+    env.reset_episode(2)
+    assert [tuple(vehicle.position) for vehicle in env.vehicles] != initial_positions

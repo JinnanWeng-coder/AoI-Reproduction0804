@@ -163,6 +163,33 @@ class PaperEnviron:
         fading_i = np.abs(self.rng.normal(0, 1, (len(self.vehicles), self.n_rb)) + 1j * self.rng.normal(0, 1, (len(self.vehicles), self.n_rb))) / math.sqrt(2)
         self.v2i_channels_fast = np.repeat(self.v2i_channels_abs[:, None], self.n_rb, axis=1) - 20 * np.log10(fading_i)
 
+    def _renew_positions(self):
+        """Advance each platoon by one slow-fading interval on its lane."""
+        for platoon in range(self.n_platoon):
+            leader_index = platoon * self.size_platoon
+            leader = self.vehicles[leader_index]
+            distance = float(leader.velocity * self.time_slow)
+            x, y = leader.position
+            if leader.direction == "u":
+                y = (y + distance) % self.height
+            elif leader.direction == "d":
+                y = (y - distance) % self.height
+            elif leader.direction == "l":
+                x = (x - distance) % self.width
+            else:
+                x = (x + distance) % self.width
+            leader.position = [x, y]
+            for follower in range(1, self.size_platoon):
+                if leader.direction == "u":
+                    position = [x, (y - follower * self.config.scenario.gap_m) % self.height]
+                elif leader.direction == "d":
+                    position = [x, (y + follower * self.config.scenario.gap_m) % self.height]
+                elif leader.direction == "l":
+                    position = [(x + follower * self.config.scenario.gap_m) % self.width, y]
+                else:
+                    position = [(x - follower * self.config.scenario.gap_m) % self.width, y]
+                self.vehicles[leader_index + follower].position = position
+
     def _build_episode_world(self):
         self._build_vehicles()
         self._renew_channel()
@@ -193,6 +220,7 @@ class PaperEnviron:
             self.aoi.fill(100.0)
             self.previous_interference.fill(self.sig2_db)
             if episode_index % self.config.slow_update_every_episodes == 0:
+                self._renew_positions()
                 self._renew_channel()
             self._renew_fast_fading()
         self.episode_index = episode_index
