@@ -1,0 +1,71 @@
+"""Per-agent actor and two task critics."""
+
+from __future__ import annotations
+
+from typing import Dict
+
+import numpy as np
+import torch
+
+from Classes.networks import ActorNetwork, CriticNetwork
+
+
+class Agent:
+    def __init__(self, config, agent_index: int):
+        self.config = config
+        self.agent_index = int(agent_index)
+        self.device = torch.device(config.device_resolved if hasattr(config, "device_resolved") else config.device)
+        self.actor = ActorNetwork(config.state_dim, config.actor_hidden, config.action_dim, config.actor_lr, self.device)
+        self.target_actor = ActorNetwork(config.state_dim, config.actor_hidden, config.action_dim, config.actor_lr, self.device)
+        self.critic_task1 = CriticNetwork(config.state_dim, config.local_critic_hidden, config.action_dim, config.critic_lr, self.device)
+        self.critic_task2 = CriticNetwork(config.state_dim, config.local_critic_hidden, config.action_dim, config.critic_lr, self.device)
+        self.target_critic_task1 = CriticNetwork(config.state_dim, config.local_critic_hidden, config.action_dim, config.critic_lr, self.device)
+        self.target_critic_task2 = CriticNetwork(config.state_dim, config.local_critic_hidden, config.action_dim, config.critic_lr, self.device)
+        self.update_network_parameters(tau=1.0)
+
+    def choose_action(self, observation, explore=True):
+        was_training = self.actor.training
+        self.actor.eval()
+        state = torch.as_tensor(np.asarray(observation, dtype=np.float32), dtype=torch.float32, device=self.device).unsqueeze(0)
+        with torch.no_grad():
+            action = self.actor(state).squeeze(0).cpu().numpy()
+        if explore and self.config.exploration_noise > 0:
+            action = action + np.random.normal(0.0, self.config.exploration_noise, size=self.config.action_dim)
+        if was_training:
+            self.actor.train()
+        return np.clip(action, -self.config.target_action_clip, self.config.target_action_clip).astype(np.float32)
+
+    def update_network_parameters(self, tau=None):
+        tau = self.config.tau if tau is None else float(tau)
+        for target, source in (
+            (self.target_actor, self.actor),
+            (self.target_critic_task1, self.critic_task1),
+            (self.target_critic_task2, self.critic_task2),
+        ):
+            for target_param, source_param in zip(target.parameters(), source.parameters()):
+                target_param.data.copy_(tau * source_param.data + (1.0 - tau) * target_param.data)
+
+    def state_dict_full(self) -> Dict[str, object]:
+        return {
+            "actor": self.actor.state_dict(),
+            "target_actor": self.target_actor.state_dict(),
+            "critic_task1": self.critic_task1.state_dict(),
+            "critic_task2": self.critic_task2.state_dict(),
+            "target_critic_task1": self.target_critic_task1.state_dict(),
+            "target_critic_task2": self.target_critic_task2.state_dict(),
+            "actor_optimizer": self.actor.optimizer.state_dict(),
+            "critic_task1_optimizer": self.critic_task1.optimizer.state_dict(),
+            "critic_task2_optimizer": self.critic_task2.optimizer.state_dict(),
+        }
+
+    def load_state_dict_full(self, state):
+        self.actor.load_state_dict(state["actor"])
+        self.target_actor.load_state_dict(state["target_actor"])
+        self.critic_task1.load_state_dict(state["critic_task1"])
+        self.critic_task2.load_state_dict(state["critic_task2"])
+        self.target_critic_task1.load_state_dict(state["target_critic_task1"])
+        self.target_critic_task2.load_state_dict(state["target_critic_task2"])
+        self.actor.optimizer.load_state_dict(state["actor_optimizer"])
+        self.critic_task1.optimizer.load_state_dict(state["critic_task1_optimizer"])
+        self.critic_task2.optimizer.load_state_dict(state["critic_task2_optimizer"])
+
