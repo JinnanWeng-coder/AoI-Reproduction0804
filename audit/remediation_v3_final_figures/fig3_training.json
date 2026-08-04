@@ -1,0 +1,16 @@
+{
+  "agent_count": 5,
+  "aggregation": "mean_and_CI_across_training_seeds_preserving_agent_axis",
+  "figure": "Fig.3",
+  "raw_curve_preserved": true,
+  "raw_data": "fig3_training.npz",
+  "runs": [
+    "E:\\Research\\Article_Reimplementation\\reproduction\\1-Modified_MADDPG_with_TDec\\scratch\\remediation-v3-final-cpu"
+  ],
+  "scenario": "p05_n04_g25",
+  "smoothed_curve_preserved": true,
+  "smoothing_window": 2,
+  "training_seeds": [
+    62
+  ]
+}

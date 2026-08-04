@@ -1,0 +1,51 @@
+{
+  "algorithm": "Modified_MADDPG_with_TDec",
+  "created_at_utc": "2026-08-04T04:54:16.899130+00:00",
+  "entries": [
+    {
+      "algorithm": "Modified_MADDPG_with_TDec",
+      "checkpoint_path": "../scratch/remediation-v3-final-cpu/checkpoints/latest.pt",
+      "checkpoint_sha256": "fd0e5df5bbdb639e1aa2c6699ba4dd29b85084ccccf364a6452bf01f5b2be52b",
+      "config_hash": "14d65dd6a708940c8c6e4989bf0c965e9d8dfa0877e3b504967b94aa5a0d04b1",
+      "eval_id": "eval_final_test_ckptfd0e5df5bbdb_sequential_warm_warm5_s101-102_ep2_noise0p0",
+      "eval_path": "../scratch/remediation-v3-final-cpu/eval/eval_final_test_ckptfd0e5df5bbdb_sequential_warm_warm5_s101-102_ep2_noise0p0",
+      "eval_protocol": "sequential_warm",
+      "eval_purpose": "final_test",
+      "is_formal_result": false,
+      "profile": "paper_faithful",
+      "run_path": "../scratch/remediation-v3-final-cpu",
+      "scenario": "p05_n04_g25",
+      "semantic_version": "paper_faithful_v3",
+      "statistics_schema_version": "eval_seed_cluster_v1",
+      "status": "complete",
+      "training_seed": 62
+    },
+    {
+      "algorithm": "Modified_MADDPG_with_TDec",
+      "checkpoint_path": "../scratch/remediation-v3-final-cpu/checkpoints/latest.pt",
+      "checkpoint_sha256": "fd0e5df5bbdb639e1aa2c6699ba4dd29b85084ccccf364a6452bf01f5b2be52b",
+      "config_hash": "14d65dd6a708940c8c6e4989bf0c965e9d8dfa0877e3b504967b94aa5a0d04b1",
+      "eval_id": "eval_validation_ckptfd0e5df5bbdb_sequential_warm_warm5_s201-202_ep2_noise0p0",
+      "eval_path": "../scratch/remediation-v3-final-cpu/eval/eval_validation_ckptfd0e5df5bbdb_sequential_warm_warm5_s201-202_ep2_noise0p0",
+      "eval_protocol": "sequential_warm",
+      "eval_purpose": "validation",
+      "is_formal_result": false,
+      "profile": "paper_faithful",
+      "run_path": "../scratch/remediation-v3-final-cpu",
+      "scenario": "p05_n04_g25",
+      "semantic_version": "paper_faithful_v3",
+      "statistics_schema_version": "eval_seed_cluster_v1",
+      "status": "complete",
+      "training_seed": 62
+    }
+  ],
+  "path_base": "manifest_parent",
+  "required_baselines": [
+    "Modified_MADDPG",
+    "MADDPG_FDec",
+    "DDPG"
+  ],
+  "root": "../scratch/remediation-v3-final-cpu",
+  "schema_version": 2,
+  "statistics_schema_version": "eval_seed_cluster_v1"
+}

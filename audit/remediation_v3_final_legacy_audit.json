@@ -1,0 +1,121 @@
+{
+  "array_dtypes": {
+    "aoi_ms": "float32",
+    "global_episode_mean": "float32",
+    "global_episode_sum": "float32",
+    "global_step": "float32",
+    "immediate_reward_proxy": "float32",
+    "interference_db": "float32",
+    "local_total_episode_mean": "float32",
+    "mode": "float32",
+    "power_dbm": "float32",
+    "rb": "float32",
+    "remaining_demand": "float32",
+    "success": "float32",
+    "success_rate": "float32",
+    "task1_episode_mean": "float32",
+    "task1_step": "float32",
+    "task2_episode_mean": "float32",
+    "task2_step": "float32",
+    "v2i_rate": "float32",
+    "v2v_rate": "float32"
+  },
+  "array_shapes": {
+    "aoi_ms": [
+      4,
+      10,
+      5
+    ],
+    "global_episode_mean": [
+      4
+    ],
+    "global_episode_sum": [
+      4
+    ],
+    "global_step": [
+      4,
+      10
+    ],
+    "immediate_reward_proxy": [
+      4,
+      5
+    ],
+    "interference_db": [
+      4,
+      10,
+      5
+    ],
+    "local_total_episode_mean": [
+      4,
+      5
+    ],
+    "mode": [
+      4,
+      10,
+      5
+    ],
+    "power_dbm": [
+      4,
+      10,
+      5
+    ],
+    "rb": [
+      4,
+      10,
+      5
+    ],
+    "remaining_demand": [
+      4,
+      10,
+      5
+    ],
+    "success": [
+      4,
+      10,
+      5
+    ],
+    "success_rate": [
+      4,
+      10
+    ],
+    "task1_episode_mean": [
+      4,
+      5
+    ],
+    "task1_step": [
+      4,
+      10,
+      5
+    ],
+    "task2_episode_mean": [
+      4,
+      5
+    ],
+    "task2_step": [
+      4,
+      10,
+      5
+    ],
+    "v2i_rate": [
+      4,
+      10,
+      5
+    ],
+    "v2v_rate": [
+      4,
+      10,
+      5
+    ]
+  },
+  "checkpoint_status": {
+    "best.pt": true,
+    "latest.pt": true
+  },
+  "config_hash": "49383e1ae8d2f87afc39da26132bbb9be97f39417e813481c56203cccb39a2e3",
+  "errors": [],
+  "eval_reports": [],
+  "formal_marker": false,
+  "ok": true,
+  "run_dir": "E:\\Research\\Article_Reimplementation\\reproduction\\1-Modified_MADDPG_with_TDec\\scratch\\remediation-v3-final-legacy",
+  "semantic_version": "legacy_release_v1"
+}

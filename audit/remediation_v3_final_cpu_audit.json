@@ -1,0 +1,325 @@
+{
+  "array_dtypes": {
+    "I_mode_db": "float32",
+    "I_v2i_linear": "float32",
+    "I_v2v_linear": "float32",
+    "aoi_ms": "float32",
+    "global_episode_mean": "float32",
+    "global_episode_sum": "float32",
+    "global_step": "float32",
+    "immediate_reward_proxy": "float32",
+    "interference_db": "float32",
+    "interference_linear": "float32",
+    "local_total_episode_mean": "float32",
+    "mode": "float32",
+    "power_dbm": "float32",
+    "rb": "float32",
+    "remaining_demand": "float32",
+    "remaining_time_ms": "float32",
+    "selected_interference_db": "float32",
+    "success": "float32",
+    "task1_episode_mean": "float32",
+    "task1_step": "float32",
+    "task2_episode_mean": "float32",
+    "task2_step": "float32",
+    "v2i_interference_linear": "float32",
+    "v2i_rate": "float32",
+    "v2v_interference_linear": "float32",
+    "v2v_rate": "float32",
+    "v2v_rate_all": "float32"
+  },
+  "array_shapes": {
+    "I_mode_db": [
+      4,
+      10,
+      5,
+      3
+    ],
+    "I_v2i_linear": [
+      4,
+      10,
+      5,
+      3
+    ],
+    "I_v2v_linear": [
+      4,
+      10,
+      5,
+      3,
+      3
+    ],
+    "aoi_ms": [
+      4,
+      10,
+      5
+    ],
+    "global_episode_mean": [
+      4
+    ],
+    "global_episode_sum": [
+      4
+    ],
+    "global_step": [
+      4,
+      10
+    ],
+    "immediate_reward_proxy": [
+      4,
+      5
+    ],
+    "interference_db": [
+      4,
+      10,
+      5,
+      3
+    ],
+    "interference_linear": [
+      4,
+      10,
+      5,
+      3
+    ],
+    "local_total_episode_mean": [
+      4,
+      5
+    ],
+    "mode": [
+      4,
+      10,
+      5
+    ],
+    "power_dbm": [
+      4,
+      10,
+      5
+    ],
+    "rb": [
+      4,
+      10,
+      5
+    ],
+    "remaining_demand": [
+      4,
+      10,
+      5
+    ],
+    "remaining_time_ms": [
+      4,
+      10,
+      5
+    ],
+    "selected_interference_db": [
+      4,
+      10,
+      5
+    ],
+    "success": [
+      4,
+      10,
+      5
+    ],
+    "task1_episode_mean": [
+      4,
+      5
+    ],
+    "task1_step": [
+      4,
+      10,
+      5
+    ],
+    "task2_episode_mean": [
+      4,
+      5
+    ],
+    "task2_step": [
+      4,
+      10,
+      5
+    ],
+    "v2i_interference_linear": [
+      4,
+      10,
+      5,
+      3
+    ],
+    "v2i_rate": [
+      4,
+      10,
+      5
+    ],
+    "v2v_interference_linear": [
+      4,
+      10,
+      5,
+      3,
+      3
+    ],
+    "v2v_rate": [
+      4,
+      10,
+      5
+    ],
+    "v2v_rate_all": [
+      4,
+      10,
+      5,
+      3
+    ]
+  },
+  "checkpoint_status": {
+    "best.pt": true,
+    "latest.pt": true
+  },
+  "config_hash": "14d65dd6a708940c8c6e4989bf0c965e9d8dfa0877e3b504967b94aa5a0d04b1",
+  "errors": [],
+  "eval_reports": [
+    {
+      "array_shapes": {
+        "aoi_ms": [
+          2,
+          2,
+          10,
+          5
+        ],
+        "interference_db": [
+          2,
+          2,
+          10,
+          5,
+          3
+        ],
+        "mode": [
+          2,
+          2,
+          10,
+          5
+        ],
+        "power_dbm": [
+          2,
+          2,
+          10,
+          5
+        ],
+        "rb": [
+          2,
+          2,
+          10,
+          5
+        ],
+        "remaining_demand": [
+          2,
+          2,
+          10,
+          5
+        ],
+        "success": [
+          2,
+          2,
+          10,
+          5
+        ],
+        "v2i_rate": [
+          2,
+          2,
+          10,
+          5
+        ],
+        "v2v_rate": [
+          2,
+          2,
+          10,
+          5
+        ]
+      },
+      "errors": [],
+      "eval_dir": "E:\\Research\\Article_Reimplementation\\reproduction\\1-Modified_MADDPG_with_TDec\\scratch\\remediation-v3-final-cpu\\eval\\eval_final_test_ckptfd0e5df5bbdb_sequential_warm_warm5_s101-102_ep2_noise0p0",
+      "eval_episodes": 2,
+      "eval_id": "eval_final_test_ckptfd0e5df5bbdb_sequential_warm_warm5_s101-102_ep2_noise0p0",
+      "eval_purpose": "final_test",
+      "eval_seeds": [
+        101,
+        102
+      ],
+      "eval_warmup_episodes": 5,
+      "ok": true,
+      "semantic_version": "paper_faithful_v3",
+      "summary_is_formal_result": false
+    },
+    {
+      "array_shapes": {
+        "aoi_ms": [
+          2,
+          2,
+          10,
+          5
+        ],
+        "interference_db": [
+          2,
+          2,
+          10,
+          5,
+          3
+        ],
+        "mode": [
+          2,
+          2,
+          10,
+          5
+        ],
+        "power_dbm": [
+          2,
+          2,
+          10,
+          5
+        ],
+        "rb": [
+          2,
+          2,
+          10,
+          5
+        ],
+        "remaining_demand": [
+          2,
+          2,
+          10,
+          5
+        ],
+        "success": [
+          2,
+          2,
+          10,
+          5
+        ],
+        "v2i_rate": [
+          2,
+          2,
+          10,
+          5
+        ],
+        "v2v_rate": [
+          2,
+          2,
+          10,
+          5
+        ]
+      },
+      "errors": [],
+      "eval_dir": "E:\\Research\\Article_Reimplementation\\reproduction\\1-Modified_MADDPG_with_TDec\\scratch\\remediation-v3-final-cpu\\eval\\eval_validation_ckptfd0e5df5bbdb_sequential_warm_warm5_s201-202_ep2_noise0p0",
+      "eval_episodes": 2,
+      "eval_id": "eval_validation_ckptfd0e5df5bbdb_sequential_warm_warm5_s201-202_ep2_noise0p0",
+      "eval_purpose": "validation",
+      "eval_seeds": [
+        201,
+        202
+      ],
+      "eval_warmup_episodes": 5,
+      "ok": true,
+      "semantic_version": "paper_faithful_v3",
+      "summary_is_formal_result": false
+    }
+  ],
+  "formal_marker": false,
+  "ok": true,
+  "run_dir": "E:\\Research\\Article_Reimplementation\\reproduction\\1-Modified_MADDPG_with_TDec\\scratch\\remediation-v3-final-cpu",
+  "semantic_version": "paper_faithful_v3"
+}
