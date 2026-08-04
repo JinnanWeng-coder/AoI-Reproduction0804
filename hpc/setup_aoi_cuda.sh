@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="${PROJECT_DIR:-/eeedata/sgxyl2/AoI-Reproduction0804}"
-CONDA_ROOT="${CONDA_ROOT:-/share/home/sgxyl2/miniconda3}"
-AOI_ENV_NAME="${AOI_ENV_NAME:-aoi_cuda}"
+AOI_BASE_ROOT="${AOI_BASE_ROOT:-/eeedata/sgxjw2}"
+PROJECT_DIR="${PROJECT_DIR:-$AOI_BASE_ROOT/AoI-Reproduction0804}"
+CONDA_ROOT="${CONDA_ROOT:-$AOI_BASE_ROOT/miniconda3}"
+AOI_ENV_DIR="${AOI_ENV_DIR:-$AOI_BASE_ROOT/conda_envs/aoi_cuda}"
+PYTHON_BIN="$AOI_ENV_DIR/bin/python"
+
+export TMPDIR="$AOI_BASE_ROOT/tmp"
+export PIP_CACHE_DIR="$AOI_BASE_ROOT/cache/pip"
+export CONDA_PKGS_DIRS="$AOI_BASE_ROOT/cache/conda_pkgs"
+export XDG_CACHE_HOME="$AOI_BASE_ROOT/cache/xdg"
+export MPLCONFIGDIR="$AOI_BASE_ROOT/cache/matplotlib"
+mkdir -p "$TMPDIR" "$PIP_CACHE_DIR" "$CONDA_PKGS_DIRS" "$XDG_CACHE_HOME" "$MPLCONFIGDIR" "$(dirname "$AOI_ENV_DIR")"
 
 cd "$PROJECT_DIR"
 
@@ -30,21 +39,20 @@ if ! command -v conda >/dev/null 2>&1; then
   exit 2
 fi
 
-if ! conda run -n "$AOI_ENV_NAME" python --version >/dev/null 2>&1; then
-  conda create -n "$AOI_ENV_NAME" python=3.10.20 -y
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  conda create --prefix "$AOI_ENV_DIR" python=3.10.20 -y
 fi
 
-conda activate "$AOI_ENV_NAME"
-python -m pip install --upgrade pip
-python -m pip install -r requirements.cuda.lock.txt
-python -m pip install \
+"$PYTHON_BIN" -m pip install --upgrade pip
+"$PYTHON_BIN" -m pip install -r requirements.cuda.lock.txt
+"$PYTHON_BIN" -m pip install \
   torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 \
   --index-url https://download.pytorch.org/whl/cu126
-python -m pip check
+"$PYTHON_BIN" -m pip check
 
 test "$(git branch --show-current)" = "main"
 test -z "$(git status --porcelain --untracked-files=all)"
-python -m pytest -q
-python -c 'import torch; print({"torch": torch.__version__, "cuda_runtime": torch.version.cuda, "cuda_visible_on_login": torch.cuda.is_available()})'
+"$PYTHON_BIN" -m pytest -q
+"$PYTHON_BIN" -c 'import torch; print({"torch": torch.__version__, "cuda_runtime": torch.version.cuda, "cuda_visible_on_login": torch.cuda.is_available()})'
 
-echo "Environment '$AOI_ENV_NAME' is ready. CUDA availability is checked again inside the GPU pilot job."
+echo "Environment '$AOI_ENV_DIR' is ready. CUDA availability is checked again inside the GPU pilot job."

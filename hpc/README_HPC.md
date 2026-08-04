@@ -19,9 +19,9 @@ non-overlapping cells; all shards together cover the 48-cell matrix exactly.
 Preferred, if the login node can reach GitHub:
 
 ```bash
-ssh sgxyl2@10.179.1.200
-mkdir -p /eeedata/sgxyl2
-cd /eeedata/sgxyl2
+ssh sgxjw2@10.179.1.200
+mkdir -p /eeedata/sgxjw2
+cd /eeedata/sgxjw2
 git clone --branch main --single-branch \
   https://github.com/JinnanWeng-coder/AoI-Reproduction0804.git
 cd AoI-Reproduction0804
@@ -40,15 +40,19 @@ The Slurm log directory must exist before `sbatch` because Slurm opens its
 output files before the script starts:
 
 ```bash
-mkdir -p /eeedata/sgxyl2/AoI-Reproduction0804-results/slurm_logs
-cd /eeedata/sgxyl2/AoI-Reproduction0804
+mkdir -p /eeedata/sgxjw2/AoI-Reproduction0804-results/slurm_logs
+cd /eeedata/sgxjw2/AoI-Reproduction0804
 bash hpc/setup_aoi_cuda.sh
 ```
 
-The script first uses `/share/home/sgxyl2/miniconda3`. If Conda is absent, let
-Grok inspect `module av` for an Anaconda module or install Miniconda at that
-path, then rerun the setup. The validated environment is Python 3.10.20,
-PyTorch 2.11.0 with CUDA 12.6 wheels, and `requirements.cuda.lock.txt`.
+All user-managed work stays below `/eeedata/sgxjw2`: the default Miniconda
+root is `/eeedata/sgxjw2/miniconda3`, the environment is
+`/eeedata/sgxjw2/conda_envs/aoi_cuda`, and package/cache/temp directories are
+also under that base. If Conda is absent, let Grok inspect `module av` for an
+Anaconda command that can create the prefix environment, or install Miniconda
+at the default root, then rerun setup. The validated environment is Python
+3.10.20, PyTorch 2.11.0 with CUDA 12.6 wheels, and
+`requirements.cuda.lock.txt`.
 
 ## 3. Formal pilot
 
@@ -56,7 +60,7 @@ PyTorch 2.11.0 with CUDA 12.6 wheels, and `requirements.cuda.lock.txt`.
 pilot_job=$(sbatch --parsable hpc/aoi_pilot_1gpu.sbatch)
 echo "$pilot_job"
 squeue -j "$pilot_job"
-tail -f "/eeedata/sgxyl2/AoI-Reproduction0804-results/slurm_logs/aoi_pilot_s02_${pilot_job}.out"
+tail -f "/eeedata/sgxjw2/AoI-Reproduction0804-results/slurm_logs/aoi_pilot_s02_${pilot_job}.out"
 ```
 
 The pilot runs the full paper configuration for scenario `p05_n04_g25`, seed
@@ -65,7 +69,7 @@ finite metrics, learning behavior, GPU/runtime logs, and audit result. Only when
 the pilot is acceptable should Grok create the external approval gate:
 
 ```bash
-touch /eeedata/sgxyl2/AoI-Reproduction0804-results/handoff/PILOT_APPROVED
+touch /eeedata/sgxjw2/AoI-Reproduction0804-results/handoff/PILOT_APPROVED
 ```
 
 ## 4. Full 8-GPU training
@@ -91,7 +95,7 @@ After Grok confirms all eight shard reports and all 48 audits are complete,
 finite, and provenance-clean:
 
 ```bash
-touch /eeedata/sgxyl2/AoI-Reproduction0804-results/handoff/TRAIN_APPROVED
+touch /eeedata/sgxjw2/AoI-Reproduction0804-results/handoff/TRAIN_APPROVED
 ```
 
 ## 5. Validation and audit
@@ -116,7 +120,7 @@ cannot establish the paper's four-algorithm comparison conclusions.
 sinfo
 squeue -u "$USER"
 sacct -j JOB_ID --format=JobID,JobName,State,Elapsed,ExitCode,AllocTRES%80
-tail -f /eeedata/sgxyl2/AoI-Reproduction0804-results/slurm_logs/JOB_LOG.out
+tail -f /eeedata/sgxjw2/AoI-Reproduction0804-results/slurm_logs/JOB_LOG.out
 scancel JOB_ID
 ```
 

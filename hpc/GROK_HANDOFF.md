@@ -1,7 +1,7 @@
 # Cursor/Grok handoff prompt
 
 Paste the following into Cursor after connecting it to the HPC through Remote
-SSH and opening `/eeedata/sgxyl2/AoI-Reproduction0804`.
+SSH and opening `/eeedata/sgxjw2/AoI-Reproduction0804`.
 
 ```text
 You are the autonomous operator for the AoI-V2X Modified MADDPG (Algorithm 2)
@@ -22,19 +22,22 @@ Authoritative files:
 - ENVIRONMENT_INSTALL.md
 
 Expected defaults inferred from the supplied school scripts:
-- user: sgxyl2
+- user: sgxjw2
 - partition: Q10
 - GPU resource: gpu:l20
-- checkout: /eeedata/sgxyl2/AoI-Reproduction0804
-- environment root: /share/home/sgxyl2/miniconda3
-- results: /eeedata/sgxyl2/AoI-Reproduction0804-results
+- mandatory work root: /eeedata/sgxjw2
+- checkout: /eeedata/sgxjw2/AoI-Reproduction0804
+- Miniconda root: /eeedata/sgxjw2/miniconda3
+- environment prefix: /eeedata/sgxjw2/conda_envs/aoi_cuda
+- results: /eeedata/sgxjw2/AoI-Reproduction0804-results
 
 First inspect `whoami`, `sinfo`, `module av`, available storage, the NVIDIA
-driver from a GPU allocation, and the current Git state. If a default path is
-wrong, pass the documented environment-variable override to sbatch rather than
-editing tracked files. Preserve the checkout on branch main with a clean Git
-status. Record the exact commit and never pull, switch branches, or edit tracked
-files once formal artifacts exist.
+driver from a GPU allocation, and the current Git state. Every user-managed
+file, including code, environment, package cache, temporary files, logs,
+results and handoff artifacts, must remain below `/eeedata/sgxjw2`. Do not use
+`/share/home` for this workflow. Preserve the checkout on branch main with a
+clean Git status. Record the exact commit and never pull, switch branches, or
+edit tracked files once formal artifacts exist.
 
 Execute these gates in order:
 
@@ -75,6 +78,7 @@ Hard constraints:
 - Never change episodes=500, steps=100, network sizes, batch size, replay,
   evaluation seeds, checkpoint cadence, device identity or paper profile.
 - Never write result artifacts into the Git checkout.
+- Never place user-managed workflow files outside `/eeedata/sgxjw2`.
 - Never claim the entire paper is reproduced: this repository covers Algorithm 2 only,
   and the other three comparison algorithms are absent.
 

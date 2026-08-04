@@ -51,7 +51,17 @@ def test_environment_and_audit_assets_are_pinned_and_external():
     assert "git status --porcelain --untracked-files=all" in setup
     assert "Expected exactly 48 formal run directories" in audit
     assert "AOI_AUDIT_SCOPE" in audit
-    assert "/eeedata/sgxyl2/AoI-Reproduction0804-results" in audit
+    assert "/eeedata/sgxjw2/AoI-Reproduction0804-results" in audit
+    for name in (
+        "setup_aoi_cuda.sh",
+        "aoi_pilot_1gpu.sbatch",
+        "aoi_matrix_8gpu.sbatch",
+        "aoi_audit_cpu.sbatch",
+    ):
+        text = _read(name)
+        assert "sgxyl2" not in text
+        assert "/share/home" not in text
+        assert "/eeedata/sgxjw2" in text
 
 
 def test_grok_handoff_contains_non_destructive_scientific_gates():

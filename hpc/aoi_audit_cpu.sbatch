@@ -5,15 +5,16 @@
 #SBATCH -n 1
 #SBATCH --cpus-per-task=8
 #SBATCH --time=12:00:00
-#SBATCH -o /eeedata/sgxyl2/AoI-Reproduction0804-results/slurm_logs/%x_%j.out
-#SBATCH -e /eeedata/sgxyl2/AoI-Reproduction0804-results/slurm_logs/%x_%j.err
+#SBATCH -o /eeedata/sgxjw2/AoI-Reproduction0804-results/slurm_logs/%x_%j.out
+#SBATCH -e /eeedata/sgxjw2/AoI-Reproduction0804-results/slurm_logs/%x_%j.err
 
 set -euo pipefail
 
-PROJECT_DIR="${PROJECT_DIR:-/eeedata/sgxyl2/AoI-Reproduction0804}"
-CONDA_ROOT="${CONDA_ROOT:-/share/home/sgxyl2/miniconda3}"
-AOI_ENV_NAME="${AOI_ENV_NAME:-aoi_cuda}"
-RESULT_ROOT="${AOI_RESULT_ROOT:-/eeedata/sgxyl2/AoI-Reproduction0804-results}"
+AOI_BASE_ROOT="${AOI_BASE_ROOT:-/eeedata/sgxjw2}"
+PROJECT_DIR="${PROJECT_DIR:-$AOI_BASE_ROOT/AoI-Reproduction0804}"
+AOI_ENV_DIR="${AOI_ENV_DIR:-$AOI_BASE_ROOT/conda_envs/aoi_cuda}"
+PYTHON_BIN="$AOI_ENV_DIR/bin/python"
+RESULT_ROOT="${AOI_RESULT_ROOT:-$AOI_BASE_ROOT/AoI-Reproduction0804-results}"
 RUN_ROOT="$RESULT_ROOT/runs"
 HANDOFF_ROOT="$RESULT_ROOT/handoff"
 AUDIT_SCOPE="${AOI_AUDIT_SCOPE:-train}"
@@ -26,18 +27,23 @@ case "$AUDIT_SCOPE" in
     ;;
 esac
 
-# shellcheck disable=SC1091
-source "$CONDA_ROOT/etc/profile.d/conda.sh"
-conda activate "$AOI_ENV_NAME"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "Python environment is missing: $PYTHON_BIN" >&2
+  exit 2
+fi
 cd "$PROJECT_DIR"
 export PYTHONPATH="$PROJECT_DIR:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
+export TMPDIR="$RESULT_ROOT/tmp"
+export XDG_CACHE_HOME="$RESULT_ROOT/cache/xdg"
+export MPLCONFIGDIR="$RESULT_ROOT/cache/matplotlib"
+export PYTHONPYCACHEPREFIX="$RESULT_ROOT/cache/pycache/audit_${SLURM_JOB_ID}"
 
 test "$(git branch --show-current)" = "main"
 test -z "$(git status --porcelain --untracked-files=all)"
 
 AUDIT_ROOT="$HANDOFF_ROOT/audits/${AUDIT_SCOPE}_job${SLURM_JOB_ID}"
-mkdir -p "$AUDIT_ROOT"
+mkdir -p "$AUDIT_ROOT" "$TMPDIR" "$XDG_CACHE_HOME" "$MPLCONFIGDIR" "$PYTHONPYCACHEPREFIX"
 mapfile -t run_dirs < <(find "$RUN_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'paper_faithful_*_seed0[2-7]' -print | sort)
 if [[ ${#run_dirs[@]} -ne 48 ]]; then
   echo "Expected exactly 48 formal run directories, found ${#run_dirs[@]}." >&2
@@ -47,10 +53,10 @@ fi
 for run_dir in "${run_dirs[@]}"; do
   run_name="$(basename "$run_dir")"
   if [[ "$AUDIT_SCOPE" == "validation" ]]; then
-    python analysis/audit_results.py "$run_dir" --scope validation --require-eval \
+    "$PYTHON_BIN" analysis/audit_results.py "$run_dir" --scope validation --require-eval \
       > "$AUDIT_ROOT/${run_name}.json"
   else
-    python analysis/audit_results.py "$run_dir" --scope train \
+    "$PYTHON_BIN" analysis/audit_results.py "$run_dir" --scope train \
       > "$AUDIT_ROOT/${run_name}.json"
   fi
 done
