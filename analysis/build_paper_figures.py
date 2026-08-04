@@ -10,13 +10,17 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 
 
 CURRENT_ALGORITHM = "Modified_MADDPG_with_TDec"
 REQUIRED_BASELINES = ("Modified_MADDPG", "MADDPG_FDec", "DDPG")
+FIG3_SCENARIO = "p05_n06_g25"
+FIG5_GAP_SCENARIOS = ("p05_n04_g05", "p05_n04_g15", "p05_n04_g25", "p05_n04_g35")
+FIG5_SIZE_SCENARIOS = ("p05_n04_g25", "p05_n06_g25", "p05_n08_g25", "p05_n10_g25")
+FORMAL_TRAINING_SEEDS = tuple(range(2, 8))
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -116,6 +120,8 @@ def plot_fig3(manifest_or_root: Path, output: Path, scenario: str = "p05_n06_g25
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    if scenario != FIG3_SCENARIO:
+        raise ValueError(f"Fig.3 is fixed to scenario {FIG3_SCENARIO}")
     entries = _entries(manifest_or_root)
     runs = _unique_run_entries(entries, scenario=scenario, algorithm=CURRENT_ALGORITHM)
     if not runs:
@@ -125,8 +131,11 @@ def plot_fig3(manifest_or_root: Path, output: Path, scenario: str = "p05_n06_g25
         with np.load(Path(entry["run_path"]) / "train_metrics.npz", allow_pickle=False) as metrics:
             task1.append(np.asarray(metrics["task1_episode_mean"], dtype=np.float64))
             task2.append(np.asarray(metrics["task2_episode_mean"], dtype=np.float64))
-        if entry.get("training_seed") is not None:
-            training_seeds.append(int(entry["training_seed"]))
+        if entry.get("training_seed") is None:
+            raise ValueError("Fig.3 requires training_seed in every entry")
+        training_seeds.append(int(entry["training_seed"]))
+    if len(training_seeds) != len(set(training_seeds)):
+        raise ValueError("Fig.3 duplicate training seed")
     task1_stack = np.stack(task1)
     task2_stack = np.stack(task2)
     task1_mean = task1_stack.mean(axis=0)
@@ -144,6 +153,9 @@ def plot_fig3(manifest_or_root: Path, output: Path, scenario: str = "p05_n06_g25
     for agent in range(task1_mean.shape[1]):
         axis.plot(task1_smoothed[:, agent], label=f"agent{agent + 1} task1")
         axis.plot(task2_smoothed[:, agent], linestyle="--", label=f"agent{agent + 1} task2")
+        episodes = np.arange(task1_mean.shape[0])
+        axis.fill_between(episodes, task1_smoothed[:, agent] - task1_ci[:, agent], task1_smoothed[:, agent] + task1_ci[:, agent], alpha=0.08)
+        axis.fill_between(episodes, task2_smoothed[:, agent] - task2_ci[:, agent], task2_smoothed[:, agent] + task2_ci[:, agent], alpha=0.08)
     axis.set_xlabel("episode")
     axis.set_ylabel("episode mean reward")
     axis.set_title(f"Fig. 3 - {scenario}")
@@ -162,6 +174,8 @@ def plot_fig3(manifest_or_root: Path, output: Path, scenario: str = "p05_n06_g25
         task2_mean=task2_mean,
         task1_ci95=task1_ci,
         task2_ci95=task2_ci,
+        task1_sd=task1_sd,
+        task2_sd=task2_sd,
         task1_smoothed=task1_smoothed,
         task2_smoothed=task2_smoothed,
     )
@@ -186,6 +200,7 @@ def plot_fig4(
     scenario: str = "p05_n04_g05",
     required_baselines: Sequence[str] = REQUIRED_BASELINES,
     allow_incomplete: bool = False,
+    expected_training_seeds: Optional[Sequence[int]] = None,
 ) -> Path:
     import matplotlib
 
@@ -222,38 +237,66 @@ def plot_fig4(
     if not current_runs:
         raise FileNotFoundError(f"no current-algorithm runs for Fig.4 scenario {scenario}")
 
-    def _curve(entry):
+    expected_training_seeds = tuple(sorted({int(seed) for seed in (FORMAL_TRAINING_SEEDS if expected_training_seeds is None else expected_training_seeds)}))
+    observed_training_seeds = []
+    for entry in current_runs:
+        seed = entry.get("training_seed")
+        if seed is None:
+            raise ValueError("Fig.4 requires training_seed in every current-algorithm run")
+        observed_training_seeds.append(int(seed))
+    if len(observed_training_seeds) != len(set(observed_training_seeds)):
+        raise ValueError("Fig.4 duplicate training seed")
+    missing_training_seeds = [seed for seed in expected_training_seeds if seed not in observed_training_seeds]
+    if missing_training_seeds and not allow_incomplete:
+        raise RuntimeError("Fig.4 training-seed grid is incomplete: " + ", ".join(map(str, missing_training_seeds)))
+
+    def _metric(entry, key, fallback=None):
         with np.load(Path(entry["run_path"]) / "train_metrics.npz", allow_pickle=False) as metrics:
-            algorithm = str(entry.get("algorithm"))
-            if algorithm == CURRENT_ALGORITHM:
-                key = "local_total_episode_mean"
-            else:
-                key = "reward_episode_mean" if "reward_episode_mean" in metrics.files else "global_episode_mean"
-            if key not in metrics.files:
-                raise ValueError(f"missing reward curve {key} for {algorithm}")
-            value = np.asarray(metrics[key])
+            selected = key if key in metrics.files else fallback
+            if selected is None or selected not in metrics.files:
+                raise ValueError(f"missing training metric {key} for {entry.get('algorithm')}")
+            value = np.asarray(metrics[selected], dtype=np.float64)
             return value.mean(axis=1) if value.ndim > 1 else value
 
-    curves = {CURRENT_ALGORITHM: np.mean(np.stack([_curve(entry) for entry in current_runs]), axis=0)}
+    current_metrics = {
+        "task1": np.mean(np.stack([_metric(entry, "task1_episode_mean") for entry in current_runs]), axis=0),
+        "task2": np.mean(np.stack([_metric(entry, "task2_episode_mean") for entry in current_runs]), axis=0),
+        "global": np.mean(np.stack([_metric(entry, "global_episode_mean") for entry in current_runs]), axis=0),
+        "combined": np.mean(np.stack([_metric(entry, "local_total_episode_mean") for entry in current_runs]), axis=0),
+        "objective_proxy": np.mean(np.stack([_metric(entry, "immediate_reward_proxy") for entry in current_runs]), axis=0),
+    }
+    curves = {CURRENT_ALGORITHM: current_metrics["combined"]}
     for algorithm in sorted(available):
         baseline_runs = _unique_run_entries(entries, scenario=scenario, algorithm=algorithm)
         if baseline_runs:
-            curves[algorithm] = np.mean(np.stack([_curve(entry) for entry in baseline_runs]), axis=0)
-    partial = bool(missing)
+            curves[algorithm] = np.mean(np.stack([_metric(entry, "reward_episode_mean", "global_episode_mean") for entry in baseline_runs]), axis=0)
+    partial = bool(missing or missing_training_seeds)
     if partial and allow_incomplete and "PARTIAL" not in output.stem:
         output = output.with_name(output.stem + "_PARTIAL" + output.suffix)
     output.parent.mkdir(parents=True, exist_ok=True)
-    figure, axis = plt.subplots(figsize=(8, 4.5))
-    for algorithm in sorted(curves):
-        axis.plot(curves[algorithm], label=algorithm)
-    axis.set_xlabel("episode")
-    axis.set_ylabel("reward curve")
-    axis.set_title(f"Fig. 4 {'PARTIAL ' if partial else ''}- {scenario}")
-    axis.grid(alpha=0.25)
-    axis.legend(fontsize=8)
+    figure, axes = plt.subplots(2, 2, figsize=(10, 7))
+    panels = ((axes[0, 0], "task1", "task1 reward"), (axes[0, 1], "task2", "task2 reward"), (axes[1, 0], "global", "global reward"), (axes[1, 1], "combined", "combined reward"))
+    for axis, key, ylabel in panels:
+        axis.plot(current_metrics[key], label=CURRENT_ALGORITHM)
+        if key == "combined":
+            for algorithm in sorted(available):
+                axis.plot(curves[algorithm], label=algorithm)
+        axis.set_xlabel("episode")
+        axis.set_ylabel(ylabel)
+        axis.grid(alpha=0.25)
+        axis.legend(fontsize=7)
+    figure.suptitle(f"Fig. 4 {'PARTIAL ' if partial else ''}- {scenario}")
     figure.tight_layout()
     figure.savefig(output, dpi=180)
     plt.close(figure)
+    np.savez_compressed(
+        output.with_suffix(".npz"),
+        task1=current_metrics["task1"],
+        task2=current_metrics["task2"],
+        global_reward=current_metrics["global"],
+        combined=current_metrics["combined"],
+        training_objective_proxy=current_metrics["objective_proxy"],
+    )
     _write_sidecar(output, {
         "figure": "Fig.4",
         "scenario": scenario,
@@ -263,7 +306,12 @@ def plot_fig4(
         "status": "INCOMPLETE_BASELINES" if partial else "complete",
         "partial": partial,
         "curves": sorted(curves),
-        "current_algorithm_metrics": ["local_total_episode_mean", "global_episode_mean", "immediate_reward_proxy"],
+        "training_seeds": observed_training_seeds,
+        "expected_training_seeds": list(expected_training_seeds),
+        "missing_training_seeds": missing_training_seeds,
+        "current_algorithm_metrics": ["task1_episode_mean", "task2_episode_mean", "global_episode_mean", "local_total_episode_mean", "immediate_reward_proxy"],
+        "saved_metric_artifact": output.with_suffix(".npz").name,
+        "drawn_panels": ["task1", "task2", "global", "combined"],
     })
     return output
 
@@ -286,7 +334,9 @@ def plot_fig5(
     output: Path,
     x_field: str = "gap_m",
     required_algorithms: Sequence[str] = (CURRENT_ALGORITHM,) + REQUIRED_BASELINES,
-    allow_incomplete: bool = True,
+    allow_incomplete: bool = False,
+    eval_purpose: Optional[str] = None,
+    expected_training_seeds: Optional[Sequence[int]] = None,
 ) -> Path:
     import matplotlib
 
@@ -295,50 +345,109 @@ def plot_fig5(
 
     if x_field not in {"gap_m", "platoon_size"}:
         raise ValueError("Fig.5 x_field must be gap_m or platoon_size")
+    if eval_purpose not in {"validation", "final_test"}:
+        raise ValueError("Fig.5 requires an explicit eval_purpose")
+    if expected_training_seeds is None:
+        expected_training_seeds = FORMAL_TRAINING_SEEDS
+    expected_training_seeds = tuple(sorted({int(seed) for seed in expected_training_seeds}))
+    if not expected_training_seeds:
+        raise ValueError("Fig.5 expected_training_seeds must be non-empty")
     entries = _entries(manifest_or_root)
     required = set(required_algorithms)
+    expected_scenarios = FIG5_GAP_SCENARIOS if x_field == "gap_m" else FIG5_SIZE_SCENARIOS
+    expected_algorithm_set = {CURRENT_ALGORITHM} if eval_purpose == "validation" else required
     rows: Dict[str, Dict[float, List[float]]] = {}
     success_rows: Dict[str, Dict[float, List[float]]] = {}
     used = set()
     identities = set()
     available_algorithms = set()
-    for entry in entries:
+    observed_purposes = set()
+    candidate_entries = [
+        entry for entry in entries
+        if str(entry.get("algorithm")) in required
+        and entry.get("profile", "paper_faithful") in {None, "paper_faithful"}
+        and entry.get("status") == "complete"
+        and entry.get("eval_path")
+    ]
+    for entry in candidate_entries:
         algorithm = str(entry.get("algorithm"))
-        if algorithm not in required or entry.get("profile", "paper_faithful") not in {None, "paper_faithful"} or entry.get("status") != "complete" or not entry.get("eval_path"):
-            continue
         eval_path = Path(entry["eval_path"]).resolve()
-        if str(eval_path) in used:
-            continue
         summary_path = eval_path / "summary.json"
         run_config_path = Path(entry["run_path"]) / "config.resolved.json"
         if not summary_path.is_file() or not run_config_path.is_file():
-            continue
+            raise ValueError(f"Fig.5 artifact is missing summary/config: {eval_path}")
         summary = _load_json(summary_path)
-        if summary.get("eval_purpose") not in {None, "final_test"}:
-            continue
+        purpose = summary.get("eval_purpose", entry.get("eval_purpose"))
+        if purpose is None:
+            raise ValueError(f"Fig.5 artifact has no eval_purpose: {eval_path}")
+        observed_purposes.add(str(purpose))
+        if purpose != eval_purpose:
+            raise ValueError(f"Fig.5 mixed/mismatched eval purpose: expected {eval_purpose}, got {purpose}")
+        if summary.get("scope") != ("validation" if eval_purpose == "validation" else "final_release"):
+            raise ValueError(f"Fig.5 scope mismatch for {eval_path}")
+        if summary.get("is_formal_result") is not (False if eval_purpose == "validation" else True):
+            raise ValueError(f"Fig.5 formal-result marker mismatch for {eval_path}")
+        if eval_path.as_posix() in used:
+            raise ValueError(f"Fig.5 duplicate eval artifact: {eval_path}")
         config = _load_json(run_config_path)
         scenario = config.get("scenario", {})
-        value = float(scenario.get(x_field))
+        scenario_id = scenario.get("id")
+        if scenario_id not in expected_scenarios:
+            raise ValueError(f"Fig.5 scenario is outside the controlled grid: {scenario_id}")
+        if x_field == "gap_m":
+            expected_gap = float(scenario_id.split("_g", 1)[1])
+            if int(scenario.get("number_platoons", -1)) != 5 or int(scenario.get("platoon_size", -1)) != 4 or float(scenario.get("gap_m", -1)) != expected_gap:
+                raise ValueError(f"Fig.5 gap scenario configuration mismatch: {scenario_id}")
+        else:
+            expected_size = int(scenario_id.split("_n", 1)[1].split("_g", 1)[0])
+            if int(scenario.get("number_platoons", -1)) != 5 or int(scenario.get("platoon_size", -1)) != expected_size or float(scenario.get("gap_m", -1)) != 25.0:
+                raise ValueError(f"Fig.5 size scenario configuration mismatch: {scenario_id}")
+        if algorithm not in expected_algorithm_set:
+            raise ValueError(f"Fig.5 {eval_purpose} artifacts contain an unexpected algorithm: {algorithm}")
         training_seed = entry.get("training_seed", config.get("seed"))
-        identity = (algorithm, scenario.get("id"), int(training_seed), summary.get("eval_purpose", "final_test"))
+        if training_seed is None:
+            raise ValueError(f"Fig.5 requires training_seed: {eval_path}")
+        training_seed = int(training_seed)
+        if training_seed not in expected_training_seeds:
+            raise ValueError(f"Fig.5 training seed {training_seed} is outside expected set {expected_training_seeds}")
+        identity = (algorithm, scenario_id, training_seed, str(purpose))
         if identity in identities:
             raise ValueError(f"duplicate training-seed eval artifact: {identity}")
         identities.add(identity)
-        used.add(str(eval_path))
+        used.add(eval_path.as_posix())
         available_algorithms.add(algorithm)
         aoi_values = summary.get("mean_AoI_ms_per_seed", [])
         success_values = summary.get("CAM_success_probability_per_seed", [])
+        if not aoi_values or not success_values:
+            raise ValueError(f"Fig.5 artifact has no per-eval-seed statistics: {eval_path}")
         aoi_value = summary.get("mean_AoI_ms", float(np.mean(aoi_values)))
         success_value = summary.get("CAM_success_probability", float(np.mean(success_values)))
-        rows.setdefault(algorithm, {}).setdefault(value, []).append(float(aoi_value))
-        success_rows.setdefault(algorithm, {}).setdefault(value, []).append(float(success_value))
+        rows.setdefault(algorithm, {}).setdefault(float(scenario.get(x_field)), []).append(float(aoi_value))
+        success_rows.setdefault(algorithm, {}).setdefault(float(scenario.get(x_field)), []).append(float(success_value))
+    if observed_purposes and observed_purposes != {eval_purpose}:
+        raise ValueError(f"Fig.5 mixed eval purposes: {sorted(observed_purposes)}")
     if not rows:
         raise FileNotFoundError("no complete frozen-eval artifacts for Fig.5")
 
     missing_algorithms = [algorithm for algorithm in required_algorithms if algorithm not in available_algorithms]
-    partial = bool(missing_algorithms)
-    if partial and not allow_incomplete:
-        raise RuntimeError("Fig.5 algorithms are incomplete: " + ", ".join(missing_algorithms))
+    expected_cells = [
+        (algorithm, scenario_id, seed)
+        for algorithm in sorted(expected_algorithm_set)
+        for scenario_id in expected_scenarios
+        for seed in expected_training_seeds
+    ]
+    observed_cells = {
+        (algorithm, scenario_id, seed)
+        for algorithm, scenario_id, seed, _purpose in identities
+    }
+    missing_cells = [
+        {"algorithm": algorithm, "scenario": scenario_id, "training_seed": seed}
+        for algorithm, scenario_id, seed in expected_cells
+        if (algorithm, scenario_id, seed) not in observed_cells
+    ]
+    partial = bool(missing_algorithms or missing_cells)
+    if partial and not allow_incomplete and eval_purpose != "validation":
+        raise RuntimeError("Fig.5 grid is incomplete; see missing cells in the sidecar")
     table = []
     for algorithm in sorted(rows):
         for value in sorted(rows[algorithm]):
@@ -368,7 +477,7 @@ def plot_fig5(
             axis.set_ylabel(label)
             axis.grid(alpha=0.25)
             axis.legend(fontsize=7)
-    figure.suptitle(f"Fig. 5 {'PARTIAL ' if partial else ''}- frozen evaluation sweep")
+    figure.suptitle(f"Fig. 5 {'PARTIAL ' if partial else ''}- {eval_purpose} frozen evaluation sweep")
     figure.tight_layout()
     figure.savefig(output, dpi=180)
     plt.close(figure)
@@ -378,8 +487,12 @@ def plot_fig5(
         "rows": table,
         "reused_eval_artifacts": sorted(used),
         "required_algorithms": list(required_algorithms),
+        "eval_purpose": eval_purpose,
+        "expected_training_seeds": list(expected_training_seeds),
+        "scenario_grid": list(expected_scenarios),
         "available_algorithms": sorted(available_algorithms),
         "missing_algorithms": missing_algorithms,
+        "missing_cells": missing_cells,
         "partial": partial,
         "ci_independent_unit": "training_seed",
         "eval_seeds_are_clustered_within_training_seed": True,
@@ -395,11 +508,16 @@ def main(argv=None):
     parser.add_argument("--scenario", action="append", default=None)
     parser.add_argument("--smooth-window", type=int, default=1)
     parser.add_argument("--fig5-x", choices=("gap_m", "platoon_size"), default="gap_m")
+    parser.add_argument("--eval-purpose", choices=("validation", "final_test"), default=None)
+    parser.add_argument("--expected-training-seeds", default=None, help="comma-separated independent training seeds for Fig.5")
     parser.add_argument("--allow-incomplete-baselines", action="store_true")
     args = parser.parse_args(argv)
     root = Path(args.manifest_or_root).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else (root.parent / "figures" if root.is_file() else root / "figures")
     output_dir.mkdir(parents=True, exist_ok=True)
+    expected_training_seeds = None
+    if args.expected_training_seeds is not None:
+        expected_training_seeds = tuple(int(item.strip()) for item in args.expected_training_seeds.split(",") if item.strip())
     scenarios = args.scenario or (["p05_n04_g05", "p07_n04_g05"] if args.figure == "4" else ["p05_n06_g25"])
     results = []
     if args.figure in {"3", "all"}:
@@ -410,9 +528,16 @@ def main(argv=None):
             suffix = "" if len(fig4_scenarios) == 1 else f"_{scenario}"
             results.append(str(plot_fig4(root, output_dir / f"fig4_global_combined{suffix}.png", scenario, allow_incomplete=args.allow_incomplete_baselines)))
     if args.figure in {"5", "all"}:
-        # Fig.5 may be generated as an explicitly labelled current-algorithm
-        # partial while the three baselines are still unavailable.
-        results.append(str(plot_fig5(root, output_dir / "fig5_sweep.png", args.fig5_x, allow_incomplete=True)))
+        if args.eval_purpose is None:
+            parser.error("--eval-purpose is required for Fig.5")
+        results.append(str(plot_fig5(
+            root,
+            output_dir / "fig5_sweep.png",
+            args.fig5_x,
+            allow_incomplete=args.eval_purpose == "validation",
+            eval_purpose=args.eval_purpose,
+            expected_training_seeds=expected_training_seeds,
+        )))
     print(json.dumps({"outputs": results}, indent=2))
     return 0
 

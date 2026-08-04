@@ -13,6 +13,10 @@ from typing import Any, Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_BASELINES = ["Modified_MADDPG", "MADDPG_FDec", "DDPG"]
+EXPECTED_SCENARIOS = [
+    "p05_n04_g05", "p07_n04_g05", "p05_n04_g15", "p05_n04_g25",
+    "p05_n04_g35", "p05_n06_g25", "p05_n08_g25", "p05_n10_g25",
+]
 
 
 def _sha256(path: Path) -> str:
@@ -67,6 +71,8 @@ def build_study_manifest(run_root: Path, output: Path, algorithm: str = "Modifie
             entries.append({
                 "algorithm": algorithm,
                 "semantic_version": config.get("semantic_version"),
+                "mobility_revision": config.get("mobility_revision"),
+                "checkpoint_schema_version": "checkpoint_v4",
                 "profile": config.get("profile"),
                 "scenario": config.get("scenario", {}).get("id"),
                 "training_seed": config.get("seed"),
@@ -79,17 +85,29 @@ def build_study_manifest(run_root: Path, output: Path, algorithm: str = "Modifie
                 "is_formal_result": bool(False if summary is None else summary.get("is_formal_result", config.get("is_formal_result", True))),
                 "eval_protocol": None if summary is None else summary.get("eval_protocol"),
                 "eval_purpose": None if summary is None else summary.get("eval_purpose"),
+                "scope": None if summary is None else summary.get("scope"),
+                "release_status": None if summary is None else summary.get("release_status"),
                 "statistics_schema_version": None if summary is None else summary.get("statistics_schema_version", config.get("statistics_schema_version")),
                 "config_hash": provenance.get("config_hash"),
+                "reproduction_git_commit": provenance.get("reproduction_git_commit"),
+                "reproduction_git_branch": provenance.get("reproduction_git_branch"),
+                "reproduction_git_dirty": provenance.get("reproduction_git_dirty"),
+                "reproduction_tracked_tree_sha256": provenance.get("reproduction_tracked_tree_sha256"),
+                "source_manifest_sha256": provenance.get("source_manifest_sha256"),
             })
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "algorithm": algorithm,
         "root": _relative_reference(run_root, manifest_base),
         "path_base": "manifest_parent",
         "required_baselines": REQUIRED_BASELINES,
+        "expected_algorithms": [algorithm],
+        "expected_scenarios": EXPECTED_SCENARIOS,
+        "expected_training_seeds": list(range(2, 8)),
+        "study_identity_fields": ["algorithm", "scenario", "training_seed", "eval_purpose"],
         "statistics_schema_version": "eval_seed_cluster_v1",
+        "mobility_revisions": sorted({entry.get("mobility_revision") for entry in entries if entry.get("mobility_revision")}),
         "entries": entries,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
