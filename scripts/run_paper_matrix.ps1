@@ -3,7 +3,7 @@ param(
     [switch]$Execute,
     [string]$Device = "auto",
     [ValidateSet("train", "eval", "audit", "all")][string]$Stage = "train",
-    [ValidateSet("validation", "final_test")][string]$EvalPurpose = "final_test",
+    [ValidateSet("validation", "final_test")][string]$EvalPurpose = "validation",
     [int]$EvalEpisodes = 100,
     [string]$EvalSeeds = "",
     [string]$OutputRoot = "experiments/runs",

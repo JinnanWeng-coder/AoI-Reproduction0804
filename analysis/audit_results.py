@@ -35,7 +35,7 @@ EXPECTED_EVAL_SEEDS = {
 EXPECTED_FIGURE_BASELINES = ["Modified_MADDPG", "MADDPG_FDec", "DDPG"]
 FORMAL_TRAINING_SEEDS = set(range(2, 8))
 RUNTIME_PROVENANCE_KEYS = (
-    "python", "numpy", "torch", "cuda_version", "cuda_driver", "gpu_names",
+    "python", "numpy", "torch", "cuda_version", "cuda_device_count", "cuda_driver", "gpu_names",
     "reproduction_git_commit", "reproduction_git_branch", "reproduction_git_dirty",
     "reproduction_tracked_tree_sha256", "source_manifest_sha256",
 )
@@ -565,6 +565,7 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
                 "mobility_revision", "reproduction_git_commit", "reproduction_git_branch",
                 "reproduction_tracked_tree_sha256", "source_manifest_sha256", "python", "numpy", "torch",
                 "cuda_available", "cuda_version", "cuda_driver", "gpu_names",
+                "cuda_device_count",
             ):
                 if summary.get(key) != provenance.get(key):
                     errors.append(f"eval_provenance_{key}")
@@ -600,7 +601,7 @@ def audit_study_manifest(path: Path) -> Dict[str, Any]:
         entries = manifest.get("entries", [])
     except Exception as exc:
         return {"ok": False, "manifest": str(path), "errors": [f"manifest_read:{exc}"]}
-    required = {"algorithm", "semantic_version", "mobility_revision", "scenario", "training_seed", "run_path", "checkpoint_sha256", "eval_id", "eval_purpose", "status"}
+    required = {"algorithm", "semantic_version", "mobility_revision", "scenario", "training_seed", "run_path", "checkpoint_sha256", "checkpoint_schema_version", "eval_id", "eval_purpose", "status"}
     schema_version = int(manifest.get("schema_version", 1))
     manifest_base = path.parent
     if schema_version >= 2 and manifest.get("path_base") != "manifest_parent":
@@ -614,7 +615,7 @@ def audit_study_manifest(path: Path) -> Dict[str, Any]:
         if missing:
             errors.append(f"entry{index}:missing:{','.join(missing)}")
             continue
-        identity = (entry.get("scenario"), entry.get("training_seed"), entry.get("eval_id"))
+        identity = (entry.get("algorithm"), entry.get("scenario"), entry.get("training_seed"), entry.get("eval_id"))
         if identity in identities:
             errors.append(f"entry{index}:duplicate:{identity}")
         identities.add(identity)
@@ -630,6 +631,10 @@ def audit_study_manifest(path: Path) -> Dict[str, Any]:
             errors.append(f"entry{index}:mobility_revision")
         if entry.get("checkpoint_schema_version") != CHECKPOINT_SCHEMA_VERSION:
             errors.append(f"entry{index}:checkpoint_schema_version")
+        if entry.get("is_formal_result"):
+            for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_git_dirty", "reproduction_tracked_tree_sha256", "source_manifest_sha256"):
+                if not entry.get(key) and entry.get(key) is not False:
+                    errors.append(f"entry{index}:provenance_missing:{key}")
         run_ref = Path(str(entry.get("run_path")))
         if schema_version >= 2 and run_ref.is_absolute():
             errors.append(f"entry{index}:absolute_run_path")
@@ -667,7 +672,32 @@ def audit_study_manifest(path: Path) -> Dict[str, Any]:
                         errors.append(f"entry{index}:release_status_mismatch")
                     if entry.get("semantic_version") != eval_summary.get("semantic_version"):
                         errors.append(f"entry{index}:eval_semantic_mismatch")
-    return {"ok": not errors, "manifest": str(path), "errors": errors, "entry_count": len(entries), "unique_count": len(identities)}
+    expected_algorithms = [str(item) for item in manifest.get("expected_algorithms", [])]
+    expected_scenarios = [str(item) for item in manifest.get("expected_scenarios", [])]
+    expected_training_seeds = [int(item) for item in manifest.get("expected_training_seeds", [])]
+    observed_cells = {
+        (entry.get("algorithm"), entry.get("scenario"), int(entry.get("training_seed")), entry.get("eval_purpose"))
+        for entry in entries
+        if entry.get("eval_purpose") is not None and entry.get("training_seed") is not None
+    }
+    expected_purposes = ["validation", "final_test"] if expected_algorithms and expected_scenarios and expected_training_seeds else []
+    missing_cells = [
+        {"algorithm": algorithm, "scenario": scenario, "training_seed": seed, "eval_purpose": purpose}
+        for algorithm in expected_algorithms
+        for scenario in expected_scenarios
+        for seed in expected_training_seeds
+        for purpose in expected_purposes
+        if (algorithm, scenario, seed, purpose) not in observed_cells
+    ]
+    return {
+        "ok": not errors,
+        "manifest": str(path),
+        "errors": errors,
+        "entry_count": len(entries),
+        "unique_count": len(identities),
+        "study_complete": not missing_cells if expected_purposes else None,
+        "missing_cells": missing_cells,
+    }
 
 
 def main(argv=None) -> int:

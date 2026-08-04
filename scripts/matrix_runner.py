@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from config import matrix_specs, safe_run_dir
+from config import config_from_dict, matrix_specs, safe_run_dir
 
 
 def _checkpoint_hash(path: Path) -> str:
@@ -26,12 +26,51 @@ def _checkpoint_hash(path: Path) -> str:
 def _command(item, args, stage: str, resume: Path = None):
     command = [sys.executable, str(ROOT / "Main.py"), "--profile", item["profile"], "--scenario", item["scenario"], "--seed", str(item["seed"]), "--device", args.device, "--run-name", item["run_name"], "--output-root", args.output_root]
     if stage == "train":
+        command.extend(["--scope", "train"])
         if resume is not None:
             command.extend(["--resume", str(resume)])
     elif stage == "eval":
-        command.extend(["--eval-only", "--eval-purpose", args.eval_purpose, "--eval-episodes", str(args.eval_episodes), "--eval-seeds", args.eval_seeds])
+        scope = "validation" if args.eval_purpose == "validation" else "final_release"
+        command.extend(["--scope", scope, "--eval-only", "--eval-purpose", args.eval_purpose, "--eval-episodes", str(args.eval_episodes), "--eval-seeds", args.eval_seeds])
         command.extend(["--resume", str(resume)])
     return command
+
+
+def _recovery_state(run_dir: Path, item) -> dict:
+    """Describe an existing run without deleting or overwriting anything."""
+    latest = run_dir / "checkpoints" / "latest.pt"
+    complete = run_dir / "COMPLETE.json"
+    if not run_dir.exists():
+        return {"code": "NEW_RUN", "action": "create", "run": str(run_dir)}
+    if complete.is_file():
+        if not latest.is_file():
+            return {"code": "COMPLETE_WITHOUT_CHECKPOINT", "action": "error", "run": str(run_dir)}
+        try:
+            import torch
+
+            payload = torch.load(latest, map_location="cpu", weights_only=False)
+            if payload.get("config_hash") != item.get("config_hash"):
+                return {"code": "COMPLETE_CHECKPOINT_CONFIG_MISMATCH", "action": "error", "run": str(run_dir), "checkpoint_config_hash": payload.get("config_hash"), "expected_config_hash": item.get("config_hash")}
+            if payload.get("semantic_version") != item.get("semantic_version"):
+                return {"code": "COMPLETE_CHECKPOINT_SEMANTIC_MISMATCH", "action": "error", "run": str(run_dir), "checkpoint_semantic_version": payload.get("semantic_version"), "expected_semantic_version": item.get("semantic_version")}
+        except Exception as exc:
+            return {"code": "COMPLETE_CHECKPOINT_READ_ERROR", "action": "error", "run": str(run_dir), "error": str(exc)}
+        return {"code": "COMPLETE", "action": "skip", "run": str(run_dir)}
+    if not latest.is_file():
+        return {"code": "RUN_DIR_WITHOUT_CHECKPOINT", "action": "error", "run": str(run_dir)}
+    try:
+        import torch
+
+        payload = torch.load(latest, map_location="cpu", weights_only=False)
+        if payload.get("completed") is True:
+            return {"code": "CHECKPOINT_COMPLETE_WITHOUT_MARKER", "action": "error", "run": str(run_dir), "checkpoint": str(latest)}
+        if payload.get("config_hash") != item.get("config_hash"):
+            return {"code": "CHECKPOINT_CONFIG_MISMATCH", "action": "error", "run": str(run_dir), "checkpoint_config_hash": payload.get("config_hash"), "expected_config_hash": item.get("config_hash")}
+        if payload.get("semantic_version") != item.get("semantic_version"):
+            return {"code": "CHECKPOINT_SEMANTIC_MISMATCH", "action": "error", "run": str(run_dir), "checkpoint_semantic_version": payload.get("semantic_version"), "expected_semantic_version": item.get("semantic_version")}
+    except Exception as exc:
+        return {"code": "CHECKPOINT_READ_ERROR", "action": "error", "run": str(run_dir), "error": str(exc)}
+    return {"code": "INCOMPLETE_RESUME_AVAILABLE", "action": "resume", "run": str(run_dir), "checkpoint": str(latest)}
 
 
 def _run(command, log_path: Path):
@@ -56,7 +95,8 @@ def _has_matching_eval(run_dir: Path, checkpoint_hash: str, args) -> bool:
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if summary.get("status") == "complete" and summary.get("checkpoint_sha256") == checkpoint_hash and summary.get("eval_episodes") == args.eval_episodes and summary.get("eval_seeds") == expected_seeds and summary.get("eval_purpose") == args.eval_purpose:
+        expected_scope = "validation" if args.eval_purpose == "validation" else "final_release"
+        if summary.get("status") == "complete" and summary.get("checkpoint_sha256") == checkpoint_hash and summary.get("eval_episodes") == args.eval_episodes and summary.get("eval_seeds") == expected_seeds and summary.get("eval_purpose") == args.eval_purpose and summary.get("scope") == expected_scope:
             return True
     return False
 
@@ -71,7 +111,7 @@ def main(argv=None):
     parser.add_argument("--output-root", default="experiments/runs")
     parser.add_argument("--eval-episodes", type=int, default=100)
     parser.add_argument("--eval-seeds", default=None)
-    parser.add_argument("--eval-purpose", choices=("validation", "final_test"), default="final_test")
+    parser.add_argument("--eval-purpose", choices=("validation", "final_test"), default="validation")
     parser.add_argument("--log-dir", default="batch_logs")
     parser.add_argument("--report", default=None, help="write a JSON dry-run/execution report")
     args = parser.parse_args(argv)
@@ -93,11 +133,12 @@ def main(argv=None):
             latest = run_dir / "checkpoints" / "latest.pt"
             train_command = _command(item, args, "train", latest if latest.exists() else None)
             eval_command = _command(item, args, "eval", latest)
-            audit_command = [sys.executable, str(ROOT / "analysis" / "audit_results.py"), str(run_dir), "--require-eval"]
+            audit_scope = "validation" if args.eval_purpose == "validation" else "final_release"
+            audit_command = [sys.executable, str(ROOT / "analysis" / "audit_results.py"), str(run_dir), "--scope", audit_scope, "--require-eval"]
             print("TRAIN", " ".join(train_command))
             print("EVAL", " ".join(eval_command))
             print("AUDIT", " ".join(audit_command))
-            report_commands.append({"run_name": item["run_name"], "train": train_command, "eval": eval_command, "audit": audit_command})
+            report_commands.append({"run_name": item["run_name"], "train": train_command, "eval": eval_command, "audit": audit_command, "scope": audit_scope, "eval_purpose": args.eval_purpose})
         if args.report:
             report_path = Path(args.report).expanduser()
             if not report_path.is_absolute():
@@ -105,11 +146,12 @@ def main(argv=None):
             if report_path.exists():
                 raise FileExistsError(f"Refusing to overwrite matrix report: {report_path}")
             report_path.parent.mkdir(parents=True, exist_ok=True)
-            report_path.write_text(json.dumps({"status": "dry_run", "matrix_count": len(specs), "unique_count": len(keys), "specs": specs, "commands": report_commands}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            report_path.write_text(json.dumps({"status": "dry_run", "profile": args.profile, "semantic_version": specs[0]["semantic_version"], "eval_purpose": args.eval_purpose, "scope": "validation" if args.eval_purpose == "validation" else "final_release", "matrix_count": len(specs), "unique_count": len(keys), "specs": specs, "commands": report_commands}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return 0
 
     stages = ("train", "eval", "audit") if args.stage == "all" else (args.stage,)
     failures = []
+    recovery_events = []
     log_dir = Path(args.log_dir).expanduser()
     for item in specs:
         run_dir = safe_run_dir(args.output_root, item["run_name"])
@@ -117,16 +159,21 @@ def main(argv=None):
         log_path = log_dir / f"{item['run_name']}.log"
         for stage in stages:
             if stage == "train":
-                if (run_dir / "COMPLETE.json").is_file():
+                recovery = _recovery_state(run_dir, item)
+                recovery_events.append(recovery)
+                if recovery["action"] == "skip":
                     print(f"SKIP complete {item['run_name']}")
                     continue
-                resume = latest if latest.is_file() else None
+                if recovery["action"] == "error":
+                    failures.append({"stage": stage, "run": item["run_name"], "recovery": recovery})
+                    break
+                resume = latest if recovery["action"] == "resume" else None
                 if _run(_command(item, args, "train", resume), log_path) != 0:
                     failures.append({"stage": stage, "run": item["run_name"]})
                     break
             elif stage == "eval":
                 if not latest.is_file():
-                    failures.append({"stage": stage, "run": item["run_name"], "error": "missing latest checkpoint"})
+                    failures.append({"stage": stage, "run": item["run_name"], "recovery": _recovery_state(run_dir, item)})
                     break
                 if _has_matching_eval(run_dir, _checkpoint_hash(latest), args):
                     print(f"SKIP eval {item['run_name']}")
@@ -135,11 +182,12 @@ def main(argv=None):
                     failures.append({"stage": stage, "run": item["run_name"]})
                     break
             else:
-                command = [sys.executable, str(ROOT / "analysis" / "audit_results.py"), str(run_dir), "--require-eval"]
+                audit_scope = "validation" if args.eval_purpose == "validation" else "final_release"
+                command = [sys.executable, str(ROOT / "analysis" / "audit_results.py"), str(run_dir), "--scope", audit_scope, "--require-eval"]
                 if _run(command, log_path) != 0:
                     failures.append({"stage": stage, "run": item["run_name"]})
                     break
-    report = {"status": "failed" if failures else "complete", "failures": failures, "matrix_count": len(specs), "unique_count": len(keys)}
+    report = {"status": "failed" if failures else "complete", "failures": failures, "recovery_events": recovery_events, "eval_purpose": args.eval_purpose, "matrix_count": len(specs), "unique_count": len(keys)}
     if args.report:
         report_path = Path(args.report).expanduser()
         if not report_path.is_absolute():
