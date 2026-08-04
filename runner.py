@@ -7,6 +7,7 @@ import hashlib
 import os
 import platform
 import random
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,13 @@ from config import ExperimentConfig, config_from_dict, resolve_config, safe_run_
 from global_critic import Global_Critic
 from local_critic import Agent
 from metrics import MetricStore
+
+
+EVAL_PURPOSE_SEEDS = {
+    "validation": [201, 202, 203, 204, 205, 206],
+    "final_test": [101, 102, 103, 104, 105, 106],
+}
+EVAL_STATISTICS_SCHEMA_VERSION = "eval_seed_cluster_v1"
 
 
 def resolve_device(requested: str) -> torch.device:
@@ -93,16 +101,70 @@ def _source_manifest_digest() -> Optional[str]:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _git_metadata() -> Dict[str, Any]:
+    """Return reproducibility metadata without making Git state changes."""
+    root = Path(__file__).resolve().parent
+
+    def _git(*args: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), *args],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return result.stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            return ""
+
+    tracked = _git("ls-files", "-z")
+    digest = hashlib.sha256()
+    if tracked:
+        for name in sorted(item for item in tracked.split("\x00") if item):
+            path = root / name
+            digest.update(name.replace(os.sep, "/").encode("utf-8"))
+            digest.update(b"\x00")
+            if path.is_file():
+                digest.update(path.read_bytes())
+    device_names = []
+    cuda_driver = None
+    if torch.cuda.is_available():
+        device_names = [torch.cuda.get_device_name(index) for index in range(torch.cuda.device_count())]
+        try:
+            driver_result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            cuda_driver = driver_result.stdout.strip().splitlines()[0] if driver_result.stdout.strip() else None
+        except (OSError, subprocess.CalledProcessError, IndexError):
+            cuda_driver = None
+    return {
+        "reproduction_git_commit": _git("rev-parse", "HEAD") or None,
+        "reproduction_git_branch": _git("branch", "--show-current") or None,
+        "reproduction_git_dirty": bool(_git("status", "--porcelain", "--untracked-files=all")),
+        "reproduction_tracked_tree_sha256": digest.hexdigest() if tracked else None,
+        "gpu_names": device_names,
+        "cuda_driver": cuda_driver,
+    }
+
+
 def _prepare_run(config: ExperimentConfig, resume: Optional[str]) -> Tuple[Path, bool]:
     if resume:
         checkpoint = Path(resume).expanduser().resolve()
         if not checkpoint.is_file():
             raise FileNotFoundError(checkpoint)
+        if config.is_formal_result and _git_metadata().get("reproduction_git_dirty"):
+            raise RuntimeError("formal results require a clean reproduction Git worktree")
         run_dir = checkpoint.parent.parent
         return run_dir, True
     run_dir = safe_run_dir(config.output_root, config.run_name or "unnamed")
     if run_dir.exists():
         raise FileExistsError(f"Refusing to overwrite existing run directory: {run_dir}")
+    git = _git_metadata()
+    if config.is_formal_result and git.get("reproduction_git_dirty"):
+        raise RuntimeError("formal results require a clean reproduction Git worktree")
     run_dir.mkdir(parents=True, exist_ok=False)
     (run_dir / "checkpoints").mkdir()
     _write_json(run_dir / "config.resolved.json", config.to_dict())
@@ -127,7 +189,12 @@ def _prepare_run(config: ExperimentConfig, resume: Optional[str]) -> Tuple[Path,
         "eval_warmup_episodes": int(config.eval_warmup_episodes),
         "global_reward_normalization": config.global_reward_normalization,
         "mobility_model": config.mobility_model,
+        "gap_definition": config.gap_definition,
+        "vehicle_length_m": float(config.vehicle_length_m),
+        "effective_center_spacing_m": float(config.effective_center_spacing_m),
+        "statistics_schema_version": config.statistics_schema_version,
     }
+    provenance.update(git)
     _write_json(run_dir / "provenance.json", provenance)
     (run_dir / "stdout.log").write_text("run started\n", encoding="utf-8")
     return run_dir, False
@@ -136,15 +203,44 @@ def _prepare_run(config: ExperimentConfig, resume: Optional[str]) -> Tuple[Path,
 def _load_checkpoint(path: Path, config, agents, learner, replay, environment, metrics):
     payload = torch.load(path, map_location=learner.device, weights_only=False)
     checkpoint_semantic_version = payload.get("semantic_version")
+    checkpoint_version = int(payload.get("checkpoint_version", 0))
+    legacy_compat = False
     if checkpoint_semantic_version is None:
-        raise ValueError("checkpoint semantic_version is missing; legacy/v1 checkpoints are rejected")
+        if config.profile == "legacy_release" and checkpoint_version in {1, 2}:
+            # Pre-remediation legacy checkpoints predate the semantic marker;
+            # their byte-preserved environment remains an explicit supported
+            # compatibility path.  Paper checkpoints never receive this
+            # fallback.
+            checkpoint_semantic_version = "legacy_release_v1"
+            legacy_compat = True
+        else:
+            raise ValueError("checkpoint semantic_version is missing; paper checkpoints are rejected")
     if checkpoint_semantic_version != config.semantic_version:
         raise ValueError(
             "checkpoint semantic_version mismatch: "
             f"checkpoint={checkpoint_semantic_version!r}, resolved={config.semantic_version!r}"
         )
+    if config.profile == "legacy_release" and checkpoint_version < 3:
+        legacy_compat = legacy_compat or not isinstance(payload.get("config"), dict) or "gap_definition" not in payload.get("config", {})
+    if config.profile == "paper_faithful" and checkpoint_version != 3:
+        raise ValueError(
+            "paper_faithful_v3 requires checkpoint_version=3; "
+            f"received {checkpoint_version}"
+        )
+    if config.profile == "legacy_release" and checkpoint_version not in {1, 2, 3}:
+        raise ValueError(f"unsupported legacy checkpoint_version={checkpoint_version}")
     if payload.get("config_hash") != config.canonical_hash():
-        raise ValueError("checkpoint config hash does not match resolved config")
+        raw_config = payload.get("config")
+        raw_hash = None
+        if legacy_compat and isinstance(raw_config, dict):
+            raw_hash = hashlib.sha256(json.dumps(raw_config, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()
+        if raw_hash != payload.get("config_hash"):
+            raise ValueError("checkpoint config hash does not match resolved config")
+    if checkpoint_version >= 3:
+        if payload.get("gap_definition") != config.gap_definition:
+            raise ValueError("checkpoint gap_definition does not match resolved config")
+        if float(payload.get("vehicle_length_m", -1.0)) != float(config.vehicle_length_m):
+            raise ValueError("checkpoint vehicle_length_m does not match resolved config")
     for agent, state in zip(agents, payload["agents"]):
         agent.load_state_dict_full(state)
     learner.load_state_dict_full(payload["learner"])
@@ -225,6 +321,11 @@ def train(config: ExperimentConfig, resume: Optional[str] = None, max_episodes: 
         "is_formal_result": bool(config.is_formal_result),
         "profile": config.profile,
         "semantic_version": config.semantic_version,
+        "config_hash": config.canonical_hash(),
+        "reproduction_git_commit": json.loads((run_dir / "provenance.json").read_text(encoding="utf-8")).get("reproduction_git_commit"),
+        "reproduction_git_branch": json.loads((run_dir / "provenance.json").read_text(encoding="utf-8")).get("reproduction_git_branch"),
+        "gap_definition": config.gap_definition,
+        "vehicle_length_m": float(config.vehicle_length_m),
         "scenario": config.scenario.id,
         "seed": config.seed,
         "episodes": config.episodes,
@@ -245,10 +346,10 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _eval_id(checkpoint_hash: str, protocol: str, warmup_episodes: int, seeds: Iterable[int], episodes: int, noise: float) -> str:
+def _eval_id(checkpoint_hash: str, purpose: str, protocol: str, warmup_episodes: int, seeds: Iterable[int], episodes: int, noise: float) -> str:
     seed_token = "-".join(str(int(seed)) for seed in seeds)
     noise_token = str(noise).replace(".", "p")
-    return f"eval_ckpt{checkpoint_hash[:12]}_{protocol}_warm{int(warmup_episodes)}_s{seed_token}_ep{int(episodes)}_noise{noise_token}"
+    return f"eval_{purpose}_ckpt{checkpoint_hash[:12]}_{protocol}_warm{int(warmup_episodes)}_s{seed_token}_ep{int(episodes)}_noise{noise_token}"
 
 
 def _mean_sd_ci95(values: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -262,26 +363,37 @@ def _mean_sd_ci95(values: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarra
     return means, sd, ci
 
 
-def evaluate_from_checkpoint(config: ExperimentConfig, checkpoint: str, eval_episodes: int, eval_seeds: Optional[List[int]] = None) -> Dict[str, Any]:
+def evaluate_from_checkpoint(
+    config: ExperimentConfig,
+    checkpoint: str,
+    eval_episodes: int,
+    eval_seeds: Optional[List[int]] = None,
+    eval_purpose: str = "final_test",
+) -> Dict[str, Any]:
+    if eval_purpose not in EVAL_PURPOSE_SEEDS:
+        raise ValueError(f"eval_purpose must be one of {sorted(EVAL_PURPOSE_SEEDS)}")
     checkpoint_path = Path(checkpoint).expanduser().resolve()
     run_dir = checkpoint_path.parent.parent
     caller_rng = capture_rng_state()
     checkpoint_hash = _sha256_file(checkpoint_path)
     checkpoint_preview = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    requested_device = config.device
     saved_config = config_from_dict(checkpoint_preview["config"])
-    if config.device != "auto":
-        saved_config.device = config.device
+    if requested_device != "auto":
+        saved_config.device = requested_device
     config = saved_config
     if eval_seeds is None:
-        eval_seeds = [101, 102, 103, 104, 105, 106]
+        eval_seeds = list(EVAL_PURPOSE_SEEDS[eval_purpose])
     eval_seeds = [int(seed) for seed in eval_seeds]
     if not eval_seeds or len(set(eval_seeds)) != len(eval_seeds):
         raise ValueError("eval_seeds must be non-empty and unique")
+    if config.is_formal_result and eval_seeds != EVAL_PURPOSE_SEEDS[eval_purpose]:
+        raise ValueError(f"formal {eval_purpose} evaluation requires seeds {EVAL_PURPOSE_SEEDS[eval_purpose]}")
     if int(eval_episodes) < 1:
         raise ValueError("eval_episodes must be positive")
     warmup_episodes = int(config.eval_warmup_episodes)
     eval_noise = 0.0
-    eval_id = _eval_id(checkpoint_hash, config.eval_protocol, warmup_episodes, eval_seeds, eval_episodes, eval_noise)
+    eval_id = _eval_id(checkpoint_hash, eval_purpose, config.eval_protocol, warmup_episodes, eval_seeds, eval_episodes, eval_noise)
     eval_dir = run_dir / "eval" / eval_id
     if eval_dir.exists():
         raise FileExistsError(f"Refusing to overwrite existing eval directory: {eval_dir}")
@@ -386,35 +498,83 @@ def evaluate_from_checkpoint(config: ExperimentConfig, checkpoint: str, eval_epi
         scipy.io.savemat(eval_dir / "metrics.mat", arrays)
     except ImportError:
         pass
-    aoi_per_episode = arrays["aoi_ms"].mean(axis=(2, 3))
-    success_per_episode = arrays["success"][:, :, -1, :].mean(axis=2)
-    per_seed_aoi, sd_aoi, ci_aoi = _mean_sd_ci95(aoi_per_episode)
-    per_seed_success, sd_success, ci_success = _mean_sd_ci95(success_per_episode)
+    # Episodes are repeated frames within one held-out world, not independent
+    # inferential units.  Keep their raw values and report only descriptive
+    # within-seed SD.  Study-level CI is computed later across training runs.
+    aoi_episode_seed_agent = arrays["aoi_ms"].mean(axis=2)  # seed x episode x agent
+    endpoint_episode_seed_agent = arrays["success"][:, :, -1, :]
+    per_seed_aoi_agent = aoi_episode_seed_agent.mean(axis=1)
+    per_seed_success_agent = endpoint_episode_seed_agent.mean(axis=1)
+    per_seed_aoi = per_seed_aoi_agent.mean(axis=1)
+    per_seed_success = per_seed_success_agent.mean(axis=1)
+    sd_aoi = aoi_episode_seed_agent.mean(axis=2).std(axis=1, ddof=1) if int(eval_episodes) > 1 else np.zeros(len(eval_seeds))
+    sd_success = endpoint_episode_seed_agent.mean(axis=2).std(axis=1, ddof=1) if int(eval_episodes) > 1 else np.zeros(len(eval_seeds))
+    checkpoint_reference = os.path.relpath(checkpoint_path, run_dir).replace(os.sep, "/")
+    formal_eval = bool(config.is_formal_result and eval_purpose == "final_test")
     summary = {
         "eval_id": eval_id,
+        "eval_purpose": eval_purpose,
+        "statistics_schema_version": EVAL_STATISTICS_SCHEMA_VERSION,
         "eval_seeds": [int(seed) for seed in eval_seeds],
         "eval_episodes": int(eval_episodes),
         "eval_protocol": config.eval_protocol,
         "eval_warmup_episodes": warmup_episodes,
         "eval_noise": eval_noise,
         "semantic_version": config.semantic_version,
+        "profile": config.profile,
+        "scenario": config.scenario.id,
+        "training_seed": int(config.seed),
+        "config_hash": config.canonical_hash(),
         "global_reward_normalization": config.global_reward_normalization,
         "mobility_model": config.mobility_model,
+        "gap_definition": config.gap_definition,
+        "vehicle_length_m": float(config.vehicle_length_m),
+        "effective_center_spacing_m": float(config.effective_center_spacing_m),
         "checkpoint_sha256": checkpoint_hash,
+        "checkpoint": checkpoint_reference,
+        "checkpoint_path_is_relative_to_run": True,
+        "raw_metric_axes": {
+            "aoi_ms": ["eval_seed", "scored_episode", "slot", "agent"],
+            "success": ["eval_seed", "scored_episode", "slot", "agent"],
+            "remaining_demand": ["eval_seed", "scored_episode", "slot", "agent"],
+        },
+        "mean_AoI_ms_per_seed_agent": per_seed_aoi_agent.tolist(),
         "mean_AoI_ms_per_seed": per_seed_aoi.tolist(),
         "sd_AoI_ms_per_seed": sd_aoi.tolist(),
-        "ci95_AoI_ms_per_seed": ci_aoi.tolist(),
+        "sd_AoI_ms_per_seed_semantics": "descriptive_across_scored_episodes_within_eval_seed",
+        "ci95_AoI_ms_per_seed": [None for _ in eval_seeds],
+        "ci95_AoI_ms_per_seed_semantics": "not_computed_episodes_are_not_independent_units",
+        "CAM_success_probability_per_seed_agent": per_seed_success_agent.tolist(),
         "CAM_success_probability_per_seed": per_seed_success.tolist(),
         "sd_CAM_success_probability_per_seed": sd_success.tolist(),
-        "ci95_CAM_success_probability_per_seed": ci_success.tolist(),
+        "sd_CAM_success_probability_per_seed_semantics": "descriptive_across_scored_episodes_within_eval_seed",
+        "ci95_CAM_success_probability_per_seed": [None for _ in eval_seeds],
+        "ci95_CAM_success_probability_per_seed_semantics": "not_computed_episodes_are_not_independent_units",
         "mean_AoI_ms": float(per_seed_aoi.mean()),
         "CAM_success_probability": float(per_seed_success.mean()),
         "endpoint_success_probability_per_seed": per_seed_success.tolist(),
+        "training_seed_is_inferential_unit": True,
         "is_frozen_eval": True,
-        "checkpoint": str(checkpoint_path),
         "status": "complete",
-        "is_formal_result": bool(config.is_formal_result),
+        "is_formal_result": formal_eval,
     }
+    eval_provenance = {
+        **_git_metadata(),
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "profile": config.profile,
+        "semantic_version": config.semantic_version,
+        "config_hash": config.canonical_hash(),
+        "scenario": config.scenario.id,
+        "training_seed": int(config.seed),
+        "eval_purpose": eval_purpose,
+        "statistics_schema_version": EVAL_STATISTICS_SCHEMA_VERSION,
+        "checkpoint": checkpoint_reference,
+        "checkpoint_sha256": checkpoint_hash,
+        "is_formal_result": formal_eval,
+        "gap_definition": config.gap_definition,
+        "vehicle_length_m": float(config.vehicle_length_m),
+    }
+    _write_json(eval_dir / "provenance.json", eval_provenance)
     _write_json(eval_dir / "summary.json", summary)
     _write_json(eval_dir / "EVAL_COMPLETE.json", summary)
     return {"eval_dir": str(eval_dir), **summary}

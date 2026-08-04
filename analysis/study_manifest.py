@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REQUIRED_BASELINES = ["Modified_MADDPG", "MADDPG_FDec", "DDPG"]
 
 
 def _sha256(path: Path) -> str:
@@ -25,6 +26,12 @@ def _sha256(path: Path) -> str:
 def _json(path: Path) -> Optional[Dict[str, Any]]:
     if not path.is_file():
         return None
+
+
+def _relative_reference(path: Optional[Path], base: Path) -> Optional[str]:
+    if path is None:
+        return None
+    return Path(os.path.relpath(Path(path).resolve(), base.resolve())).as_posix()
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
         return value if isinstance(value, dict) else None
@@ -35,6 +42,7 @@ def _json(path: Path) -> Optional[Dict[str, Any]]:
 def build_study_manifest(run_root: Path, output: Path, algorithm: str = "Modified_MADDPG_with_TDec", run_paths: Optional[List[Path]] = None) -> Dict[str, Any]:
     run_root = Path(run_root).expanduser().resolve()
     output = Path(output).expanduser().resolve()
+    manifest_base = output.parent.resolve()
     entries: List[Dict[str, Any]] = []
     if run_paths:
         candidate_runs = [Path(path).expanduser().resolve() for path in run_paths]
@@ -62,20 +70,26 @@ def build_study_manifest(run_root: Path, output: Path, algorithm: str = "Modifie
                 "profile": config.get("profile"),
                 "scenario": config.get("scenario", {}).get("id"),
                 "training_seed": config.get("seed"),
-                "run_path": str(run_dir),
-                "checkpoint_path": str(checkpoint) if checkpoint.is_file() else None,
+                "run_path": _relative_reference(run_dir, manifest_base),
+                "checkpoint_path": _relative_reference(checkpoint, manifest_base) if checkpoint.is_file() else None,
                 "checkpoint_sha256": checkpoint_hash,
                 "eval_id": None if summary is None else summary.get("eval_id"),
-                "eval_path": None if eval_dir is None else str(eval_dir),
+                "eval_path": _relative_reference(eval_dir, manifest_base) if eval_dir is not None else None,
                 "status": "complete" if complete.get("status") == "complete" and (summary is None or summary.get("status") == "complete") else "incomplete",
-                "is_formal_result": bool(config.get("is_formal_result", True)),
+                "is_formal_result": bool(False if summary is None else summary.get("is_formal_result", config.get("is_formal_result", True))),
                 "eval_protocol": None if summary is None else summary.get("eval_protocol"),
+                "eval_purpose": None if summary is None else summary.get("eval_purpose"),
+                "statistics_schema_version": None if summary is None else summary.get("statistics_schema_version", config.get("statistics_schema_version")),
+                "config_hash": provenance.get("config_hash"),
             })
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "algorithm": algorithm,
-        "root": str(run_root),
+        "root": _relative_reference(run_root, manifest_base),
+        "path_base": "manifest_parent",
+        "required_baselines": REQUIRED_BASELINES,
+        "statistics_schema_version": "eval_seed_cluster_v1",
         "entries": entries,
     }
     output.parent.mkdir(parents=True, exist_ok=True)

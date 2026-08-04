@@ -56,8 +56,9 @@ def test_synthetic_fig3_and_fig5_aggregation(tmp_path):
     fig3 = plot_fig3(manifest_path, tmp_path / "fig3.png")
     fig5 = plot_fig5(manifest_path, tmp_path / "fig5.png")
     assert fig3.is_file() and fig5.is_file()
-    rows = json.loads((tmp_path / "fig5.json").read_text(encoding="utf-8"))["rows"]
-    assert rows[0]["AoI_ms"]["count"] == 4
+    rows = json.loads(fig5.with_suffix(".json").read_text(encoding="utf-8"))["rows"]
+    assert rows[0]["AoI_ms"]["count"] == 2
+    assert json.loads(fig5.with_suffix(".json").read_text(encoding="utf-8"))["partial"] is True
     assert rows[0]["AoI_ms"]["ci95"] >= 0
 
 

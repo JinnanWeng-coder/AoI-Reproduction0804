@@ -69,6 +69,9 @@ def test_frozen_eval_creates_new_artifact_without_overwriting_checkpoint(tmp_pat
     eval_dir = Path(evaluated["eval_dir"])
     summary = json.loads((eval_dir / "summary.json").read_text(encoding="utf-8"))
     assert summary["eval_seeds"] == [101, 102]
+    assert summary["eval_purpose"] == "final_test"
+    assert summary["statistics_schema_version"] == "eval_seed_cluster_v1"
+    assert summary["checkpoint"] == "checkpoints/latest.pt"
     assert summary["eval_protocol"] == "sequential_warm"
     assert summary["eval_warmup_episodes"] == 5
     assert len(summary["sd_AoI_ms_per_seed"]) == 2
@@ -76,6 +79,19 @@ def test_frozen_eval_creates_new_artifact_without_overwriting_checkpoint(tmp_pat
     with np.load(eval_dir / "metrics.npz", allow_pickle=False) as arrays:
         assert arrays["aoi_ms"].shape[:2] == (2, 2)
         assert np.all(np.isfinite(arrays["aoi_ms"]))
+
+
+def test_validation_and_final_test_artifacts_are_separate(tmp_path):
+    config = _small_config(tmp_path / "purpose", "run")
+    result = train(config)
+    checkpoint = Path(result["run_dir"]) / "checkpoints" / "latest.pt"
+    validation = evaluate_from_checkpoint(config, str(checkpoint), eval_episodes=1, eval_seeds=[201, 202], eval_purpose="validation")
+    final = evaluate_from_checkpoint(config, str(checkpoint), eval_episodes=1, eval_seeds=[101, 102], eval_purpose="final_test")
+    assert validation["eval_purpose"] == "validation"
+    assert final["eval_purpose"] == "final_test"
+    assert validation["eval_id"] != final["eval_id"]
+    assert validation["is_formal_result"] is False
+    assert final["is_formal_result"] is False
 
 
 def test_v1_checkpoint_is_rejected_before_loading_state(tmp_path):

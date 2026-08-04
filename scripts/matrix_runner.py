@@ -29,7 +29,7 @@ def _command(item, args, stage: str, resume: Path = None):
         if resume is not None:
             command.extend(["--resume", str(resume)])
     elif stage == "eval":
-        command.extend(["--eval-only", "--eval-episodes", str(args.eval_episodes), "--eval-seeds", args.eval_seeds])
+        command.extend(["--eval-only", "--eval-purpose", args.eval_purpose, "--eval-episodes", str(args.eval_episodes), "--eval-seeds", args.eval_seeds])
         command.extend(["--resume", str(resume)])
     return command
 
@@ -56,7 +56,7 @@ def _has_matching_eval(run_dir: Path, checkpoint_hash: str, args) -> bool:
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if summary.get("status") == "complete" and summary.get("checkpoint_sha256") == checkpoint_hash and summary.get("eval_episodes") == args.eval_episodes and summary.get("eval_seeds") == expected_seeds:
+        if summary.get("status") == "complete" and summary.get("checkpoint_sha256") == checkpoint_hash and summary.get("eval_episodes") == args.eval_episodes and summary.get("eval_seeds") == expected_seeds and summary.get("eval_purpose") == args.eval_purpose:
             return True
     return False
 
@@ -70,10 +70,13 @@ def main(argv=None):
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output-root", default="experiments/runs")
     parser.add_argument("--eval-episodes", type=int, default=100)
-    parser.add_argument("--eval-seeds", default="101,102,103,104,105,106")
+    parser.add_argument("--eval-seeds", default=None)
+    parser.add_argument("--eval-purpose", choices=("validation", "final_test"), default="final_test")
     parser.add_argument("--log-dir", default="batch_logs")
     parser.add_argument("--report", default=None, help="write a JSON dry-run/execution report")
     args = parser.parse_args(argv)
+    if args.eval_seeds is None:
+        args.eval_seeds = "201,202,203,204,205,206" if args.eval_purpose == "validation" else "101,102,103,104,105,106"
     if args.dry_run == args.execute:
         parser.error("choose exactly one of --dry-run or --execute")
     specs = matrix_specs(args.profile)
