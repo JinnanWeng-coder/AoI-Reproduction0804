@@ -4,11 +4,29 @@ from __future__ import annotations
 
 import os
 import random
+import subprocess
 from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
 import torch
+
+
+def _git_stamp() -> Dict[str, Any]:
+    root = Path(__file__).resolve().parent
+
+    def _git(*args: str):
+        try:
+            result = subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True)
+            return result.stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            return None
+
+    return {
+        "reproduction_git_commit": _git("rev-parse", "HEAD"),
+        "reproduction_git_branch": _git("branch", "--show-current"),
+        "reproduction_git_dirty": bool(_git("status", "--porcelain", "--untracked-files=all")),
+    }
 
 
 def capture_rng_state() -> Dict[str, Any]:
@@ -38,7 +56,7 @@ def atomic_torch_save(payload: Dict[str, Any], path: Path) -> None:
 
 
 def build_payload(config, agents, learner, replay, environment, metrics, episode: int, completed: bool = False) -> Dict[str, Any]:
-    return {
+    payload = {
         "checkpoint_version": 3,
         "checkpoint_schema_version": "checkpoint_v3",
         "semantic_version": config.semantic_version,
@@ -56,3 +74,5 @@ def build_payload(config, agents, learner, replay, environment, metrics, episode
         "vehicle_length_m": float(config.vehicle_length_m),
         "statistics_schema_version": config.statistics_schema_version,
     }
+    payload.update(_git_stamp())
+    return payload

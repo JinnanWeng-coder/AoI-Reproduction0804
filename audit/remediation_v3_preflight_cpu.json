@@ -1,0 +1,24 @@
+{
+  "action_dim": 3,
+  "batch_size": 64,
+  "device": "cpu",
+  "gap_definition": "bumper_to_bumper",
+  "global_target_updates": [
+    true,
+    true
+  ],
+  "learn_steps": [
+    1,
+    2
+  ],
+  "local_target_updates": [
+    false,
+    true
+  ],
+  "profile": "paper_faithful",
+  "scenario": "p05_n10_g25",
+  "semantic_version": "paper_faithful_v3",
+  "state_dim": 46,
+  "status": "pass",
+  "vehicle_length_m": 4.0
+}

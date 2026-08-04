@@ -224,6 +224,8 @@ class Global_Critic:
         else:
             diagnostics.update({"actor_loss": None, "global_actor_gradient_norms": [], "actor_parameter_deltas": []})
         diagnostics["learn_step"] = self.learn_step_counter
+        diagnostics["global_target_update"] = True
+        diagnostics["local_target_update"] = bool(update_local)
         return diagnostics
 
     def update_global_network_parameters(self, tau=None):

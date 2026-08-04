@@ -511,6 +511,7 @@ def evaluate_from_checkpoint(
     sd_success = endpoint_episode_seed_agent.mean(axis=2).std(axis=1, ddof=1) if int(eval_episodes) > 1 else np.zeros(len(eval_seeds))
     checkpoint_reference = os.path.relpath(checkpoint_path, run_dir).replace(os.sep, "/")
     formal_eval = bool(config.is_formal_result and eval_purpose == "final_test")
+    eval_git = _git_metadata()
     summary = {
         "eval_id": eval_id,
         "eval_purpose": eval_purpose,
@@ -525,6 +526,9 @@ def evaluate_from_checkpoint(
         "scenario": config.scenario.id,
         "training_seed": int(config.seed),
         "config_hash": config.canonical_hash(),
+        "reproduction_git_commit": eval_git.get("reproduction_git_commit"),
+        "reproduction_git_branch": eval_git.get("reproduction_git_branch"),
+        "reproduction_git_dirty": eval_git.get("reproduction_git_dirty"),
         "global_reward_normalization": config.global_reward_normalization,
         "mobility_model": config.mobility_model,
         "gap_definition": config.gap_definition,
@@ -559,7 +563,7 @@ def evaluate_from_checkpoint(
         "is_formal_result": formal_eval,
     }
     eval_provenance = {
-        **_git_metadata(),
+        **eval_git,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "profile": config.profile,
         "semantic_version": config.semantic_version,

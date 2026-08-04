@@ -27,6 +27,11 @@ EXPECTED_EVAL_SEEDS = {
     "final_test": [101, 102, 103, 104, 105, 106],
 }
 EXPECTED_FIGURE_BASELINES = ["Modified_MADDPG", "MADDPG_FDec", "DDPG"]
+FORMAL_TRAINING_SEEDS = set(range(2, 8))
+FORMAL_SCENARIOS = {
+    "p05_n04_g05", "p07_n04_g05", "p05_n04_g15", "p05_n04_g25",
+    "p05_n04_g35", "p05_n06_g25", "p05_n08_g25", "p05_n10_g25",
+}
 
 
 def _sha256(path: Path) -> str:
@@ -69,6 +74,8 @@ def _audit_checkpoint(path: Path, expected_hash: str, expected_semantic: str, er
         return None
     if payload.get("semantic_version") != expected_semantic:
         errors.append(f"checkpoint_semantic:{path.name}:{payload.get('semantic_version')!r}")
+    if expected_semantic == "paper_faithful_v3" and payload.get("checkpoint_version") != 3:
+        errors.append(f"checkpoint_schema:{path.name}:{payload.get('checkpoint_version')!r}")
     if payload.get("config_hash") != expected_hash:
         errors.append(f"checkpoint_config_hash:{path.name}")
     embedded = payload.get("config")
@@ -126,6 +133,26 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
         errors.append("config_semantic_version")
     if config is not None and bool(config.get("is_formal_result", True)) and bool(config.get("smoke", False)):
         errors.append("formal_result_marked_smoke")
+    formal = bool(config.get("is_formal_result", True)) if config is not None else False
+    if formal and profile == "paper_faithful":
+        if config.get("semantic_version") != "paper_faithful_v3":
+            errors.append("formal_semantic_version")
+        if bool(config.get("smoke", False)):
+            errors.append("formal_smoke_override")
+        if int(config.get("episodes", -1)) != 500:
+            errors.append("formal_episodes")
+        if int(config.get("steps_per_episode", -1)) != 100:
+            errors.append("formal_steps_per_episode")
+        if int(config.get("seed", -1)) not in FORMAL_TRAINING_SEEDS:
+            errors.append("formal_training_seed")
+        if config.get("scenario", {}).get("id") not in FORMAL_SCENARIOS:
+            errors.append("formal_scenario")
+        if int(config.get("batch_size", -1)) != 64 or int(config.get("replay_capacity", -1)) != 50000:
+            errors.append("formal_replay_or_batch")
+        if config.get("actor_hidden") != [1024, 512] or config.get("local_critic_hidden") != [512, 256] or config.get("global_critic_hidden") != [1024, 512, 256]:
+            errors.append("formal_network_size")
+        if config.get("gap_definition") != "bumper_to_bumper" or float(config.get("vehicle_length_m", -1.0)) != 4.0:
+            errors.append("formal_gap_semantics")
     if provenance is not None and expected_semantic is not None:
         if provenance.get("semantic_version") != expected_semantic:
             errors.append("provenance_semantic_version")
@@ -143,6 +170,10 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
                 errors.append("formal_git_dirty")
             if config.get("is_formal_result", True) and not provenance.get("reproduction_git_commit"):
                 errors.append("formal_git_commit_missing")
+            if formal and provenance.get("reproduction_git_dirty") is not False:
+                errors.append("formal_git_dirty")
+            if formal and not provenance.get("reproduction_tracked_tree_sha256"):
+                errors.append("formal_tree_digest_missing")
     if complete is not None:
         if require_complete and complete.get("status") != "complete":
             errors.append("complete_status")
@@ -152,6 +183,8 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
             errors.append("complete_config_hash")
         if provenance is not None and complete.get("reproduction_git_commit") != provenance.get("reproduction_git_commit"):
             errors.append("complete_git_commit")
+        if formal and complete.get("reproduction_git_branch") != (None if provenance is None else provenance.get("reproduction_git_branch")):
+            errors.append("complete_git_branch")
 
     arrays = _finite_arrays(run_dir / "train_metrics.npz", errors)
     if config is not None and arrays:
@@ -184,6 +217,16 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
                 errors,
                 require_completed=require_complete,
             )
+    if provenance is not None:
+        for name, payload in checkpoint_payloads.items():
+            if payload is None:
+                continue
+            if payload.get("reproduction_git_commit") is not None and payload.get("reproduction_git_commit") != provenance.get("reproduction_git_commit"):
+                errors.append(f"checkpoint_git_commit:{name}")
+            if payload.get("reproduction_git_branch") is not None and payload.get("reproduction_git_branch") != provenance.get("reproduction_git_branch"):
+                errors.append(f"checkpoint_git_branch:{name}")
+            if formal and payload.get("reproduction_git_dirty") is not False:
+                errors.append(f"formal_checkpoint_git_dirty:{name}")
 
     eval_reports = []
     eval_root = run_dir / "eval"
@@ -197,6 +240,23 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
         errors.append("missing:eval")
     if require_eval and any(not report["ok"] for report in eval_reports):
         errors.append("invalid:eval")
+    if formal and profile == "paper_faithful":
+        final_reports = [report for report in eval_reports if report.get("eval_purpose") == "final_test"]
+        if len(final_reports) != 1:
+            errors.append("formal_final_test_artifact_not_unique")
+        if not final_reports:
+            errors.append("missing:formal_final_test")
+        for report in final_reports:
+            if report.get("eval_seeds") != EXPECTED_EVAL_SEEDS["final_test"]:
+                errors.append("formal_final_test_seeds")
+            if report.get("eval_episodes") != 100:
+                errors.append("formal_final_test_episodes")
+            if report.get("eval_warmup_episodes") != 5:
+                errors.append("formal_final_test_warmup")
+            if report.get("summary_is_formal_result") is not True:
+                errors.append("formal_final_test_marker")
+        if any(report.get("eval_purpose") == "validation" and report.get("summary_is_formal_result") for report in eval_reports):
+            errors.append("validation_mislabelled_formal")
 
     result = {
         "ok": not errors,
@@ -252,6 +312,9 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
                 errors.append("formal_eval_episodes")
         for key in ("mean_AoI_ms_per_seed", "sd_AoI_ms_per_seed", "endpoint_success_probability_per_seed"):
             if key not in summary or len(summary[key]) != len(seeds):
+                errors.append(f"summary_length:{key}")
+        for key in ("CAM_success_probability_per_seed", "sd_CAM_success_probability_per_seed"):
+            if key in summary and len(summary[key]) != len(seeds):
                 errors.append(f"summary_length:{key}")
         if "ci95_AoI_ms_per_seed" in summary and len(summary["ci95_AoI_ms_per_seed"]) != len(seeds):
             errors.append("summary_length:ci95_AoI_ms_per_seed")
@@ -319,9 +382,17 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
             except Exception as exc:
                 errors.append(f"eval_config_resolve:{exc}")
         if provenance is not None:
-            for key in ("semantic_version", "config_hash", "eval_purpose", "statistics_schema_version", "checkpoint_sha256"):
+            for key in ("semantic_version", "config_hash", "eval_purpose", "statistics_schema_version", "checkpoint_sha256", "reproduction_git_commit", "reproduction_git_branch"):
                 if summary.get(key) != provenance.get(key):
                     errors.append(f"eval_provenance_{key}")
+        run_provenance_path = eval_dir.parent.parent / "provenance.json"
+        run_provenance = _read_json(run_provenance_path, errors, "run_provenance") if run_provenance_path.is_file() else None
+        if run_provenance is not None:
+            for key in ("semantic_version", "config_hash", "reproduction_git_commit", "reproduction_git_branch"):
+                if summary.get(key) != run_provenance.get(key):
+                    errors.append(f"eval_run_provenance_{key}")
+            if summary.get("reproduction_git_dirty") != run_provenance.get("reproduction_git_dirty"):
+                errors.append("eval_run_provenance_dirty")
 
     return {
         "ok": not errors,
@@ -329,6 +400,12 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
         "errors": errors,
         "array_shapes": {key: list(value.shape) for key, value in arrays.items()},
         "semantic_version": None if summary is None else summary.get("semantic_version"),
+        "eval_purpose": None if summary is None else summary.get("eval_purpose"),
+        "eval_seeds": None if summary is None else summary.get("eval_seeds"),
+        "eval_episodes": None if summary is None else summary.get("eval_episodes"),
+        "eval_warmup_episodes": None if summary is None else summary.get("eval_warmup_episodes"),
+        "summary_is_formal_result": None if summary is None else summary.get("is_formal_result"),
+        "eval_id": None if summary is None else summary.get("eval_id"),
     }
 
 
@@ -348,6 +425,7 @@ def audit_study_manifest(path: Path) -> Dict[str, Any]:
     if schema_version >= 2 and manifest.get("required_baselines") != EXPECTED_FIGURE_BASELINES:
         errors.append("required_baselines")
     identities = set()
+    final_training_identities = set()
     for index, entry in enumerate(entries):
         missing = sorted(required.difference(entry))
         if missing:
@@ -357,6 +435,13 @@ def audit_study_manifest(path: Path) -> Dict[str, Any]:
         if identity in identities:
             errors.append(f"entry{index}:duplicate:{identity}")
         identities.add(identity)
+        if entry.get("eval_purpose") == "final_test":
+            final_identity = (entry.get("algorithm"), entry.get("scenario"), entry.get("training_seed"))
+            if final_identity in final_training_identities:
+                errors.append(f"entry{index}:duplicate_final_training_seed:{final_identity}")
+            final_training_identities.add(final_identity)
+        if entry.get("is_formal_result") and int(entry.get("training_seed", -1)) not in FORMAL_TRAINING_SEEDS:
+            errors.append(f"entry{index}:formal_training_seed")
         if entry.get("semantic_version") not in EXPECTED_SEMANTICS.values():
             errors.append(f"entry{index}:semantic_version")
         run_ref = Path(str(entry.get("run_path")))

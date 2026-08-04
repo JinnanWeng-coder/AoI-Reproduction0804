@@ -1,8 +1,9 @@
 # Modified MADDPG with TDec reproduction
 
 The leading `1-` is part of the research-task directory name. `TDec` denotes
-the task-decomposition branch (Algorithm 2); this directory provides the
-Algorithm 1 training orchestration.
+the task-decomposition branch corresponding to paper Algorithm 2. This
+directory is the Modified MADDPG with TDec reproduction target; it does not
+implement a separate "Algorithm 1 training orchestration".
 
 This directory is the reproducible implementation workspace. The original
 source is preserved under `legacy_reference/` and its provenance is recorded
@@ -17,9 +18,11 @@ The implementation is split into `legacy_release` and `paper_faithful` profiles.
 Smoke runs are written below `scratch/`; formal runs are written below
 `experiments/runs/` and are never overwritten.
 
-`paper_faithful` artifacts use semantic version `paper_faithful_v2`. Existing
-pre-remediation paper checkpoints/results are incompatible and are rejected by
-the loader; they remain as historical artifacts and are not reused.
+`paper_faithful` artifacts use semantic version `paper_faithful_v3` and
+checkpoint schema v3. Existing paper_faithful v1/v2 checkpoints/results are
+incompatible and are rejected by the loader; they remain as historical
+artifacts and are not reused. `legacy_release_v1` retains its compatibility
+loader, including pre-semantic legacy checkpoints.
 
 ## Environments
 
@@ -44,7 +47,8 @@ run path without creating output. The second prints exactly 48 unique
 python Main.py --profile paper_faithful --scenario p05_n04_g25 \
   --seed 2 --device cpu --smoke --run-name smoke_paper
 python Main.py --profile paper_faithful --device cpu \
-  --eval-only --eval-episodes 100 --eval-seeds 101,102,103,104,105,106 \
+  --eval-only --eval-purpose final_test --eval-episodes 100 \
+  --eval-seeds 101,102,103,104,105,106 \
   --resume scratch/smoke_paper/checkpoints/latest.pt
 python analysis/audit_results.py scratch/smoke_paper --allow-incomplete
 python -m analysis.plot_training scratch/smoke_paper
@@ -61,8 +65,11 @@ task1/task2 arrays, `local_total_episode_mean`, `global_episode_sum`,
 reward aggregation for plotting, not a differentiable actor objective.
 
 Evaluation uses one `reset_world(eval_seed)` per held-out seed, five sequential
-warm-up episodes by default, then sequential scored episodes. Formal held-out
-seeds are 101..106 and summary files contain per-seed mean/SD/95% CI.
+warm-up episodes by default, then sequential scored episodes. `validation`
+uses 201..206; `final_test` uses 101..106. Raw arrays retain
+eval-seed x scored-episode x slot x agent. Within-seed episode SD is
+descriptive only; inferential mean/SD/95% CI is computed across independent
+training seeds. Validation and final-test artifacts cannot be mixed.
 
 The restart-safe matrix entry points are:
 
@@ -88,7 +95,15 @@ synchronized joint actor update with `global_actor_weight=1.0`.
 
 Fig.4 requires declared baseline artifacts. If they are missing, the figure
 command exits nonzero and writes `INCOMPLETE_BASELINES.json`; this prevents
-silently presenting the current Algorithm1/TDec curve as a complete comparison.
+silently presenting the current Algorithm2/TDec curve as a complete comparison.
+The required baselines are `Modified_MADDPG`, `MADDPG_FDec`, and `DDPG`;
+`DQN` is not a paper Fig.4 baseline. Fig.5 can produce an explicitly labelled
+current-algorithm `PARTIAL` output while the baselines are unavailable.
+
+Formal audit applies hard gates for paper_faithful_v3: 500 episodes, 100 slots,
+the resolved full network, training seeds 2..7, final-test seeds 101..106,
+warmup 5, scored episodes 100, endpoint-demand consistency, clean Git
+provenance, and one unique final-test artifact per training run.
 
 Formal 500-episode training and the 48-run matrix are intentionally not launched
 by this code-completion stage.

@@ -26,7 +26,18 @@ def main(argv=None):
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--output", default=None)
     args = parser.parse_args(argv)
-    config = resolve_config(args.profile, args.scenario, seed=97, episodes=1, steps_per_episode=2, batch_size=args.batch_size, replay_capacity=args.batch_size, device=args.device)
+    config = resolve_config(
+        args.profile,
+        args.scenario,
+        seed=97,
+        episodes=1,
+        steps_per_episode=2,
+        batch_size=args.batch_size,
+        replay_capacity=args.batch_size,
+        device=args.device,
+        smoke=True,
+        is_formal_result=False,
+    )
     device = resolve_device(config.device)
     config.device_resolved = str(device)
     seed_everything(config.seed, device)
@@ -45,6 +56,10 @@ def main(argv=None):
         np.zeros(args.batch_size, dtype=np.float32),
     )
     diagnostics = [learner.learn(batch), learner.learn(batch)]
+    if diagnostics[0]["global_target_update"] is not True or diagnostics[1]["global_target_update"] is not True:
+        raise RuntimeError("global target critics were not updated on both learner steps")
+    if diagnostics[0]["local_target_update"] is not False or diagnostics[1]["local_target_update"] is not True:
+        raise RuntimeError("policy-delay cadence did not update local targets on step 2 only")
     result = {
         "status": "pass",
         "profile": config.profile,
@@ -55,6 +70,10 @@ def main(argv=None):
         "learn_steps": [item["learn_step"] for item in diagnostics],
         "state_dim": config.state_dim,
         "action_dim": config.action_dim,
+        "global_target_updates": [item["global_target_update"] for item in diagnostics],
+        "local_target_updates": [item["local_target_update"] for item in diagnostics],
+        "gap_definition": config.gap_definition,
+        "vehicle_length_m": config.vehicle_length_m,
     }
     if args.output:
         output = Path(args.output).expanduser().resolve()
