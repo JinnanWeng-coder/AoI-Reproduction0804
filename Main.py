@@ -18,6 +18,7 @@ def main(argv=None) -> int:
         print(f"output_root={config.output_root}")
         print(f"scope={args.scope}")
         print(f"eval_purpose={args.eval_purpose}")
+        print(f"recover_empty_run={args.recover_empty_run}")
         print("validation_eval_seeds=201,202,203,204,205,206")
         print("final_test_eval_seeds=101,102,103,104,105,106")
         if args.matrix:
@@ -29,6 +30,8 @@ def main(argv=None) -> int:
     from runner import evaluate_from_checkpoint, train
 
     if args.eval_only:
+        if args.recover_empty_run:
+            raise SystemExit("--recover-empty-run is only valid for training")
         if not args.resume:
             raise SystemExit("--eval-only requires --resume <checkpoint>")
         if args.scope == "train":
@@ -45,7 +48,9 @@ def main(argv=None) -> int:
             raise SystemExit("training requires --scope train")
         if args.eval_purpose is not None:
             raise SystemExit("--eval-purpose is only meaningful with --eval-only")
-        result = train(config, resume=args.resume)
+        if args.recover_empty_run and args.resume:
+            raise SystemExit("--recover-empty-run cannot be combined with --resume")
+        result = train(config, resume=args.resume, recover_empty_run=args.recover_empty_run)
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
     return 0
 

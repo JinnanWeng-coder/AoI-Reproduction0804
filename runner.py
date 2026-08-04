@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 import os
@@ -9,6 +10,7 @@ import platform
 import random
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -24,6 +26,7 @@ from config import (
     CHECKPOINT_SCHEMA_VERSION,
     ExperimentConfig,
     config_from_dict,
+    formal_scientific_contract_errors,
     resolve_config,
     safe_run_dir,
 )
@@ -38,6 +41,13 @@ EVAL_PURPOSE_SEEDS = {
 }
 EVAL_STATISTICS_SCHEMA_VERSION = "eval_seed_cluster_v1"
 SCOPE_FOR_PURPOSE = {"validation": "validation", "final_test": "final_release"}
+FORMAL_PROVENANCE_KEYS = (
+    "reproduction_git_commit",
+    "reproduction_git_branch",
+    "reproduction_git_dirty",
+    "reproduction_tracked_tree_sha256",
+    "source_manifest_sha256",
+)
 
 
 def resolve_device(requested: str) -> torch.device:
@@ -157,24 +167,268 @@ def _git_metadata() -> Dict[str, Any]:
     }
 
 
-def _prepare_run(config: ExperimentConfig, resume: Optional[str]) -> Tuple[Path, bool]:
-    if resume:
-        checkpoint = Path(resume).expanduser().resolve()
-        if not checkpoint.is_file():
-            raise FileNotFoundError(checkpoint)
-        if config.is_formal_result and _git_metadata().get("reproduction_git_dirty"):
-            raise RuntimeError("formal results require a clean reproduction Git worktree")
-        run_dir = checkpoint.parent.parent
-        return run_dir, True
-    run_dir = safe_run_dir(config.output_root, config.run_name or "unnamed")
-    if run_dir.exists():
-        raise FileExistsError(f"Refusing to overwrite existing run directory: {run_dir}")
-    git = _git_metadata()
-    if config.is_formal_result and git.get("reproduction_git_dirty"):
-        raise RuntimeError("formal results require a clean reproduction Git worktree")
-    run_dir.mkdir(parents=True, exist_ok=False)
-    (run_dir / "checkpoints").mkdir()
-    _write_json(run_dir / "config.resolved.json", config.to_dict())
+def _require_formal_scientific_contract(config: ExperimentConfig, context: str) -> None:
+    violations = formal_scientific_contract_errors(config)
+    if violations:
+        raise RuntimeError(
+            f"{context} violates the paper_faithful formal scientific contract: "
+            + ", ".join(violations)
+        )
+
+
+def _require_current_formal_provenance(context: str) -> Tuple[Dict[str, Any], str]:
+    """Fail before a formal run/evaluation mutates its artifact directory."""
+    current = _git_metadata()
+    if current.get("reproduction_git_dirty") is not False:
+        raise RuntimeError(f"{context} requires a clean reproduction Git worktree")
+    for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_tracked_tree_sha256"):
+        if not current.get(key):
+            raise RuntimeError(f"{context} requires Git provenance field {key}")
+    manifest_digest = _source_manifest_digest()
+    if not manifest_digest:
+        raise RuntimeError(f"{context} requires SOURCE_MANIFEST.json")
+    current["source_manifest_sha256"] = manifest_digest
+    return current, manifest_digest
+
+
+def _require_matching_formal_provenance(
+    record: Dict[str, Any],
+    current: Dict[str, Any],
+    manifest_digest: str,
+    label: str,
+) -> None:
+    if record.get("reproduction_git_dirty") is not False:
+        raise RuntimeError(f"{label} must record reproduction_git_dirty=false")
+    expected = dict(current)
+    expected["source_manifest_sha256"] = manifest_digest
+    for key in FORMAL_PROVENANCE_KEYS:
+        if record.get(key) is None:
+            raise RuntimeError(f"{label} is missing provenance field {key}")
+        if record.get(key) != expected.get(key):
+            raise RuntimeError(f"{label} provenance mismatch: {key}")
+
+
+def _read_json_object(path: Path, label: str) -> Dict[str, Any]:
+    if not path.is_file():
+        raise RuntimeError(f"{label} is missing: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"{label} is invalid: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{label} must contain a JSON object")
+    return value
+
+
+def _require_checkpoint_in_run(checkpoint_path: Path) -> Path:
+    checkpoint_path = checkpoint_path.resolve()
+    if checkpoint_path.name not in {"latest.pt", "best.pt"} or checkpoint_path.parent.name != "checkpoints":
+        raise RuntimeError("evaluation/resume checkpoint must be checkpoints/latest.pt or checkpoints/best.pt")
+    run_dir = checkpoint_path.parent.parent.resolve()
+    allowed = {
+        (run_dir / "checkpoints" / "latest.pt").resolve(),
+        (run_dir / "checkpoints" / "best.pt").resolve(),
+    }
+    if checkpoint_path not in allowed:
+        raise RuntimeError("checkpoint is outside this run's checkpoints directory")
+    return run_dir
+
+
+def _validate_formal_resume_preconditions(
+    config: ExperimentConfig,
+    checkpoint_path: Path,
+    run_dir: Path,
+    current: Dict[str, Any],
+    manifest_digest: str,
+) -> None:
+    if (run_dir / "COMPLETE.json").exists():
+        raise RuntimeError("refusing to resume a run that already has COMPLETE.json")
+    run_config_data = _read_json_object(run_dir / "config.resolved.json", "formal run config")
+    provenance = _read_json_object(run_dir / "provenance.json", "formal run provenance")
+    try:
+        run_config = config_from_dict(run_config_data)
+        payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        payload_config = config_from_dict(payload["config"])
+    except Exception as exc:
+        raise RuntimeError(f"formal resume checkpoint/config is invalid: {exc}") from exc
+    _require_formal_scientific_contract(run_config, "formal resume run config")
+    if run_config.canonical_hash() != config.canonical_hash():
+        raise RuntimeError("formal resume config does not match config.resolved.json")
+    if payload_config.canonical_hash() != config.canonical_hash() or payload.get("config_hash") != config.canonical_hash():
+        raise RuntimeError("formal resume checkpoint config mismatch")
+    if payload.get("checkpoint_version") != 4 or payload.get("checkpoint_schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        raise RuntimeError("formal resume requires checkpoint_v4")
+    if payload.get("semantic_version") != config.semantic_version or payload.get("mobility_revision") != config.mobility_revision:
+        raise RuntimeError("formal resume checkpoint semantic/mobility mismatch")
+    episode = int(payload.get("episode", -1))
+    if payload.get("completed") is not False or episode < 0 or episode >= int(config.episodes):
+        raise RuntimeError("formal resume requires an incomplete checkpoint before the final episode")
+    _require_matching_formal_provenance(provenance, current, manifest_digest, "formal run provenance")
+    _require_matching_formal_provenance(payload, current, manifest_digest, "formal resume checkpoint")
+    for key, expected in (
+        ("semantic_version", config.semantic_version),
+        ("mobility_revision", config.mobility_revision),
+        ("config_hash", config.canonical_hash()),
+        ("checkpoint_schema_version", CHECKPOINT_SCHEMA_VERSION),
+    ):
+        if provenance.get(key) != expected:
+            raise RuntimeError(f"formal run provenance mismatch: {key}")
+
+
+class EmptyRunRecoveryError(RuntimeError):
+    """Structured rejection for an initialized run with no checkpoint."""
+
+    def __init__(self, code: str, message: str, **details: Any):
+        super().__init__(message)
+        self.code = code
+        self.details = details
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return True
+    return path.is_symlink() or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+
+
+def _config_identity_from_dict(data: Dict[str, Any]) -> Dict[str, Any]:
+    scenario = data.get("scenario")
+    scenario_id = scenario.get("id") if isinstance(scenario, dict) else scenario
+    return {
+        "profile": data.get("profile"),
+        "scenario": scenario_id,
+        "seed": data.get("seed"),
+        "run_name": data.get("run_name"),
+        "output_root": data.get("output_root"),
+        "device": data.get("device"),
+    }
+
+
+def _validate_empty_run_for_reinitialization(run_dir: Path, config: ExperimentConfig) -> Dict[str, Any]:
+    """Verify a formal run published before its first checkpoint.
+
+    This function is read-only.  It accepts only the exact artifacts produced
+    by the atomic initialization path and never removes or replaces anything.
+    """
+    run_dir = Path(run_dir).resolve()
+    expected_run_dir = safe_run_dir(config.output_root, config.run_name or "unnamed")
+    if run_dir != expected_run_dir:
+        raise EmptyRunRecoveryError(
+            "IDENTITY_MISMATCH",
+            "empty run path does not match the resolved output_root/run_name",
+            run=str(run_dir),
+            expected_run=str(expected_run_dir),
+        )
+    if not config.is_formal_result or config.profile != "paper_faithful":
+        raise EmptyRunRecoveryError("NOT_FORMAL", "empty-run recovery is restricted to formal paper runs")
+    try:
+        _require_formal_scientific_contract(config, "empty-run recovery")
+    except RuntimeError as exc:
+        raise EmptyRunRecoveryError("SCIENTIFIC_CONTRACT_MISMATCH", str(exc)) from exc
+    if not run_dir.is_dir() or _is_link_or_reparse(run_dir):
+        raise EmptyRunRecoveryError("DIRECTORY_INVALID", "empty run must be a real directory")
+
+    allowed_names = {"checkpoints", "config.resolved.json", "provenance.json", "stdout.log"}
+    entries = list(run_dir.iterdir())
+    unexpected = sorted(entry.name for entry in entries if entry.name not in allowed_names)
+    if unexpected:
+        raise EmptyRunRecoveryError(
+            "DIRECTORY_NOT_EMPTY",
+            "empty run contains non-initialization artifacts",
+            unexpected=unexpected,
+        )
+    by_name = {entry.name: entry for entry in entries}
+    for required in ("checkpoints", "config.resolved.json", "provenance.json", "stdout.log"):
+        if required not in by_name:
+            raise EmptyRunRecoveryError("INITIALIZATION_INCOMPLETE", f"empty run is missing {required}", missing=required)
+    if any(_is_link_or_reparse(entry) for entry in entries):
+        raise EmptyRunRecoveryError("DIRECTORY_INVALID", "empty run initialization artifacts cannot be links or reparse points")
+    checkpoints = by_name["checkpoints"]
+    if not checkpoints.is_dir() or any(checkpoints.iterdir()):
+        raise EmptyRunRecoveryError("CHECKPOINTS_NOT_EMPTY", "empty run checkpoints directory must be empty")
+    if not by_name["config.resolved.json"].is_file() or not by_name["provenance.json"].is_file():
+        raise EmptyRunRecoveryError("INITIALIZATION_INVALID", "config/provenance must be regular files")
+    stdout = by_name["stdout.log"]
+    if not stdout.is_file() or stdout.read_text(encoding="utf-8") != "run started\n":
+        raise EmptyRunRecoveryError("STDOUT_INVALID", "empty run stdout.log is not the initialization marker")
+
+    try:
+        raw_config = _read_json_object(by_name["config.resolved.json"], "empty run config")
+    except RuntimeError as exc:
+        raise EmptyRunRecoveryError("CONFIG_INVALID", str(exc)) from exc
+    expected_config = config.to_dict()
+    expected_identity = _config_identity_from_dict(expected_config)
+    actual_identity = _config_identity_from_dict(raw_config)
+    identity_mismatches = {
+        key: {"run": actual_identity.get(key), "expected": expected_identity.get(key)}
+        for key in expected_identity
+        if actual_identity.get(key) != expected_identity.get(key)
+    }
+    if identity_mismatches:
+        raise EmptyRunRecoveryError(
+            "IDENTITY_MISMATCH",
+            "empty run config identity mismatch",
+            mismatches=identity_mismatches,
+        )
+    try:
+        raw_hash = hashlib.sha256(
+            json.dumps(raw_config, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        ).hexdigest()
+        reconstructed_hash = config_from_dict(raw_config).canonical_hash()
+    except Exception as exc:
+        raise EmptyRunRecoveryError("CONFIG_INVALID", f"empty run config cannot be resolved: {exc}") from exc
+    if raw_hash != config.canonical_hash() or reconstructed_hash != config.canonical_hash():
+        raise EmptyRunRecoveryError(
+            "CONFIG_MISMATCH",
+            "empty run config is not the complete canonical resolved config",
+            run_config_hash=raw_hash,
+            expected_config_hash=config.canonical_hash(),
+        )
+
+    try:
+        provenance = _read_json_object(by_name["provenance.json"], "empty run provenance")
+        current, manifest_digest = _require_current_formal_provenance("empty-run recovery")
+        _require_matching_formal_provenance(
+            provenance,
+            current,
+            manifest_digest,
+            "empty run provenance",
+        )
+    except RuntimeError as exc:
+        raise EmptyRunRecoveryError("PROVENANCE_MISMATCH", str(exc)) from exc
+    expected_provenance = {
+        "profile": config.profile,
+        "semantic_version": config.semantic_version,
+        "config_hash": config.canonical_hash(),
+        "scenario": config.scenario.id,
+        "seed": int(config.seed),
+        "is_formal_result": True,
+        "smoke": False,
+        "mobility_revision": config.mobility_revision,
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+    }
+    provenance_mismatches = {
+        key: {"run": provenance.get(key), "expected": value}
+        for key, value in expected_provenance.items()
+        if provenance.get(key) != value
+    }
+    if provenance_mismatches:
+        raise EmptyRunRecoveryError(
+            "PROVENANCE_MISMATCH",
+            "empty run provenance metadata mismatch",
+            mismatches=provenance_mismatches,
+        )
+    return {
+        "status": "verified_empty_run",
+        "run": str(run_dir),
+        "config_hash": config.canonical_hash(),
+        "identity": expected_identity,
+        "source_manifest_sha256": manifest_digest,
+    }
+
+
+def _run_provenance(config: ExperimentConfig, git: Dict[str, Any]) -> Dict[str, Any]:
     provenance = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "command": sys.argv,
@@ -201,12 +455,76 @@ def _prepare_run(config: ExperimentConfig, resume: Optional[str]) -> Tuple[Path,
         "gap_definition": config.gap_definition,
         "vehicle_length_m": float(config.vehicle_length_m),
         "effective_center_spacing_m": float(config.effective_center_spacing_m),
-        "checkpoint_schema_version": "checkpoint_v4",
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
         "statistics_schema_version": config.statistics_schema_version,
     }
     provenance.update(git)
-    _write_json(run_dir / "provenance.json", provenance)
-    (run_dir / "stdout.log").write_text("run started\n", encoding="utf-8")
+    return provenance
+
+
+def _publish_staged_run_no_replace(staging: Path, run_dir: Path) -> None:
+    """Atomically publish a sibling staging directory without clobbering."""
+    if os.name == "nt":
+        os.rename(staging, run_dir)  # Windows rename fails if the target exists.
+        return
+    if sys.platform.startswith("linux"):
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is not None:
+            renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+            renameat2.restype = ctypes.c_int
+            if renameat2(-100, os.fsencode(staging), -100, os.fsencode(run_dir), 1) != 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error), str(run_dir))
+            return
+    # Fallback for platforms without renameat2.  The authoritative remote
+    # target is Linux and Windows has native no-replace behavior above.
+    if run_dir.exists():
+        raise FileExistsError(f"Refusing to publish over existing run directory: {run_dir}")
+    os.rename(staging, run_dir)
+
+
+def _initialize_run_atomically(run_dir: Path, config: ExperimentConfig, git: Dict[str, Any]) -> None:
+    run_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{run_dir.name}.init-", dir=str(run_dir.parent)))
+    (staging / "checkpoints").mkdir()
+    _write_json(staging / "config.resolved.json", config.to_dict())
+    _write_json(staging / "provenance.json", _run_provenance(config, git))
+    (staging / "stdout.log").write_text("run started\n", encoding="utf-8")
+    _publish_staged_run_no_replace(staging, run_dir)
+
+
+def _prepare_run(
+    config: ExperimentConfig,
+    resume: Optional[str],
+    recover_empty_run: bool = False,
+) -> Tuple[Path, bool]:
+    if resume:
+        if recover_empty_run:
+            raise ValueError("recover_empty_run cannot be combined with a checkpoint resume")
+        checkpoint = Path(resume).expanduser().resolve()
+        if not checkpoint.is_file():
+            raise FileNotFoundError(checkpoint)
+        run_dir = _require_checkpoint_in_run(checkpoint)
+        if config.is_formal_result:
+            _require_formal_scientific_contract(config, "formal resume")
+            current, manifest_digest = _require_current_formal_provenance("formal resume")
+            _validate_formal_resume_preconditions(config, checkpoint, run_dir, current, manifest_digest)
+        return run_dir, True
+    run_dir = safe_run_dir(config.output_root, config.run_name or "unnamed")
+    if run_dir.exists():
+        if recover_empty_run:
+            _validate_empty_run_for_reinitialization(run_dir, config)
+            return run_dir, False
+        raise FileExistsError(f"Refusing to overwrite existing run directory: {run_dir}")
+    if config.is_formal_result:
+        _require_formal_scientific_contract(config, "formal training")
+        git, _manifest_digest = _require_current_formal_provenance("formal training")
+    else:
+        git = _git_metadata()
+    _initialize_run_atomically(run_dir, config, git)
     return run_dir, False
 
 
@@ -278,8 +596,13 @@ def _record_step(info: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def train(config: ExperimentConfig, resume: Optional[str] = None, max_episodes: Optional[int] = None) -> Dict[str, Any]:
-    run_dir, is_resume = _prepare_run(config, resume)
+def train(
+    config: ExperimentConfig,
+    resume: Optional[str] = None,
+    max_episodes: Optional[int] = None,
+    recover_empty_run: bool = False,
+) -> Dict[str, Any]:
+    run_dir, is_resume = _prepare_run(config, resume, recover_empty_run=recover_empty_run)
     environment, agents, learner, replay, metrics, device = _make_system(config)
     start_episode = 0
     if is_resume:
@@ -325,6 +648,10 @@ def train(config: ExperimentConfig, resume: Optional[str] = None, max_episodes: 
     final_payload = build_payload(config, agents, learner, replay, environment, metrics, config.episodes, completed=True)
     atomic_torch_save(final_payload, run_dir / "checkpoints" / "best.pt")
     atomic_torch_save(final_payload, run_dir / "checkpoints" / "latest.pt")
+    final_checkpoint_hashes = {
+        name: _sha256_file(run_dir / "checkpoints" / name)
+        for name in ("latest.pt", "best.pt")
+    }
     from analysis.audit_results import audit_run
 
     audit = audit_run(run_dir, require_complete=False, scope="train")
@@ -357,6 +684,9 @@ def train(config: ExperimentConfig, resume: Optional[str] = None, max_episodes: 
         "scenario": config.scenario.id,
         "seed": config.seed,
         "episodes": config.episodes,
+        "final_episode": config.episodes,
+        "checkpoint_completed": True,
+        "checkpoint_sha256": final_checkpoint_hashes,
         "metrics_shapes": shapes,
         "audit": audit,
     }
@@ -381,40 +711,57 @@ def _eval_id(checkpoint_hash: str, purpose: str, protocol: str, warmup_episodes:
 
 
 def _validate_formal_eval_preconditions(run_dir: Path, checkpoint_path: Path, payload: Dict[str, Any], config: ExperimentConfig) -> None:
-    """Validate provenance before an eval directory can be created."""
-    if not (run_dir / "COMPLETE.json").is_file():
-        raise RuntimeError("validation/final_release requires COMPLETE.json")
-    if not config.is_formal_result:
-        return
-    current = _git_metadata()
-    if current.get("reproduction_git_dirty") is not False:
-        raise RuntimeError("formal evaluation requires a clean reproduction Git worktree")
-    provenance_path = run_dir / "provenance.json"
-    if not provenance_path.is_file():
-        raise RuntimeError("formal evaluation requires run provenance.json")
-    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
-    for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_tracked_tree_sha256"):
-        if not provenance.get(key) or provenance.get(key) != current.get(key):
-            raise RuntimeError(f"formal evaluation provenance mismatch: {key}")
-    if provenance.get("source_manifest_sha256") != _source_manifest_digest():
-        raise RuntimeError("formal evaluation source manifest mismatch")
-    if payload.get("reproduction_git_dirty") is not False:
-        raise RuntimeError("formal checkpoint must record dirty=false")
-    for key in ("reproduction_git_commit", "reproduction_git_branch"):
-        if payload.get(key) != current.get(key):
-            raise RuntimeError(f"formal checkpoint provenance mismatch: {key}")
-    if payload.get("reproduction_tracked_tree_sha256") != current.get("reproduction_tracked_tree_sha256"):
-        raise RuntimeError("formal checkpoint provenance mismatch: reproduction_tracked_tree_sha256")
-    if payload.get("source_manifest_sha256") != _source_manifest_digest():
-        raise RuntimeError("formal checkpoint source manifest mismatch")
-    if payload.get("semantic_version") != config.semantic_version:
-        raise RuntimeError("formal checkpoint semantic_version mismatch")
-    if payload.get("mobility_revision") != config.mobility_revision:
-        raise RuntimeError("formal checkpoint mobility_revision mismatch")
-    if payload.get("config_hash") != config.canonical_hash():
-        raise RuntimeError("formal checkpoint config_hash mismatch")
-    if payload.get("checkpoint_schema_version") != CHECKPOINT_SCHEMA_VERSION:
-        raise RuntimeError("formal checkpoint schema mismatch")
+    """Validate the frozen final policy before an eval directory can exist."""
+    if _require_checkpoint_in_run(checkpoint_path) != run_dir.resolve():
+        raise RuntimeError("checkpoint does not belong to the resolved run")
+    complete = _read_json_object(run_dir / "COMPLETE.json", "training completion marker")
+    if complete.get("status") != "complete":
+        raise RuntimeError("validation/final_release requires a complete training run")
+
+    current = None
+    manifest_digest = None
+    provenance = None
+    if config.is_formal_result:
+        _require_formal_scientific_contract(config, "formal evaluation")
+        current, manifest_digest = _require_current_formal_provenance("formal evaluation")
+        provenance = _read_json_object(run_dir / "provenance.json", "formal run provenance")
+        _require_matching_formal_provenance(provenance, current, manifest_digest, "formal run provenance")
+        _require_matching_formal_provenance(payload, current, manifest_digest, "formal checkpoint")
+        _require_matching_formal_provenance(complete, current, manifest_digest, "formal completion marker")
+
+    run_config_data = _read_json_object(run_dir / "config.resolved.json", "training run config")
+    try:
+        run_config = config_from_dict(run_config_data)
+        payload_config = config_from_dict(payload["config"])
+    except Exception as exc:
+        raise RuntimeError(f"training/checkpoint config is invalid: {exc}") from exc
+    expected_hash = run_config.canonical_hash()
+    if expected_hash != payload_config.canonical_hash() or payload.get("config_hash") != expected_hash:
+        raise RuntimeError("checkpoint does not match this run's resolved config")
+    if config.canonical_hash() != expected_hash:
+        raise RuntimeError("resolved evaluation config does not match the training run")
+    if payload.get("completed") is not True:
+        raise RuntimeError("evaluation requires a checkpoint with completed=true")
+    if int(payload.get("episode", -1)) != int(run_config.episodes):
+        raise RuntimeError("evaluation checkpoint episode must equal config.episodes")
+    if payload.get("semantic_version") != run_config.semantic_version:
+        raise RuntimeError("checkpoint semantic_version mismatch")
+    if payload.get("mobility_revision") != run_config.mobility_revision:
+        raise RuntimeError("checkpoint mobility_revision mismatch")
+    if payload.get("checkpoint_version") != 4 or payload.get("checkpoint_schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        raise RuntimeError("evaluation requires checkpoint_v4")
+
+    if config.is_formal_result:
+        if complete.get("config_hash") != expected_hash:
+            raise RuntimeError("formal completion marker config_hash mismatch")
+        if complete.get("semantic_version") != run_config.semantic_version or complete.get("mobility_revision") != run_config.mobility_revision:
+            raise RuntimeError("formal completion marker semantic/mobility mismatch")
+        if complete.get("checkpoint_completed") is not True or int(complete.get("final_episode", -1)) != int(run_config.episodes):
+            raise RuntimeError("formal completion marker does not bind the final episode")
+        checkpoint_hashes = complete.get("checkpoint_sha256")
+        actual_hash = _sha256_file(checkpoint_path)
+        if not isinstance(checkpoint_hashes, dict) or checkpoint_hashes.get(checkpoint_path.name) != actual_hash:
+            raise RuntimeError("formal completion marker checkpoint hash mismatch")
 
 
 def _mean_sd_ci95(values: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -444,17 +791,22 @@ def evaluate_from_checkpoint(
     if scope not in {"validation", "final_release"} or scope != expected_scope:
         raise ValueError(f"scope={scope!r} does not match eval_purpose={eval_purpose!r}")
     checkpoint_path = Path(checkpoint).expanduser().resolve()
-    run_dir = checkpoint_path.parent.parent
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(checkpoint_path)
+    run_dir = _require_checkpoint_in_run(checkpoint_path)
     caller_rng = capture_rng_state()
     checkpoint_hash = _sha256_file(checkpoint_path)
     checkpoint_preview = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     requested_device = config.device
-    saved_config = config_from_dict(checkpoint_preview["config"])
+    training_config = config_from_dict(checkpoint_preview["config"])
+    runtime_config = copy.deepcopy(training_config)
     if requested_device != "auto":
-        saved_config.device = requested_device
-    config = saved_config
-    if eval_purpose == "final_test" and not config.is_formal_result:
-        raise ValueError("final_test/final_release is reserved for a formal training checkpoint")
+        runtime_config.device = requested_device
+    config = training_config
+    if eval_purpose == "final_test" and not (
+        config.profile == "paper_faithful" and config.is_formal_result
+    ):
+        raise ValueError("final_test/final_release is reserved for a formal training checkpoint from paper_faithful")
     if eval_seeds is None:
         eval_seeds = list(EVAL_PURPOSE_SEEDS[eval_purpose])
     eval_seeds = [int(seed) for seed in eval_seeds]
@@ -477,7 +829,7 @@ def evaluate_from_checkpoint(
     if marker_path.exists():
         raise FileExistsError(f"Refusing to overwrite lifecycle marker: {marker_path}")
     _validate_formal_eval_preconditions(run_dir, checkpoint_path, checkpoint_preview, config)
-    environment, agents, learner, replay, metrics, device = _make_system(config)
+    environment, agents, learner, replay, metrics, device = _make_system(runtime_config)
     payload = _load_checkpoint(checkpoint_path, config, agents, learner, replay, environment, metrics)
     eval_dir.mkdir(parents=True, exist_ok=False)
     for agent in agents:
@@ -664,6 +1016,9 @@ def evaluate_from_checkpoint(
         "scenario": config.scenario.id,
         "training_seed": int(config.seed),
         "config_hash": config.canonical_hash(),
+        "training_device_config": config.device,
+        "evaluation_device_requested": requested_device,
+        "evaluation_device_resolved": str(device),
         "reproduction_git_commit": eval_git.get("reproduction_git_commit"),
         "reproduction_git_branch": eval_git.get("reproduction_git_branch"),
         "reproduction_git_dirty": eval_git.get("reproduction_git_dirty"),
@@ -685,6 +1040,9 @@ def evaluate_from_checkpoint(
         "effective_center_spacing_m": float(config.effective_center_spacing_m),
         "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
         "checkpoint_sha256": checkpoint_hash,
+        "checkpoint_name": checkpoint_path.name,
+        "checkpoint_episode": int(payload.get("episode", -1)),
+        "checkpoint_completed": bool(payload.get("completed", False)),
         "checkpoint": checkpoint_reference,
         "checkpoint_path_is_relative_to_run": True,
         "raw_metric_axes": {
@@ -718,9 +1076,13 @@ def evaluate_from_checkpoint(
     eval_provenance = {
         **eval_git,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "eval_id": eval_id,
         "profile": config.profile,
         "semantic_version": config.semantic_version,
         "config_hash": config.canonical_hash(),
+        "training_device_config": config.device,
+        "evaluation_device_requested": requested_device,
+        "evaluation_device_resolved": str(device),
         "scenario": config.scenario.id,
         "training_seed": int(config.seed),
         "eval_purpose": eval_purpose,
@@ -730,6 +1092,9 @@ def evaluate_from_checkpoint(
         "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
         "checkpoint": checkpoint_reference,
         "checkpoint_sha256": checkpoint_hash,
+        "checkpoint_name": checkpoint_path.name,
+        "checkpoint_episode": int(payload.get("episode", -1)),
+        "checkpoint_completed": bool(payload.get("completed", False)),
         "is_formal_result": formal_eval,
         "gap_definition": config.gap_definition,
         "vehicle_length_m": float(config.vehicle_length_m),
@@ -754,6 +1119,10 @@ def evaluate_from_checkpoint(
         "eval_purpose": eval_purpose,
         "eval_id": eval_id,
         "checkpoint_sha256": checkpoint_hash,
+        "checkpoint_name": checkpoint_path.name,
+        "checkpoint_episode": int(payload.get("episode", -1)),
+        "checkpoint_completed": bool(payload.get("completed", False)),
+        "config_hash": config.canonical_hash(),
         "semantic_version": config.semantic_version,
         "mobility_revision": config.mobility_revision,
         "is_formal_result": formal_eval,

@@ -17,7 +17,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-from config import CHECKPOINT_SCHEMA_VERSION, LEGACY_SEMANTIC_VERSION, PAPER_MOBILITY_REVISION, PAPER_SEMANTIC_VERSION
+from config import (
+    CHECKPOINT_SCHEMA_VERSION,
+    LEGACY_SEMANTIC_VERSION,
+    PAPER_MOBILITY_REVISION,
+    PAPER_SEMANTIC_VERSION,
+    formal_scientific_contract_errors,
+)
 
 EXPECTED_SEMANTICS = {
     "paper_faithful": PAPER_SEMANTIC_VERSION,
@@ -43,6 +49,7 @@ FORMAL_SCENARIOS = {
     "p05_n04_g05", "p07_n04_g05", "p05_n04_g15", "p05_n04_g25",
     "p05_n04_g35", "p05_n06_g25", "p05_n08_g25", "p05_n10_g25",
 }
+EVAL_BINDING_KEYS = ("eval_id", "eval_purpose", "scope", "checkpoint_sha256")
 
 
 def _sha256(path: Path) -> str:
@@ -74,7 +81,14 @@ def _load_resolved_config(data: Dict[str, Any], errors):
         return None
 
 
-def _audit_checkpoint(path: Path, expected_hash: str, expected_semantic: str, errors, require_completed: bool = False):
+def _audit_checkpoint(
+    path: Path,
+    expected_hash: str,
+    expected_semantic: str,
+    errors,
+    require_completed: bool = False,
+    expected_episode: Optional[int] = None,
+):
     if not path.is_file():
         errors.append(f"missing:{path.name}")
         return None
@@ -99,9 +113,29 @@ def _audit_checkpoint(path: Path, expected_hash: str, expected_semantic: str, er
     embedded = payload.get("config")
     if not isinstance(embedded, dict) or embedded.get("semantic_version") != expected_semantic:
         errors.append(f"checkpoint_config_semantic:{path.name}")
+    else:
+        embedded_config = _load_resolved_config(embedded, errors)
+        if embedded_config is not None and embedded_config.canonical_hash() != expected_hash:
+            errors.append(f"checkpoint_embedded_config_hash:{path.name}")
     if require_completed and payload.get("completed") is not True:
         errors.append(f"checkpoint_not_completed:{path.name}")
+    if require_completed and expected_episode is not None and int(payload.get("episode", -1)) != int(expected_episode):
+        errors.append(f"checkpoint_final_episode:{path.name}")
     return payload
+
+
+def _source_manifest_path() -> Path:
+    return ROOT / "SOURCE_MANIFEST.json"
+
+
+def _check_eval_binding(left: Optional[Dict[str, Any]], right: Optional[Dict[str, Any]], errors, label: str) -> None:
+    if left is None or right is None:
+        return
+    for key in EVAL_BINDING_KEYS:
+        if key not in left:
+            errors.append(f"{label}_missing:{key}")
+        elif key not in right or left.get(key) != right.get(key):
+            errors.append(f"{label}_mismatch:{key}")
 
 
 def _finite_arrays(npz_path: Path, errors):
@@ -207,6 +241,63 @@ def _check_expected_shapes(arrays: Dict[str, np.ndarray], expected: Dict[str, tu
             errors.append(f"shape:{prefix}{key}:{arrays[key].shape}:expected={shape}")
 
 
+def _check_summary_value(summary: Dict[str, Any], key: str, expected: Any, errors) -> None:
+    if key not in summary:
+        errors.append(f"summary_metric_missing:{key}")
+        return
+    try:
+        claimed = np.asarray(summary[key], dtype=np.float64)
+        calculated = np.asarray(expected, dtype=np.float64)
+    except Exception:
+        errors.append(f"summary_metric_numeric:{key}")
+        return
+    if claimed.shape != calculated.shape:
+        errors.append(f"summary_metric_shape:{key}:{claimed.shape}:expected={calculated.shape}")
+    elif not np.allclose(claimed, calculated, rtol=1e-6, atol=1e-6, equal_nan=False):
+        errors.append(f"summary_metric_mismatch:{key}")
+
+
+def _check_eval_summary_statistics(arrays: Dict[str, np.ndarray], summary: Dict[str, Any], errors) -> None:
+    """Recompute every released AoI/CAM aggregate from immutable raw arrays."""
+    if "aoi_ms" not in arrays or "success" not in arrays:
+        return
+    aoi = np.asarray(arrays["aoi_ms"], dtype=np.float64)
+    success = np.asarray(arrays["success"], dtype=np.float64)
+    if aoi.ndim != 4 or success.ndim != 4 or aoi.shape != success.shape:
+        errors.append("summary_metric_source_shape")
+        return
+    if aoi.shape[1] < 1 or aoi.shape[2] < 1 or aoi.shape[3] < 1:
+        errors.append("summary_metric_source_empty")
+        return
+
+    aoi_episode_seed_agent = aoi.mean(axis=2)
+    endpoint_episode_seed_agent = success[:, :, -1, :]
+    per_seed_aoi_agent = aoi_episode_seed_agent.mean(axis=1)
+    per_seed_success_agent = endpoint_episode_seed_agent.mean(axis=1)
+    per_seed_aoi = per_seed_aoi_agent.mean(axis=1)
+    per_seed_success = per_seed_success_agent.mean(axis=1)
+    if aoi.shape[1] > 1:
+        sd_aoi = aoi_episode_seed_agent.mean(axis=2).std(axis=1, ddof=1)
+        sd_success = endpoint_episode_seed_agent.mean(axis=2).std(axis=1, ddof=1)
+    else:
+        sd_aoi = np.zeros(aoi.shape[0], dtype=np.float64)
+        sd_success = np.zeros(aoi.shape[0], dtype=np.float64)
+
+    expected = {
+        "mean_AoI_ms_per_seed_agent": per_seed_aoi_agent,
+        "mean_AoI_ms_per_seed": per_seed_aoi,
+        "sd_AoI_ms_per_seed": sd_aoi,
+        "CAM_success_probability_per_seed_agent": per_seed_success_agent,
+        "CAM_success_probability_per_seed": per_seed_success,
+        "endpoint_success_probability_per_seed": per_seed_success,
+        "sd_CAM_success_probability_per_seed": sd_success,
+        "mean_AoI_ms": float(per_seed_aoi.mean()),
+        "CAM_success_probability": float(per_seed_success.mean()),
+    }
+    for key, calculated in expected.items():
+        _check_summary_value(summary, key, calculated, errors)
+
+
 def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool = False, scope: str = "train") -> Dict[str, Any]:
     run_dir = Path(run_dir).resolve()
     errors = []
@@ -241,6 +332,9 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
         errors.append("formal_result_marked_smoke")
     formal = bool(config.get("is_formal_result", True)) if config is not None else False
     if formal and profile == "paper_faithful":
+        if resolved is not None:
+            for field_name in formal_scientific_contract_errors(resolved):
+                errors.append(f"formal_contract:{field_name}")
         if config.get("semantic_version") != PAPER_SEMANTIC_VERSION:
             errors.append("formal_semantic_version")
         if bool(config.get("smoke", False)):
@@ -273,8 +367,10 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
                 errors.append("formal_provenance_dirty_flag")
         if provenance.get("semantic_version") != expected_semantic:
             errors.append("provenance_semantic_version")
-        manifest = run_dir.parents[1] / "SOURCE_MANIFEST.json"
-        if manifest.is_file() and provenance.get("source_manifest_sha256") != _sha256(manifest):
+        manifest = _source_manifest_path()
+        if formal and not manifest.is_file():
+            errors.append("formal_source_manifest_missing")
+        elif manifest.is_file() and provenance.get("source_manifest_sha256") != _sha256(manifest):
             errors.append("source_manifest_hash")
         if config is not None:
             for key in (
@@ -313,6 +409,20 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
             for key in ("source_manifest_sha256", "checkpoint_schema_version", "effective_center_spacing_m", "gap_definition", "vehicle_length_m"):
                 if key not in complete:
                     errors.append(f"complete_missing:{key}")
+            if complete.get("reproduction_git_dirty") is not False:
+                errors.append("formal_complete_git_dirty")
+            if complete.get("checkpoint_completed") is not True:
+                errors.append("formal_complete_checkpoint_completed")
+            if config is not None and int(complete.get("final_episode", -1)) != int(config.get("episodes", -1)):
+                errors.append("formal_complete_final_episode")
+            checkpoint_hashes = complete.get("checkpoint_sha256")
+            if not isinstance(checkpoint_hashes, dict):
+                errors.append("formal_complete_checkpoint_hashes")
+            else:
+                for name in ("latest.pt", "best.pt"):
+                    path = run_dir / "checkpoints" / name
+                    if path.is_file() and checkpoint_hashes.get(name) != _sha256(path):
+                        errors.append(f"formal_complete_checkpoint_hash:{name}")
 
     arrays = _finite_arrays(run_dir / "train_metrics.npz", errors)
     if config is not None and arrays:
@@ -327,6 +437,7 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
                 expected_semantic,
                 errors,
                 require_completed=require_complete,
+                expected_episode=None if config is None else int(config.get("episodes", -1)),
             )
     if provenance is not None:
         for name, payload in checkpoint_payloads.items():
@@ -350,6 +461,8 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
                 errors.append(f"checkpoint_schema_version:{name}")
             if formal and payload.get("reproduction_git_dirty") is not False:
                 errors.append(f"formal_checkpoint_git_dirty:{name}")
+            if formal and payload.get("episode") != (None if config is None else int(config.get("episodes", -1))) and require_complete:
+                errors.append(f"formal_checkpoint_final_episode:{name}")
 
     eval_reports = []
     eval_root = run_dir / "eval"
@@ -384,7 +497,13 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
             errors.append("missing:VALIDATION_READY.json")
         elif marker.get("status") != "validation_ready" or marker.get("eval_purpose") != "validation":
             errors.append("validation_ready_marker")
+        elif len(validation_reports) == 1:
+            for key in EVAL_BINDING_KEYS:
+                if key not in marker or marker.get(key) != validation_reports[0].get(key):
+                    errors.append(f"validation_ready_binding:{key}")
     if scope == "final_release":
+        if not (formal and profile == "paper_faithful"):
+            errors.append("final_release_requires_formal_paper_training")
         final_reports = [report for report in eval_reports if report.get("eval_purpose") == "final_test"]
         if len(final_reports) != 1:
             errors.append("final_test_artifact_not_unique")
@@ -411,6 +530,10 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
             errors.append("missing:FINAL_RELEASE.json")
         elif marker.get("status") != "final_release" or marker.get("eval_purpose") != "final_test":
             errors.append("final_release_marker")
+        elif len(final_reports) == 1:
+            for key in EVAL_BINDING_KEYS:
+                if key not in marker or marker.get(key) != final_reports[0].get(key):
+                    errors.append(f"final_release_binding:{key}")
 
     result = {
         "ok": not errors,
@@ -442,9 +565,24 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
     complete = _read_json(complete_path, errors, "eval_complete") if complete_path.is_file() else None
     provenance = _read_json(provenance_path, errors, "eval_provenance") if provenance_path.is_file() else None
     arrays = _finite_arrays(metrics_path, errors)
+    run_dir = eval_dir.parent.parent
+    config_path = run_dir / "config.resolved.json"
+    if not config_path.is_file():
+        errors.append("missing:run_config.resolved.json")
+    run_config = _read_json(config_path, errors, "run_config") if config_path.is_file() else None
+    resolved_run_config = _load_resolved_config(run_config, errors) if run_config is not None else None
+    formal_training = bool(resolved_run_config is not None and resolved_run_config.is_formal_result)
+    if formal_training and not _source_manifest_path().is_file():
+        errors.append("formal_eval_source_manifest_missing")
     if complete is not None and complete.get("status") != "complete":
         errors.append("eval_complete_status")
+    if summary is not None and complete is not None and summary != complete:
+        errors.append("eval_complete_not_identical_to_summary")
+    _check_eval_binding(summary, complete, errors, "eval_complete_binding")
+    _check_eval_binding(summary, provenance, errors, "eval_provenance_binding")
     if summary is not None:
+        if summary.get("eval_id") != eval_dir.name:
+            errors.append("eval_directory_id")
         seeds = [int(seed) for seed in summary.get("eval_seeds", [])]
         episodes = int(summary.get("eval_episodes", -1))
         if not seeds or len(set(seeds)) != len(seeds):
@@ -454,6 +592,8 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
         purpose = summary.get("eval_purpose")
         if purpose not in EXPECTED_EVAL_SEEDS:
             errors.append("eval_purpose")
+        if purpose == "final_test" and not formal_training:
+            errors.append("final_test_requires_formal_training")
         expected_scope = "validation" if purpose == "validation" else "final_release"
         if summary.get("scope") != expected_scope:
             errors.append("eval_scope")
@@ -464,7 +604,10 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
             errors.append("statistics_schema_version")
         if int(summary.get("eval_warmup_episodes", -1)) < 0:
             errors.append("eval_warmup_episodes")
-        if summary.get("is_formal_result", False):
+        expected_formal_marker = bool(formal_training and purpose == "final_test")
+        if summary.get("is_formal_result") is not expected_formal_marker:
+            errors.append("eval_formal_marker_mismatch")
+        if formal_training:
             if seeds != EXPECTED_EVAL_SEEDS.get(purpose):
                 errors.append("formal_heldout_seeds")
             if int(summary.get("eval_warmup_episodes", -1)) != 5:
@@ -481,9 +624,19 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
             errors.append("summary_length:ci95_AoI_ms_per_seed")
         if "ci95_CAM_success_probability_per_seed" in summary and len(summary["ci95_CAM_success_probability_per_seed"]) != len(seeds):
             errors.append("summary_length:ci95_CAM_success_probability_per_seed")
-        checkpoint = Path(str(summary.get("checkpoint", ""))).expanduser()
-        if not checkpoint.is_absolute():
-            checkpoint = (eval_dir.parent.parent / checkpoint).resolve()
+        checkpoint_payload = None
+        checkpoint_ref = Path(str(summary.get("checkpoint", ""))).expanduser()
+        if checkpoint_ref.is_absolute():
+            errors.append("checkpoint_path_absolute")
+            checkpoint = checkpoint_ref.resolve()
+        else:
+            checkpoint = (run_dir / checkpoint_ref).resolve()
+        allowed_checkpoints = {
+            (run_dir / "checkpoints" / "latest.pt").resolve(),
+            (run_dir / "checkpoints" / "best.pt").resolve(),
+        }
+        if checkpoint not in allowed_checkpoints or checkpoint.name not in {"latest.pt", "best.pt"}:
+            errors.append("checkpoint_outside_run")
         if not checkpoint.is_file():
             errors.append("checkpoint_missing")
         else:
@@ -498,8 +651,24 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
                 for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_tracked_tree_sha256", "source_manifest_sha256"):
                     if checkpoint_payload.get(key) is not None and summary.get(key) != checkpoint_payload.get(key):
                         errors.append(f"checkpoint_{key}")
-                if summary.get("is_formal_result") and checkpoint_payload.get("reproduction_git_dirty") is not False:
+                if checkpoint_payload.get("completed") is not True:
+                    errors.append("checkpoint_not_completed")
+                if resolved_run_config is not None and int(checkpoint_payload.get("episode", -1)) != int(resolved_run_config.episodes):
+                    errors.append("checkpoint_final_episode")
+                if summary.get("checkpoint_name") != checkpoint.name:
+                    errors.append("checkpoint_name")
+                if summary.get("checkpoint_completed") is not True:
+                    errors.append("summary_checkpoint_completed")
+                if resolved_run_config is not None and int(summary.get("checkpoint_episode", -1)) != int(resolved_run_config.episodes):
+                    errors.append("summary_checkpoint_episode")
+                if formal_training and checkpoint_payload.get("reproduction_git_dirty") is not False:
                     errors.append("formal_checkpoint_git_dirty")
+                embedded = checkpoint_payload.get("config")
+                embedded_config = _load_resolved_config(embedded, errors) if isinstance(embedded, dict) else None
+                if embedded_config is None:
+                    errors.append("checkpoint_embedded_config")
+                elif resolved_run_config is not None and embedded_config.canonical_hash() != resolved_run_config.canonical_hash():
+                    errors.append("checkpoint_embedded_config_hash")
             except Exception as exc:
                 errors.append(f"checkpoint_read:{exc}")
         if summary.get("semantic_version") not in EXPECTED_SEMANTICS.values():
@@ -510,7 +679,7 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
             errors.append("eval_checkpoint_schema_version")
         if summary.get("is_frozen_eval") is not True:
             errors.append("not_frozen_eval")
-        if summary.get("is_formal_result") and summary.get("reproduction_git_dirty") is not False:
+        if formal_training and summary.get("reproduction_git_dirty") is not False:
             errors.append("formal_eval_git_dirty")
         for key in ("mean_AoI_ms_per_seed", "sd_AoI_ms_per_seed", "endpoint_success_probability_per_seed"):
             try:
@@ -540,19 +709,16 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
                 success_endpoint = arrays["success"][:, :, -1, :] > 0.5
                 if not np.array_equal(demand_endpoint, success_endpoint):
                     errors.append("endpoint_success_demand_mismatch")
+            _check_eval_summary_statistics(arrays, summary, errors)
         if summary.get("checkpoint_path_is_relative_to_run") is not True:
             errors.append("checkpoint_path_not_relative_to_run")
         for key in RUNTIME_PROVENANCE_KEYS:
             if key not in summary:
                 errors.append(f"summary_missing_runtime:{key}")
-        run_dir = eval_dir.parent.parent
-        config_path = run_dir / "config.resolved.json"
-        run_config = _read_json(config_path, errors, "run_config") if config_path.is_file() else None
         if run_config is not None:
             try:
-                from config import config_from_dict
-
-                resolved_run_config = config_from_dict(run_config)
+                if resolved_run_config is None:
+                    raise ValueError("run config did not resolve")
                 if summary.get("config_hash") != resolved_run_config.canonical_hash():
                     errors.append("eval_config_hash")
                 if summary.get("training_seed") != int(resolved_run_config.seed):
@@ -577,7 +743,10 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
         if provenance is not None:
             for key in (
                 "semantic_version", "config_hash", "eval_purpose", "scope", "release_status",
+                "eval_id",
+                "training_device_config", "evaluation_device_requested", "evaluation_device_resolved",
                 "statistics_schema_version", "checkpoint_sha256", "checkpoint_schema_version",
+                "checkpoint_name", "checkpoint_episode", "checkpoint_completed",
                 "mobility_revision", "reproduction_git_commit", "reproduction_git_branch",
                 "reproduction_tracked_tree_sha256", "source_manifest_sha256", "python", "numpy", "torch",
                 "cuda_available", "cuda_version", "cuda_driver", "gpu_names",
@@ -588,7 +757,7 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
         run_provenance_path = eval_dir.parent.parent / "provenance.json"
         run_provenance = _read_json(run_provenance_path, errors, "run_provenance") if run_provenance_path.is_file() else None
         if run_provenance is not None:
-            manifest_path = eval_dir.parent.parent.parents[1] / "SOURCE_MANIFEST.json"
+            manifest_path = _source_manifest_path()
             if manifest_path.is_file() and summary.get("source_manifest_sha256") != _sha256(manifest_path):
                 errors.append("eval_source_manifest_hash")
             for key in ("semantic_version", "config_hash", "mobility_revision", "reproduction_git_commit", "reproduction_git_branch", "reproduction_tracked_tree_sha256", "source_manifest_sha256"):
@@ -596,6 +765,22 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
                     errors.append(f"eval_run_provenance_{key}")
             if summary.get("reproduction_git_dirty") != run_provenance.get("reproduction_git_dirty"):
                 errors.append("eval_run_provenance_dirty")
+            if formal_training:
+                for field_name in formal_scientific_contract_errors(resolved_run_config):
+                    errors.append(f"formal_eval_contract:{field_name}")
+                for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_tracked_tree_sha256", "source_manifest_sha256"):
+                    if not run_provenance.get(key):
+                        errors.append(f"formal_eval_run_provenance_missing:{key}")
+                if run_provenance.get("reproduction_git_dirty") is not False:
+                    errors.append("formal_eval_run_git_dirty")
+                if checkpoint_payload is not None:
+                    for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_tracked_tree_sha256", "source_manifest_sha256"):
+                        if checkpoint_payload.get(key) != run_provenance.get(key):
+                            errors.append(f"formal_eval_checkpoint_provenance:{key}")
+                    if checkpoint_payload.get("reproduction_git_dirty") is not False:
+                        errors.append("formal_eval_checkpoint_git_dirty")
+        elif formal_training:
+            errors.append("missing:run_provenance.json")
 
     return {
         "ok": not errors,
@@ -609,6 +794,8 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
         "eval_warmup_episodes": None if summary is None else summary.get("eval_warmup_episodes"),
         "summary_is_formal_result": None if summary is None else summary.get("is_formal_result"),
         "eval_id": None if summary is None else summary.get("eval_id"),
+        "scope": None if summary is None else summary.get("scope"),
+        "checkpoint_sha256": None if summary is None else summary.get("checkpoint_sha256"),
     }
 
 

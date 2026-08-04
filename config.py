@@ -94,6 +94,7 @@ COMMON_DEFAULTS: Dict[str, Any] = {
 PROFILE_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "paper_faithful": {},
     "legacy_release": {
+        "is_formal_result": False,
         "semantic_version": LEGACY_SEMANTIC_VERSION,
         "tau": 0.005,
         "global_actor_weight": 2.0,
@@ -324,8 +325,20 @@ def resolve_config(profile: str = "paper_faithful", scenario: Optional[str] = No
     values.pop("id", None)
     values["profile"] = profile
     values["scenario"] = scenario_obj
+    formal_was_explicit = "is_formal_result" in overrides
     config = ExperimentConfig(**values)
     validate_config(config)
+    if config.profile == "paper_faithful" and config.is_formal_result:
+        violations = formal_scientific_contract_errors(config)
+        if violations:
+            if formal_was_explicit:
+                raise ValueError(
+                    "is_formal_result=True requires the exact paper_faithful formal contract; "
+                    "mismatched fields: " + ", ".join(violations)
+                )
+            # Unit tests, diagnostics, and smoke-sized configurations remain
+            # supported, but can never silently retain a formal-result label.
+            config.is_formal_result = False
     return config
 
 
@@ -374,14 +387,97 @@ def validate_config(config: ExperimentConfig) -> None:
         raise ValueError("previous_interference_dim must be 1 or n_rb")
     if len(config.rsu_position) != 2:
         raise ValueError("rsu_position must have two coordinates")
-    if config.profile == "paper_faithful" and config.is_formal_result:
-        if config.gap_definition != "bumper_to_bumper":
-            raise ValueError("formal paper_faithful_v4 requires gap_definition=bumper_to_bumper")
-        if not math.isclose(config.vehicle_length_m, 4.0, rel_tol=0.0, abs_tol=1e-9):
-            raise ValueError("paper_faithful_v4 requires vehicle_length_m=4.0")
-        expected = [config.map_width_m / 2.0, config.map_height_m / 2.0]
-        if not all(math.isclose(a, b, rel_tol=0.0, abs_tol=1e-6) for a, b in zip(config.rsu_position, expected)):
-            raise ValueError("paper_faithful RSU must be centered")
+
+
+# Runtime/path controls are deliberately excluded: device, output_root,
+# run_name, checkpoint_every, and the resolved CUDA device do not change the
+# scientific experiment.  Every scientific or statistical choice does.
+_FORMAL_PAPER_VALUES: Dict[str, Any] = {
+    "episodes": 500,
+    "steps_per_episode": 100,
+    "slot_ms": 1.0,
+    "slow_fading_ms": 100.0,
+    "n_rb": 3,
+    "n_modes": 2,
+    "bandwidth_hz": 180000,
+    "cam_bits": 32000,
+    "power_min_dbm": 1.0,
+    "power_max_dbm": 30.0,
+    "v2i_min_bps_per_hz": 3.0,
+    "replay_capacity": 50000,
+    "batch_size": 64,
+    "gamma": 0.99,
+    "tau": 0.0005,
+    "actor_lr": 0.0001,
+    "critic_lr": 0.001,
+    "policy_delay": 2,
+    "target_noise_sigma": 0.2,
+    "target_noise_clip": 0.5,
+    "target_action_clip": 0.999,
+    "global_actor_weight": 1.0,
+    "actor_hidden": [1024, 512],
+    "local_critic_hidden": [512, 256],
+    "global_critic_hidden": [1024, 512, 256],
+    "exploration_noise": 0.3,
+    "slow_update_every_episodes": 1,
+    "map_width_m": 750.0,
+    "map_height_m": 1299.0,
+    "rsu_position": [375.0, 649.5],
+    "speed_min_mps": 10.0,
+    "speed_max_mps": 15.0,
+    "speed_distribution": "continuous_uniform",
+    "power_continuous": True,
+    "previous_interference_dim": 3,
+    "include_remaining_time": True,
+    "current_interference_reward": True,
+    "global_update_mode": "synchronous_joint",
+    "initial_aoi_ms": 100.0,
+    "eval_protocol": "sequential_warm",
+    "eval_warmup_episodes": 5,
+    "global_reward_normalization": "source_normalized_per_rb_mean",
+    "mobility_model": "urban_grid_correlated",
+    "mobility_revision": PAPER_MOBILITY_REVISION,
+    "gap_definition": "bumper_to_bumper",
+    "vehicle_length_m": 4.0,
+    "statistics_schema_version": "eval_seed_cluster_v1",
+}
+
+
+def _formal_value_matches(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, float):
+        try:
+            return math.isclose(float(actual), expected, rel_tol=0.0, abs_tol=1e-9)
+        except (TypeError, ValueError):
+            return False
+    if isinstance(expected, list):
+        if not isinstance(actual, (list, tuple)) or len(actual) != len(expected):
+            return False
+        return all(_formal_value_matches(item, wanted) for item, wanted in zip(actual, expected))
+    return actual == expected
+
+
+def formal_scientific_contract_errors(config: ExperimentConfig) -> List[str]:
+    """Return fields that prevent an artifact from being a formal paper run."""
+    errors: List[str] = []
+    if config.profile != "paper_faithful":
+        return ["profile"]
+    if config.semantic_version != PAPER_SEMANTIC_VERSION:
+        errors.append("semantic_version")
+    for field_name, expected in _FORMAL_PAPER_VALUES.items():
+        if not _formal_value_matches(getattr(config, field_name, None), expected):
+            errors.append(field_name)
+    expected_scenario = DEFAULT_SCENARIOS.get(config.scenario.id)
+    if expected_scenario is None:
+        errors.append("scenario.id")
+    else:
+        for field_name in ("number_platoons", "platoon_size", "gap_m"):
+            if not _formal_value_matches(getattr(config.scenario, field_name), expected_scenario[field_name]):
+                errors.append(f"scenario.{field_name}")
+    if int(config.seed) not in range(2, 8):
+        errors.append("seed")
+    if bool(config.smoke):
+        errors.append("smoke")
+    return errors
 
 
 _RUN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -446,6 +542,13 @@ def apply_smoke_overrides(overrides: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Modified MADDPG with task decomposition reproduction runner")
     parser.add_argument("--profile", choices=sorted(PROFILE_OVERRIDES), default="paper_faithful")
@@ -462,7 +565,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-seeds", default=None)
     parser.add_argument("--eval-purpose", choices=("validation", "final_test"), default=None)
     parser.add_argument("--resume", default=None)
-    parser.add_argument("--checkpoint-every", type=int, default=None)
+    parser.add_argument("--checkpoint-every", type=_positive_int, default=None)
+    parser.add_argument(
+        "--recover-empty-run",
+        action="store_true",
+        help="reuse only a provenance-verified formal run initialized before its first checkpoint",
+    )
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--matrix", action="store_true", help="print the complete 48-run matrix with --dry-run")

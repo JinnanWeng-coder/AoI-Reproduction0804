@@ -33,7 +33,7 @@ def _runtime_fields():
         "reproduction_git_branch": "master",
         "reproduction_git_dirty": False,
         "reproduction_tracked_tree_sha256": "synthetic-tree",
-        "source_manifest_sha256": "synthetic-source-manifest",
+        "source_manifest_sha256": hashlib.sha256((ROOT / "SOURCE_MANIFEST.json").read_bytes()).hexdigest(),
     }
 
 
@@ -116,6 +116,7 @@ def _write_formal_audit_run(root: Path, purpose=None):
         "mobility_revision": PAPER_MOBILITY_REVISION,
         "config_hash": config_hash,
         "config": config_dict,
+        "episode": config.episodes,
         "completed": True,
         "reproduction_git_commit": provenance["reproduction_git_commit"],
         "reproduction_git_branch": provenance["reproduction_git_branch"],
@@ -126,6 +127,10 @@ def _write_formal_audit_run(root: Path, purpose=None):
     torch.save(payload, run / "checkpoints" / "latest.pt")
     torch.save(payload, run / "checkpoints" / "best.pt")
     checkpoint_hash = hashlib.sha256((run / "checkpoints" / "latest.pt").read_bytes()).hexdigest()
+    checkpoint_hashes = {
+        name: hashlib.sha256((run / "checkpoints" / name).read_bytes()).hexdigest()
+        for name in ("latest.pt", "best.pt")
+    }
     complete = {
         "status": "complete",
         "is_formal_result": True,
@@ -139,6 +144,9 @@ def _write_formal_audit_run(root: Path, purpose=None):
         "reproduction_git_dirty": False,
         "reproduction_tracked_tree_sha256": provenance["reproduction_tracked_tree_sha256"],
         "source_manifest_sha256": provenance["source_manifest_sha256"],
+        "final_episode": config.episodes,
+        "checkpoint_completed": True,
+        "checkpoint_sha256": checkpoint_hashes,
         "gap_definition": config.gap_definition,
         "vehicle_length_m": 4.0,
         "effective_center_spacing_m": config.effective_center_spacing_m,
@@ -200,6 +208,9 @@ def _write_formal_audit_run(root: Path, purpose=None):
         "effective_center_spacing_m": config.effective_center_spacing_m,
         "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
         "checkpoint_sha256": checkpoint_hash,
+        "checkpoint_name": "latest.pt",
+        "checkpoint_episode": config.episodes,
+        "checkpoint_completed": True,
         "checkpoint": "checkpoints/latest.pt",
         "checkpoint_path_is_relative_to_run": True,
         "mean_AoI_ms_per_seed_agent": [[0.0] * agents for _ in seeds],
@@ -221,7 +232,13 @@ def _write_formal_audit_run(root: Path, purpose=None):
     (eval_dir / "EVAL_COMPLETE.json").write_text(json.dumps(summary), encoding="utf-8")
     (eval_dir / "provenance.json").write_text(json.dumps(summary), encoding="utf-8")
     marker = "VALIDATION_READY.json" if purpose == "validation" else "FINAL_RELEASE.json"
-    (run / marker).write_text(json.dumps({"status": "validation_ready" if purpose == "validation" else "final_release", "scope": scope, "eval_purpose": purpose}), encoding="utf-8")
+    (run / marker).write_text(json.dumps({
+        "status": "validation_ready" if purpose == "validation" else "final_release",
+        "scope": scope,
+        "eval_purpose": purpose,
+        "eval_id": "eval_" + purpose,
+        "checkpoint_sha256": checkpoint_hash,
+    }), encoding="utf-8")
     return run
 
 
@@ -281,8 +298,8 @@ def test_formal_eval_precondition_fails_before_eval_directory_creation(tmp_path,
         "paper_faithful",
         "p05_n04_g25",
         seed=2,
-        episodes=1,
-        steps_per_episode=1,
+        episodes=500,
+        steps_per_episode=100,
         output_root=str(tmp_path),
         run_name="formal_precondition",
         device="cpu",
