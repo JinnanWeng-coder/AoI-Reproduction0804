@@ -1,4 +1,5 @@
 profile: legacy_release
+semantic_version: legacy_release_v1
 tau: 0.005
 global_actor_weight: 2.0
 global_update_mode: legacy_detach
@@ -11,4 +12,8 @@ power_continuous: false
 previous_interference_dim: 1
 include_remaining_time: false
 current_interference_reward: false
-
+initial_aoi_ms: 100.0
+eval_protocol: sequential_warm
+eval_warmup_episodes: 5
+global_reward_normalization: legacy_scalar
+mobility_model: legacy_source

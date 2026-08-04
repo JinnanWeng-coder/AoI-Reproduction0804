@@ -31,6 +31,7 @@ DEFAULT_SCENARIOS: Dict[str, Dict[str, Any]] = {
 
 
 COMMON_DEFAULTS: Dict[str, Any] = {
+    "semantic_version": "paper_faithful_v2",
     "episodes": 500,
     "steps_per_episode": 100,
     "slot_ms": 1.0,
@@ -72,12 +73,18 @@ COMMON_DEFAULTS: Dict[str, Any] = {
     "include_remaining_time": True,
     "current_interference_reward": True,
     "global_update_mode": "synchronous_joint",
+    "initial_aoi_ms": 100.0,
+    "eval_protocol": "sequential_warm",
+    "eval_warmup_episodes": 5,
+    "global_reward_normalization": "source_normalized_per_rb_mean",
+    "mobility_model": "urban_grid_correlated",
 }
 
 
 PROFILE_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "paper_faithful": {},
     "legacy_release": {
+        "semantic_version": "legacy_release_v1",
         "tau": 0.005,
         "global_actor_weight": 2.0,
         "global_update_mode": "legacy_detach",
@@ -91,6 +98,8 @@ PROFILE_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "previous_interference_dim": 1,
         "include_remaining_time": False,
         "current_interference_reward": False,
+        "global_reward_normalization": "legacy_scalar",
+        "mobility_model": "legacy_source",
     },
 }
 
@@ -111,6 +120,7 @@ class ScenarioConfig:
 class ExperimentConfig:
     profile: str
     scenario: ScenarioConfig
+    semantic_version: str = "paper_faithful_v2"
     seed: int = 2
     episodes: int = 500
     steps_per_episode: int = 100
@@ -153,6 +163,11 @@ class ExperimentConfig:
     include_remaining_time: bool = True
     current_interference_reward: bool = True
     global_update_mode: str = "synchronous_joint"
+    initial_aoi_ms: float = 100.0
+    eval_protocol: str = "sequential_warm"
+    eval_warmup_episodes: int = 5
+    global_reward_normalization: str = "source_normalized_per_rb_mean"
+    mobility_model: str = "urban_grid_correlated"
     run_name: Optional[str] = None
     smoke: bool = False
     is_formal_result: bool = True
@@ -300,6 +315,19 @@ def validate_config(config: ExperimentConfig) -> None:
         raise ValueError("paper_faithful default global_actor_weight must remain 1.0")
     if config.global_update_mode not in {"legacy_detach", "synchronous_joint", "sequential_agent"}:
         raise ValueError("unsupported global_update_mode")
+    expected_version = "paper_faithful_v2" if config.profile == "paper_faithful" else "legacy_release_v1"
+    if config.semantic_version != expected_version:
+        raise ValueError(f"{config.profile} requires semantic_version={expected_version}")
+    if config.initial_aoi_ms < 0:
+        raise ValueError("initial_aoi_ms must be non-negative")
+    if config.eval_protocol not in {"sequential_warm"}:
+        raise ValueError("unsupported eval_protocol")
+    if config.eval_warmup_episodes < 0:
+        raise ValueError("eval_warmup_episodes must be non-negative")
+    if config.global_reward_normalization not in {"source_normalized_per_rb_mean", "eq16_sum", "legacy_scalar"}:
+        raise ValueError("unsupported global_reward_normalization")
+    if config.mobility_model not in {"urban_grid_correlated", "legacy_source"}:
+        raise ValueError("unsupported mobility_model")
     if config.previous_interference_dim not in {1, config.n_rb}:
         raise ValueError("previous_interference_dim must be 1 or n_rb")
     if len(config.rsu_position) != 2:

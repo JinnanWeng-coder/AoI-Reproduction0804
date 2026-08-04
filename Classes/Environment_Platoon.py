@@ -99,7 +99,9 @@ class PaperEnviron:
         self.vehicles: List[Vehicle] = []
         self.step_count = 0
         self.episode_index = 0
+        self._world_initialized = False
         self._build_episode_world()
+        self._world_initialized = True
 
     @property
     def state_dim(self):
@@ -197,35 +199,56 @@ class PaperEnviron:
         self.v2v_demand = np.full(self.n_platoon, self.v2v_demand_size, dtype=np.float64)
         self.individual_time_limit = np.full(self.n_platoon, self.config.steps_per_episode * self.time_fast, dtype=np.float64)
         self.active_links = np.ones(self.n_platoon, dtype=bool)
-        self.aoi = np.full(self.n_platoon, 100.0, dtype=np.float64)
+        self.aoi = np.full(self.n_platoon, self.config.initial_aoi_ms, dtype=np.float64)
         self.previous_interference = np.full((self.n_platoon, self.n_rb), self.sig2_db, dtype=np.float64)
         self.step_count = 0
 
-    def reset(self, seed: Optional[int] = None):
+    def reset_world(self, seed: Optional[int] = None):
+        """Cold-reset the world and its private RNG stream.
+
+        A world reset is deliberately separate from an episode start.  It is
+        the only operation that rebuilds vehicles, channels, AoI, and the
+        initial interference history.
+        """
         if seed is not None:
             self.rng = np.random.default_rng(int(seed))
             self.v2v_channels.rng = self.rng
             self.v2i_channels.rng = self.rng
         self._build_episode_world()
         self.episode_index = 0
+        self._world_initialized = True
         return self.get_observations()
 
-    def reset_episode(self, episode_index: int):
-        if episode_index == 0:
-            self._build_episode_world()
-        else:
-            self.v2v_demand.fill(self.v2v_demand_size)
-            self.individual_time_limit.fill(self.config.steps_per_episode * self.time_fast)
-            self.active_links[:] = True
-            self.aoi.fill(100.0)
-            self.previous_interference.fill(self.sig2_db)
-            if episode_index % self.config.slow_update_every_episodes == 0:
-                self._renew_positions()
-                self._renew_channel()
+    def reset(self, seed: Optional[int] = None):
+        """Backward-compatible alias for :meth:`reset_world`."""
+        return self.reset_world(seed)
+
+    def start_episode(self, episode_index: int, update_mobility: bool = True):
+        """Start an episode without resetting persistent AoI/interference.
+
+        Payload, deadline, and link activity are episode-local.  Vehicle
+        positions, slow fading, AoI, and previous interference belong to the
+        continuing world and are preserved unless the configured slow-update
+        boundary advances the mobility/channel state.
+        """
+        if not self._world_initialized:
+            self.reset_world(self.config.seed)
+        episode_index = int(episode_index)
+        if episode_index > 0 and update_mobility and episode_index % self.config.slow_update_every_episodes == 0:
+            self._renew_positions()
+            self._renew_channel()
+        self.v2v_demand.fill(self.v2v_demand_size)
+        self.individual_time_limit.fill(self.config.steps_per_episode * self.time_fast)
+        self.active_links[:] = True
+        if episode_index > 0:
             self._renew_fast_fading()
         self.episode_index = episode_index
         self.step_count = 0
         return self.get_observations()
+
+    def reset_episode(self, episode_index: int):
+        """Compatibility alias retained for older callers."""
+        return self.start_episode(episode_index)
 
     def decode_actions(self, actions):
         raw = np.asarray(actions, dtype=np.float64).reshape(self.n_platoon, 3)
@@ -355,6 +378,7 @@ class PaperEnviron:
             "previous_interference": self.previous_interference.copy(),
             "step_count": self.step_count,
             "episode_index": self.episode_index,
+            "world_initialized": self._world_initialized,
             "rng_state": self.rng.bit_generator.state,
         }
 
@@ -364,7 +388,10 @@ class PaperEnviron:
             setattr(self, key, np.asarray(state[key]).copy())
         self.step_count = int(state["step_count"])
         self.episode_index = int(state["episode_index"])
+        self._world_initialized = bool(state.get("world_initialized", True))
         self.rng.bit_generator.state = state["rng_state"]
+        self.v2v_channels.rng = self.rng
+        self.v2i_channels.rng = self.rng
 
 
 def make_paper_environment(config):

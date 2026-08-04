@@ -58,6 +58,7 @@ class LegacyEnviron:
         )
         self.step_count = 0
         self.reset(config.seed)
+        self._world_initialized = True
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._env, name)
@@ -71,21 +72,30 @@ class LegacyEnviron:
             np.random.seed(int(seed))
         self._env.new_random_game()
         self.step_count = 0
+        self._world_initialized = True
         return self.get_observations()
 
-    def reset_episode(self, episode_index: int):
+    def reset_world(self, seed: Optional[int] = None):
+        """Cold-reset alias used by the unified runner."""
+        return self.reset(seed)
+
+    def start_episode(self, episode_index: int, update_mobility: bool = True):
         p = self.config.number_agents
         self._env.V2V_demand = self._env.V2V_demand_size * np.ones(p, dtype=np.float16)
         self._env.individual_time_limit = self._env.time_slow * np.ones(p, dtype=np.float16)
         self._env.active_links = np.ones(p, dtype=bool)
         if episode_index == 0:
             self._env.AoI = np.ones(p) * 100
-        if episode_index % self.config.slow_update_every_episodes == 0:
+        if update_mobility and episode_index % self.config.slow_update_every_episodes == 0:
             self._env.renew_positions()
             self._env.renew_channel(self.config.number_vehicles, self.config.scenario.platoon_size)
             self._env.renew_channels_fastfading()
         self.step_count = 0
         return self.get_observations()
+
+    def reset_episode(self, episode_index: int):
+        """Compatibility alias preserving the public legacy episode order."""
+        return self.start_episode(episode_index)
 
     def decode_actions(self, actions: np.ndarray) -> np.ndarray:
         # Preserve the actor's float32 arithmetic; the public Main.py received
@@ -134,6 +144,9 @@ class LegacyEnviron:
         terminated = self.step_count >= self.config.steps_per_episode
         info: Dict[str, Any] = {
             "actions_decoded": decoded.copy(),
+            "rb": decoded[:, 0].astype(np.int64),
+            "mode": decoded[:, 1].astype(np.int64),
+            "power_dbm": decoded[:, 2].astype(np.float32),
             "aoi_ms": np.asarray(aoi).copy(),
             "remaining_demand": np.asarray(demand).copy(),
             "v2i_rate": np.asarray(c_rate).copy(),

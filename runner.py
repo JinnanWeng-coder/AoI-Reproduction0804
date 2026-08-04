@@ -116,6 +116,7 @@ def _prepare_run(config: ExperimentConfig, resume: Optional[str]) -> Tuple[Path,
         "cuda_version": torch.version.cuda,
         "source_manifest_sha256": _source_manifest_digest(),
         "profile": config.profile,
+        "semantic_version": config.semantic_version,
         "scenario": config.scenario.id,
         "seed": config.seed,
         "is_formal_result": bool(config.is_formal_result),
@@ -127,6 +128,14 @@ def _prepare_run(config: ExperimentConfig, resume: Optional[str]) -> Tuple[Path,
 
 def _load_checkpoint(path: Path, config, agents, learner, replay, environment, metrics):
     payload = torch.load(path, map_location=learner.device, weights_only=False)
+    checkpoint_semantic_version = payload.get("semantic_version")
+    if checkpoint_semantic_version is None:
+        raise ValueError("checkpoint semantic_version is missing; legacy/v1 checkpoints are rejected")
+    if checkpoint_semantic_version != config.semantic_version:
+        raise ValueError(
+            "checkpoint semantic_version mismatch: "
+            f"checkpoint={checkpoint_semantic_version!r}, resolved={config.semantic_version!r}"
+        )
     if payload.get("config_hash") != config.canonical_hash():
         raise ValueError("checkpoint config hash does not match resolved config")
     for agent, state in zip(agents, payload["agents"]):
@@ -153,10 +162,15 @@ def train(config: ExperimentConfig, resume: Optional[str] = None, max_episodes: 
         start_episode = int(payload["episode"])
         if payload.get("completed"):
             raise RuntimeError("refusing to resume a completed run")
+    elif hasattr(environment, "reset_world") and not getattr(environment, "_world_initialized", False):
+        environment.reset_world(config.seed)
 
     stop_episode = config.episodes if max_episodes is None else min(config.episodes, int(max_episodes))
     for episode in range(start_episode, stop_episode):
-        observations = environment.reset_episode(episode)
+        if hasattr(environment, "start_episode"):
+            observations = environment.start_episode(episode)
+        else:
+            observations = environment.reset_episode(episode)
         task1_steps: List[np.ndarray] = []
         task2_steps: List[np.ndarray] = []
         global_steps: List[float] = []
@@ -195,6 +209,7 @@ def train(config: ExperimentConfig, resume: Optional[str] = None, max_episodes: 
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "is_formal_result": bool(config.is_formal_result),
         "profile": config.profile,
+        "semantic_version": config.semantic_version,
         "scenario": config.scenario.id,
         "seed": config.seed,
         "episodes": config.episodes,
