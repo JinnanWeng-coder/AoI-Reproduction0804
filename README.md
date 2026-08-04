@@ -18,11 +18,13 @@ The implementation is split into `legacy_release` and `paper_faithful` profiles.
 Smoke runs are written below `scratch/`; formal runs are written below
 `experiments/runs/` and are never overwritten.
 
-`paper_faithful` artifacts use semantic version `paper_faithful_v3` and
-checkpoint schema v3. Existing paper_faithful v1/v2 checkpoints/results are
-incompatible and are rejected by the loader; they remain as historical
-artifacts and are not reused. `legacy_release_v1` retains its compatibility
-loader, including pre-semantic legacy checkpoints.
+`paper_faithful` artifacts use semantic version `paper_faithful_v4`, mobility
+revision `lane_graph_exit_safe_v1`, and checkpoint schema `checkpoint_v4`.
+Paper-faithful v1/v2/v3 checkpoints are rejected; `legacy_release_v1` retains
+its compatibility loader, including historical pre-semantic legacy
+checkpoints. The v4 mobility update consumes the exact velocity-times-slow
+interval distance along legal lane-graph segments, including the explicit
+up->right, down->left, left->up, and right->down exits.
 
 ## Environments
 
@@ -39,7 +41,7 @@ python Main.py --profile paper_faithful --dry-run --matrix
 
 The first command prints the resolved config, state/action dimensions, and safe
 run path without creating output. The second prints exactly 48 unique
-`8 scenarios × seeds 2..7` tasks.
+`8 scenarios x seeds 2..7` tasks.
 
 ## Smoke, resume, eval, and audit
 
@@ -47,10 +49,10 @@ run path without creating output. The second prints exactly 48 unique
 python Main.py --profile paper_faithful --scenario p05_n04_g25 \
   --seed 2 --device cpu --smoke --run-name smoke_paper
 python Main.py --profile paper_faithful --device cpu \
-  --eval-only --eval-purpose final_test --eval-episodes 100 \
-  --eval-seeds 101,102,103,104,105,106 \
+  --eval-only --scope validation --eval-purpose validation --eval-episodes 2 \
+  --eval-seeds 201,202 \
   --resume scratch/smoke_paper/checkpoints/latest.pt
-python analysis/audit_results.py scratch/smoke_paper --allow-incomplete
+python analysis/audit_results.py scratch/smoke_paper --scope validation --require-eval
 python -m analysis.plot_training scratch/smoke_paper
 python analysis/study_manifest.py experiments/runs --output study_manifest.json
 python analysis/build_paper_figures.py study_manifest.json --figure 3
@@ -69,7 +71,12 @@ warm-up episodes by default, then sequential scored episodes. `validation`
 uses 201..206; `final_test` uses 101..106. Raw arrays retain
 eval-seed x scored-episode x slot x agent. Within-seed episode SD is
 descriptive only; inferential mean/SD/95% CI is computed across independent
-training seeds. Validation and final-test artifacts cannot be mixed.
+training seeds. The CLI requires `--scope validation --eval-purpose validation`
+for pilot/validation evaluation. `final_test` is reserved for a formal
+checkpoint and requires `--scope final_release`, seeds 101..106, warm-up 5,
+and 100 scored episodes. A training command always uses `--scope train` and
+does not accept an evaluation purpose. Validation and final-test artifacts
+cannot be mixed.
 
 The restart-safe matrix entry points are:
 
@@ -77,6 +84,12 @@ The restart-safe matrix entry points are:
 scripts/run_paper_matrix.sh --dry-run
 powershell -File scripts/run_paper_matrix.ps1 -DryRun
 ```
+
+`matrix_runner.py --execute` defaults to train-only. Use
+`--stage all --eval-purpose validation` explicitly for train -> validation
+eval -> validation audit; use `--eval-purpose final_test` only for the formal
+final-release lane. Existing directories are classified with structured
+recovery states and are never deleted or overwritten.
 
 Use `--execute` only on the remote machine after the formal environment and
 storage policy have been confirmed. This code-completion stage does not execute
@@ -89,7 +102,7 @@ global actor term and old environment cadence, for compatibility tracing. Its
 adapter also exposes unified `rb`, `mode`, and `power_dbm` info fields.
 
 `paper_faithful` is the formal default: continuous `[1,30]` dBm power, full
-`750×1299` geometry, centered RSU, per-RB previous interference, remaining time,
+`750 x 1299` geometry, centered RSU, per-RB previous interference, remaining time,
 current-interference reward, correlated urban-grid mobility, and one
 synchronized joint actor update with `global_actor_weight=1.0`.
 
@@ -97,13 +110,23 @@ Fig.4 requires declared baseline artifacts. If they are missing, the figure
 command exits nonzero and writes `INCOMPLETE_BASELINES.json`; this prevents
 silently presenting the current Algorithm2/TDec curve as a complete comparison.
 The required baselines are `Modified_MADDPG`, `MADDPG_FDec`, and `DDPG`;
-`DQN` is not a paper Fig.4 baseline. Fig.5 can produce an explicitly labelled
-current-algorithm `PARTIAL` output while the baselines are unavailable.
+`DQN` is not a paper Fig.4 baseline. The default Fig.4 stores and draws task1,
+task2, global, and combined metrics; raw panel data are saved beside the PNG.
+Fig.5 can produce an explicitly labelled current-algorithm `PARTIAL` output
+while the baselines are unavailable.
 
-Formal audit applies hard gates for paper_faithful_v3: 500 episodes, 100 slots,
+Formal audit applies hard gates for paper_faithful_v4: 500 episodes, 100 slots,
 the resolved full network, training seeds 2..7, final-test seeds 101..106,
 warmup 5, scored episodes 100, endpoint-demand consistency, clean Git
 provenance, and one unique final-test artifact per training run.
 
-Formal 500-episode training and the 48-run matrix are intentionally not launched
-by this code-completion stage.
+Fig.5 uses only the controlled gap grid
+`p05_n04_g05/g15/g25/g35` or size grid
+`p05_n04_g25/p05_n06_g25/p05_n08_g25/p05_n10_g25`. Validation may produce a
+labelled `PARTIAL` current-algorithm figure; a complete final Fig.5 requires
+Modified_MADDPG_with_TDec, Modified_MADDPG, MADDPG_FDec, and DDPG for every
+scenario and training seed 2..7. The three baselines are not implemented in
+this round.
+
+Formal 500-episode training, the final release, and the 48-run matrix are
+intentionally not launched by this code-completion stage.
