@@ -1,5 +1,5 @@
 profile: paper_faithful
-semantic_version: paper_faithful_v2
+semantic_version: paper_faithful_v3
 tau: 0.0005
 global_actor_weight: 1.0
 global_update_mode: synchronous_joint
@@ -19,3 +19,6 @@ eval_protocol: sequential_warm
 eval_warmup_episodes: 5
 global_reward_normalization: source_normalized_per_rb_mean
 mobility_model: urban_grid_correlated
+gap_definition: bumper_to_bumper
+vehicle_length_m: 4.0
+statistics_schema_version: eval_seed_cluster_v1

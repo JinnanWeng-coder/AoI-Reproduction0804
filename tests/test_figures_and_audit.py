@@ -13,7 +13,7 @@ def _write_run(root: Path, name: str, seed: int, with_eval: bool = True):
     (run / "eval" / "eval1").mkdir(parents=True)
     config = {
         "profile": "paper_faithful",
-        "semantic_version": "paper_faithful_v2",
+        "semantic_version": "paper_faithful_v3",
         "seed": seed,
         "episodes": 3,
         "steps_per_episode": 2,
@@ -81,7 +81,7 @@ def test_negative_eval_audit_rejects_duplicate_seeds_and_wrong_protocol(tmp_path
         "eval_episodes": 1,
         "eval_protocol": "independent_reset",
         "eval_warmup_episodes": 0,
-        "semantic_version": "paper_faithful_v2",
+        "semantic_version": "paper_faithful_v3",
         "checkpoint": str(tmp_path / "missing.pt"),
         "checkpoint_sha256": "bad",
         "mean_AoI_ms_per_seed": [0, 0],

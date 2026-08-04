@@ -39,7 +39,8 @@ def atomic_torch_save(payload: Dict[str, Any], path: Path) -> None:
 
 def build_payload(config, agents, learner, replay, environment, metrics, episode: int, completed: bool = False) -> Dict[str, Any]:
     return {
-        "checkpoint_version": 2,
+        "checkpoint_version": 3,
+        "checkpoint_schema_version": "checkpoint_v3",
         "semantic_version": config.semantic_version,
         "config_hash": config.canonical_hash(),
         "config": config.to_dict(),
@@ -51,4 +52,7 @@ def build_payload(config, agents, learner, replay, environment, metrics, episode
         "environment": environment.state_dict() if hasattr(environment, "state_dict") else None,
         "metrics": metrics.state_dict(),
         "rng": capture_rng_state(),
+        "gap_definition": config.gap_definition,
+        "vehicle_length_m": float(config.vehicle_length_m),
+        "statistics_schema_version": config.statistics_schema_version,
     }

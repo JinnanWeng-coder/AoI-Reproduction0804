@@ -138,8 +138,12 @@ class PaperEnviron:
         up = [1.75, 5.25, 251.75, 255.25, 501.75, 505.25]
         down = [244.75, 248.25, 494.75, 498.25, 744.75, 748.25]
         left = [1.75, 5.25, 434.75, 438.25, 867.75, 871.25]
-        right = [427.75, 431.25, 860.75, 864.75, 1293.75, 1297.25]
+        right = [427.75, 431.25, 860.75, 864.25, 1293.75, 1297.25]
         return {"u": up, "d": down, "l": left, "r": right}
+
+    @property
+    def center_spacing_m(self) -> float:
+        return float(self.config.effective_center_spacing_m)
 
     def _build_vehicles(self):
         lanes = self._lane_sets()
@@ -155,7 +159,7 @@ class PaperEnviron:
             else:
                 start = [float(self.rng.uniform(0, self.width)), lane]
             for follower in range(self.size_platoon):
-                offset = follower * self.config.scenario.gap_m
+                offset = follower * self.center_spacing_m
                 if direction == "u":
                     position = [start[0], start[1] - offset]
                 elif direction == "d":
@@ -172,7 +176,17 @@ class PaperEnviron:
         self.v2v_shadowing = self.rng.normal(0, 3, (count, count))
         self.v2i_shadowing = self.rng.normal(0, 8, count)
 
-    def _renew_channel(self):
+    def initialize_shadowing(self):
+        """Public semantic name for the cold-reset shadowing draw."""
+        self._initialize_shadowing()
+
+    def renew_slow_channel(self):
+        """Correlate large-scale fading from the previous world state.
+
+        This method never reinitializes shadowing.  A fresh random draw is
+        reserved for :meth:`reset_world`; subsequent episode updates use the
+        previous shadowing and the configured decorrelation distance.
+        """
         count = len(self.vehicles)
         self.v2v_pathloss = np.zeros((count, count), dtype=np.float64) + 50 * np.identity(count)
         self.v2i_pathloss = np.zeros(count, dtype=np.float64)
@@ -190,6 +204,10 @@ class PaperEnviron:
         for i, vehicle in enumerate(self.vehicles):
             self.v2i_pathloss[i] = self.v2i_channels.get_path_loss(vehicle.position)
         self.v2i_channels_abs = self.v2i_pathloss + self.v2i_shadowing
+
+    def _renew_channel(self):
+        """Backward-compatible private alias."""
+        self.renew_slow_channel()
 
     def _renew_fast_fading(self):
         shape = (len(self.vehicles), len(self.vehicles), self.n_rb)
@@ -226,7 +244,9 @@ class PaperEnviron:
                     for crossing in lanes["r"]:
                         if y <= crossing <= y + distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
                             # Preserve the public source's turn geometry.
-                            x += distance + (crossing - y)
+                            # The first leg reaches the intersection; only
+                            # the residual distance is spent on the turn.
+                            x += distance - (crossing - y)
                             y = crossing
                             direction = "r"
                             changed = True
@@ -244,7 +264,7 @@ class PaperEnviron:
                 if not changed:
                     for crossing in lanes["r"]:
                         if y >= crossing >= y - distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
-                            x += distance + (y - crossing)
+                            x += distance - (y - crossing)
                             y = crossing
                             direction = "r"
                             changed = True
@@ -307,20 +327,21 @@ class PaperEnviron:
             leader.direction = direction
             for follower in range(1, self.size_platoon):
                 if leader.direction == "u":
-                    position = [x, y - follower * self.config.scenario.gap_m]
+                    position = [x, y - follower * self.center_spacing_m]
                 elif leader.direction == "d":
-                    position = [x, y + follower * self.config.scenario.gap_m]
+                    position = [x, y + follower * self.center_spacing_m]
                 elif leader.direction == "l":
-                    position = [x + follower * self.config.scenario.gap_m, y]
+                    position = [x + follower * self.center_spacing_m, y]
                 else:
-                    position = [x - follower * self.config.scenario.gap_m, y]
+                    position = [x - follower * self.center_spacing_m, y]
                 self.vehicles[leader_index + follower].direction = leader.direction
                 self.vehicles[leader_index + follower].position = position
+                self.vehicles[leader_index + follower].velocity = leader.velocity
 
     def _build_episode_world(self):
         self._build_vehicles()
-        self._initialize_shadowing()
-        self._renew_channel()
+        self.initialize_shadowing()
+        self.renew_slow_channel()
         self._renew_fast_fading()
         self.v2v_demand = np.full(self.n_platoon, self.v2v_demand_size, dtype=np.float64)
         self.individual_time_limit = np.full(self.n_platoon, self.config.steps_per_episode * self.time_fast, dtype=np.float64)
@@ -362,7 +383,7 @@ class PaperEnviron:
         episode_index = int(episode_index)
         if episode_index > 0 and update_mobility and episode_index % self.config.slow_update_every_episodes == 0:
             self._renew_positions()
-            self._renew_channel()
+            self.renew_slow_channel()
         if episode_index > 0:
             self._renew_fast_fading()
         self.v2v_demand.fill(self.v2v_demand_size)

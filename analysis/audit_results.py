@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 
 EXPECTED_SEMANTICS = {
-    "paper_faithful": "paper_faithful_v2",
+    "paper_faithful": "paper_faithful_v3",
     "legacy_release": "legacy_release_v1",
 }
 

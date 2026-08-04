@@ -18,7 +18,7 @@ def test_urban_grid_lane_constants_shadowing_and_exit_behavior():
     assert lanes["u"] == [1.75, 5.25, 251.75, 255.25, 501.75, 505.25]
     assert lanes["d"] == [244.75, 248.25, 494.75, 498.25, 744.75, 748.25]
     assert lanes["l"] == [1.75, 5.25, 434.75, 438.25, 867.75, 871.25]
-    assert lanes["r"] == [427.75, 431.25, 860.75, 864.75, 1293.75, 1297.25]
+    assert lanes["r"] == [427.75, 431.25, 860.75, 864.25, 1293.75, 1297.25]
 
     initial_shadowing = env.v2v_shadowing.copy()
     env._renew_channel()
@@ -79,3 +79,42 @@ def test_zero_dbm_diagnostic_interval_remains_supported():
     env = PaperEnviron(config)
     decoded = env.decode_actions(np.full((config.number_agents, 3), -1.0, dtype=np.float32))
     np.testing.assert_allclose(decoded[:, 2], 0.0)
+
+
+@pytest.mark.parametrize(
+    "direction,turn,position",
+    [
+        ("u", "l", [501.75, 434.35]),
+        ("u", "r", [501.75, 427.35]),
+        ("d", "l", [501.75, 435.15]),
+        ("d", "r", [501.75, 428.15]),
+        ("r", "u", [501.35, 649.5]),
+        ("r", "d", [244.35, 649.5]),
+        ("l", "u", [501.95, 649.5]),
+        ("l", "d", [248.65, 649.5]),
+    ],
+)
+def test_all_turns_use_exact_manhattan_path_and_reanchor_followers(direction, turn, position):
+    config = _config()
+    env = PaperEnviron(config)
+    env.reset_world(71)
+    env.change_direction_prob = 1.0
+    leader = env.vehicles[0]
+    leader.direction = direction
+    leader.position = list(position)
+    for follower in env.vehicles[1 : env.size_platoon]:
+        follower.velocity = 999.0
+
+    before = np.asarray(leader.position, dtype=np.float64)
+    distance = leader.velocity * env.time_slow
+    env._renew_positions()
+    after = np.asarray(leader.position, dtype=np.float64)
+
+    assert leader.direction == turn
+    assert abs(after[0] - before[0]) + abs(after[1] - before[1]) == pytest.approx(distance)
+    assert all(vehicle.direction == turn for vehicle in env.vehicles[: env.size_platoon])
+    assert all(vehicle.velocity == pytest.approx(leader.velocity) for vehicle in env.vehicles[: env.size_platoon])
+    spacing = config.effective_center_spacing_m
+    for index, follower in enumerate(env.vehicles[1 : env.size_platoon], start=1):
+        delta = np.asarray(follower.position) - after
+        assert np.linalg.norm(delta) == pytest.approx(index * spacing)

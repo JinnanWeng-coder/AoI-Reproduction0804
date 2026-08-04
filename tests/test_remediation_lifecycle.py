@@ -13,13 +13,18 @@ def _config(**overrides):
 def test_semantic_version_and_lifecycle_defaults_are_explicit():
     paper = _config()
     legacy = resolve_config("legacy_release", "p05_n04_g25")
-    assert paper.semantic_version == "paper_faithful_v2"
+    assert paper.semantic_version == "paper_faithful_v3"
     assert legacy.semantic_version == "legacy_release_v1"
     assert paper.initial_aoi_ms == 100.0
     assert paper.eval_protocol == "sequential_warm"
     assert paper.eval_warmup_episodes == 5
     assert paper.global_reward_normalization == "source_normalized_per_rb_mean"
     assert paper.mobility_model == "urban_grid_correlated"
+    assert paper.gap_definition == "bumper_to_bumper"
+    assert paper.vehicle_length_m == 4.0
+    assert paper.effective_center_spacing_m == 29.0
+    assert legacy.gap_definition == "center_to_center"
+    assert legacy.effective_center_spacing_m == 25.0
 
 
 def test_start_episode_preserves_aoi_and_previous_interference():
