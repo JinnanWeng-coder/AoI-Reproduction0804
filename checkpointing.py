@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 import random
 import subprocess
+import hashlib
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -22,10 +23,20 @@ def _git_stamp() -> Dict[str, Any]:
         except (OSError, subprocess.CalledProcessError):
             return None
 
+    tracked = _git("ls-files", "-z") or ""
+    digest = hashlib.sha256()
+    if tracked:
+        for name in sorted(item for item in tracked.split("\x00") if item):
+            path = root / name
+            digest.update(name.replace(os.sep, "/").encode("utf-8"))
+            digest.update(b"\x00")
+            if path.is_file():
+                digest.update(path.read_bytes())
     return {
         "reproduction_git_commit": _git("rev-parse", "HEAD"),
         "reproduction_git_branch": _git("branch", "--show-current"),
         "reproduction_git_dirty": bool(_git("status", "--porcelain", "--untracked-files=all")),
+        "reproduction_tracked_tree_sha256": digest.hexdigest() if tracked else None,
     }
 
 
@@ -55,12 +66,25 @@ def atomic_torch_save(payload: Dict[str, Any], path: Path) -> None:
     os.replace(temporary, path)
 
 
+def _source_manifest_digest() -> Optional[str]:
+    path = Path(__file__).resolve().parent / "SOURCE_MANIFEST.json"
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def build_payload(config, agents, learner, replay, environment, metrics, episode: int, completed: bool = False) -> Dict[str, Any]:
     payload = {
-        "checkpoint_version": 3,
-        "checkpoint_schema_version": "checkpoint_v3",
+        "checkpoint_version": 4,
+        "checkpoint_schema_version": "checkpoint_v4",
         "semantic_version": config.semantic_version,
+        "mobility_revision": config.mobility_revision,
         "config_hash": config.canonical_hash(),
+        "source_manifest_sha256": _source_manifest_digest(),
         "config": config.to_dict(),
         "episode": int(episode),
         "completed": bool(completed),

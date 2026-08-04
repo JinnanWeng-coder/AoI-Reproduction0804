@@ -20,7 +20,13 @@ from checkpointing import atomic_torch_save, build_payload, capture_rng_state, r
 from Classes.buffer import ReplayBuffer
 from Classes.Environment_Platoon import PaperEnviron
 from Classes.legacy_adapter import LegacyEnviron
-from config import ExperimentConfig, config_from_dict, resolve_config, safe_run_dir
+from config import (
+    CHECKPOINT_SCHEMA_VERSION,
+    ExperimentConfig,
+    config_from_dict,
+    resolve_config,
+    safe_run_dir,
+)
 from global_critic import Global_Critic
 from local_critic import Agent
 from metrics import MetricStore
@@ -31,6 +37,7 @@ EVAL_PURPOSE_SEEDS = {
     "final_test": [101, 102, 103, 104, 105, 106],
 }
 EVAL_STATISTICS_SCHEMA_VERSION = "eval_seed_cluster_v1"
+SCOPE_FOR_PURPOSE = {"validation": "validation", "final_test": "final_release"}
 
 
 def resolve_device(requested: str) -> torch.device:
@@ -174,6 +181,7 @@ def _prepare_run(config: ExperimentConfig, resume: Optional[str]) -> Tuple[Path,
         "platform": platform.platform(),
         "python": sys.version,
         "torch": torch.__version__,
+        "numpy": np.__version__,
         "cuda_available": bool(torch.cuda.is_available()),
         "cuda_device_count": int(torch.cuda.device_count()),
         "cuda_version": torch.version.cuda,
@@ -189,9 +197,11 @@ def _prepare_run(config: ExperimentConfig, resume: Optional[str]) -> Tuple[Path,
         "eval_warmup_episodes": int(config.eval_warmup_episodes),
         "global_reward_normalization": config.global_reward_normalization,
         "mobility_model": config.mobility_model,
+        "mobility_revision": config.mobility_revision,
         "gap_definition": config.gap_definition,
         "vehicle_length_m": float(config.vehicle_length_m),
         "effective_center_spacing_m": float(config.effective_center_spacing_m),
+        "checkpoint_schema_version": "checkpoint_v4",
         "statistics_schema_version": config.statistics_schema_version,
     }
     provenance.update(git)
@@ -222,13 +232,18 @@ def _load_checkpoint(path: Path, config, agents, learner, replay, environment, m
         )
     if config.profile == "legacy_release" and checkpoint_version < 3:
         legacy_compat = legacy_compat or not isinstance(payload.get("config"), dict) or "gap_definition" not in payload.get("config", {})
-    if config.profile == "paper_faithful" and checkpoint_version != 3:
+    if config.profile == "paper_faithful" and checkpoint_version != 4:
         raise ValueError(
-            "paper_faithful_v3 requires checkpoint_version=3; "
+            "paper_faithful_v4 requires checkpoint_version=4; "
             f"received {checkpoint_version}"
         )
-    if config.profile == "legacy_release" and checkpoint_version not in {1, 2, 3}:
+    if config.profile == "legacy_release" and checkpoint_version not in {1, 2, 3, 4}:
         raise ValueError(f"unsupported legacy checkpoint_version={checkpoint_version}")
+    if checkpoint_version >= 4:
+        if payload.get("checkpoint_schema_version") != CHECKPOINT_SCHEMA_VERSION:
+            raise ValueError("checkpoint schema version is not checkpoint_v4")
+        if payload.get("mobility_revision") != config.mobility_revision:
+            raise ValueError("checkpoint mobility_revision does not match resolved config")
     if payload.get("config_hash") != config.canonical_hash():
         raw_config = payload.get("config")
         raw_hash = None
@@ -312,20 +327,33 @@ def train(config: ExperimentConfig, resume: Optional[str] = None, max_episodes: 
     atomic_torch_save(final_payload, run_dir / "checkpoints" / "latest.pt")
     from analysis.audit_results import audit_run
 
-    audit = audit_run(run_dir, require_complete=False)
+    audit = audit_run(run_dir, require_complete=False, scope="train")
     if not audit["ok"]:
         raise RuntimeError("result audit failed before completion marker: " + json.dumps(audit, sort_keys=True))
+    provenance_data = json.loads((run_dir / "provenance.json").read_text(encoding="utf-8"))
     complete = {
         "status": "complete",
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "is_formal_result": bool(config.is_formal_result),
         "profile": config.profile,
         "semantic_version": config.semantic_version,
+        "mobility_revision": config.mobility_revision,
+        "checkpoint_schema_version": "checkpoint_v4",
         "config_hash": config.canonical_hash(),
-        "reproduction_git_commit": json.loads((run_dir / "provenance.json").read_text(encoding="utf-8")).get("reproduction_git_commit"),
-        "reproduction_git_branch": json.loads((run_dir / "provenance.json").read_text(encoding="utf-8")).get("reproduction_git_branch"),
+        "reproduction_git_commit": provenance_data.get("reproduction_git_commit"),
+        "reproduction_git_branch": provenance_data.get("reproduction_git_branch"),
+        "reproduction_git_dirty": provenance_data.get("reproduction_git_dirty"),
+        "reproduction_tracked_tree_sha256": provenance_data.get("reproduction_tracked_tree_sha256"),
+        "source_manifest_sha256": provenance_data.get("source_manifest_sha256"),
+        "python": provenance_data.get("python"),
+        "numpy": provenance_data.get("numpy"),
+        "torch": provenance_data.get("torch"),
+        "cuda_version": provenance_data.get("cuda_version"),
+        "cuda_driver": provenance_data.get("cuda_driver"),
+        "gpu_names": provenance_data.get("gpu_names", []),
         "gap_definition": config.gap_definition,
         "vehicle_length_m": float(config.vehicle_length_m),
+        "effective_center_spacing_m": float(config.effective_center_spacing_m),
         "scenario": config.scenario.id,
         "seed": config.seed,
         "episodes": config.episodes,
@@ -352,6 +380,41 @@ def _eval_id(checkpoint_hash: str, purpose: str, protocol: str, warmup_episodes:
     return f"eval_{purpose}_ckpt{checkpoint_hash[:12]}_{protocol}_warm{int(warmup_episodes)}_s{seed_token}_ep{int(episodes)}_noise{noise_token}"
 
 
+def _validate_formal_eval_preconditions(run_dir: Path, checkpoint_path: Path, payload: Dict[str, Any], config: ExperimentConfig) -> None:
+    """Validate provenance before an eval directory can be created."""
+    if not (run_dir / "COMPLETE.json").is_file():
+        raise RuntimeError("validation/final_release requires COMPLETE.json")
+    if not config.is_formal_result:
+        return
+    current = _git_metadata()
+    if current.get("reproduction_git_dirty") is not False:
+        raise RuntimeError("formal evaluation requires a clean reproduction Git worktree")
+    provenance_path = run_dir / "provenance.json"
+    if not provenance_path.is_file():
+        raise RuntimeError("formal evaluation requires run provenance.json")
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_tracked_tree_sha256"):
+        if not provenance.get(key) or provenance.get(key) != current.get(key):
+            raise RuntimeError(f"formal evaluation provenance mismatch: {key}")
+    if payload.get("reproduction_git_dirty") is not False:
+        raise RuntimeError("formal checkpoint must record dirty=false")
+    for key in ("reproduction_git_commit", "reproduction_git_branch"):
+        if payload.get(key) != current.get(key):
+            raise RuntimeError(f"formal checkpoint provenance mismatch: {key}")
+    if payload.get("reproduction_tracked_tree_sha256") != current.get("reproduction_tracked_tree_sha256"):
+        raise RuntimeError("formal checkpoint provenance mismatch: reproduction_tracked_tree_sha256")
+    if payload.get("source_manifest_sha256") != _source_manifest_digest():
+        raise RuntimeError("formal checkpoint source manifest mismatch")
+    if payload.get("semantic_version") != config.semantic_version:
+        raise RuntimeError("formal checkpoint semantic_version mismatch")
+    if payload.get("mobility_revision") != config.mobility_revision:
+        raise RuntimeError("formal checkpoint mobility_revision mismatch")
+    if payload.get("config_hash") != config.canonical_hash():
+        raise RuntimeError("formal checkpoint config_hash mismatch")
+    if payload.get("checkpoint_schema_version") != CHECKPOINT_SCHEMA_VERSION:
+        raise RuntimeError("formal checkpoint schema mismatch")
+
+
 def _mean_sd_ci95(values: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     values = np.asarray(values, dtype=np.float64)
     means = values.mean(axis=1)
@@ -368,10 +431,16 @@ def evaluate_from_checkpoint(
     checkpoint: str,
     eval_episodes: int,
     eval_seeds: Optional[List[int]] = None,
-    eval_purpose: str = "final_test",
+    eval_purpose: Optional[str] = None,
+    scope: Optional[str] = None,
 ) -> Dict[str, Any]:
     if eval_purpose not in EVAL_PURPOSE_SEEDS:
-        raise ValueError(f"eval_purpose must be one of {sorted(EVAL_PURPOSE_SEEDS)}")
+        raise ValueError("eval_purpose must be explicitly set to validation or final_test")
+    expected_scope = SCOPE_FOR_PURPOSE[eval_purpose]
+    if scope is None:
+        scope = expected_scope
+    if scope not in {"validation", "final_release"} or scope != expected_scope:
+        raise ValueError(f"scope={scope!r} does not match eval_purpose={eval_purpose!r}")
     checkpoint_path = Path(checkpoint).expanduser().resolve()
     run_dir = checkpoint_path.parent.parent
     caller_rng = capture_rng_state()
@@ -382,6 +451,8 @@ def evaluate_from_checkpoint(
     if requested_device != "auto":
         saved_config.device = requested_device
     config = saved_config
+    if eval_purpose == "final_test" and not config.is_formal_result:
+        raise ValueError("final_test/final_release is reserved for a formal training checkpoint")
     if eval_seeds is None:
         eval_seeds = list(EVAL_PURPOSE_SEEDS[eval_purpose])
     eval_seeds = [int(seed) for seed in eval_seeds]
@@ -392,14 +463,21 @@ def evaluate_from_checkpoint(
     if int(eval_episodes) < 1:
         raise ValueError("eval_episodes must be positive")
     warmup_episodes = int(config.eval_warmup_episodes)
+    if config.is_formal_result:
+        if warmup_episodes != 5 or int(eval_episodes) != 100:
+            raise ValueError("formal evaluation requires warmup=5 and scored episodes=100")
     eval_noise = 0.0
     eval_id = _eval_id(checkpoint_hash, eval_purpose, config.eval_protocol, warmup_episodes, eval_seeds, eval_episodes, eval_noise)
     eval_dir = run_dir / "eval" / eval_id
     if eval_dir.exists():
         raise FileExistsError(f"Refusing to overwrite existing eval directory: {eval_dir}")
-    eval_dir.mkdir(parents=True, exist_ok=False)
+    marker_path = run_dir / ("VALIDATION_READY.json" if scope == "validation" else "FINAL_RELEASE.json")
+    if marker_path.exists():
+        raise FileExistsError(f"Refusing to overwrite lifecycle marker: {marker_path}")
+    _validate_formal_eval_preconditions(run_dir, checkpoint_path, checkpoint_preview, config)
     environment, agents, learner, replay, metrics, device = _make_system(config)
     payload = _load_checkpoint(checkpoint_path, config, agents, learner, replay, environment, metrics)
+    eval_dir.mkdir(parents=True, exist_ok=False)
     for agent in agents:
         agent.actor.eval()
     raw_aoi = []
@@ -411,6 +489,14 @@ def evaluate_from_checkpoint(
     raw_power = []
     raw_rb = []
     raw_mode = []
+    raw_v2v_rate_all = []
+    raw_selected_interference = []
+    raw_interference_linear = []
+    raw_v2i_interference_linear = []
+    raw_v2v_interference_linear = []
+    raw_I_v2i_linear = []
+    raw_I_v2v_linear = []
+    raw_I_mode_db = []
     try:
         for seed in eval_seeds:
             seed_aoi = []
@@ -422,6 +508,14 @@ def evaluate_from_checkpoint(
             seed_power = []
             seed_rb = []
             seed_mode = []
+            seed_v2v_rate_all = []
+            seed_selected_interference = []
+            seed_interference_linear = []
+            seed_v2i_interference_linear = []
+            seed_v2v_interference_linear = []
+            seed_I_v2i_linear = []
+            seed_I_v2v_linear = []
+            seed_I_mode_db = []
 
             # One cold reset per held-out seed.  Warm-up and scored episodes
             # then advance the same world sequentially, preserving AoI,
@@ -445,6 +539,14 @@ def evaluate_from_checkpoint(
                 episode_power = []
                 episode_rb = []
                 episode_mode = []
+                episode_v2v_rate_all = []
+                episode_selected_interference = []
+                episode_interference_linear = []
+                episode_v2i_interference_linear = []
+                episode_v2v_interference_linear = []
+                episode_I_v2i_linear = []
+                episode_I_v2v_linear = []
+                episode_I_mode_db = []
                 for _step in range(config.steps_per_episode):
                     actions = np.asarray([agent.choose_action(observations[index], explore=False) for index, agent in enumerate(agents)], dtype=np.float32)
                     observations, _rg, _t1, _t2, _done, info = environment.step(actions)
@@ -457,6 +559,14 @@ def evaluate_from_checkpoint(
                     episode_power.append(info["power_dbm"])
                     episode_rb.append(info["rb"])
                     episode_mode.append(info["mode"])
+                    episode_v2v_rate_all.append(info.get("v2v_rate_all", np.zeros((config.number_agents, config.scenario.platoon_size - 1), dtype=np.float32)))
+                    episode_selected_interference.append(info.get("selected_interference_db", info["interference_db"]))
+                    episode_interference_linear.append(info.get("interference_linear", np.zeros((config.number_agents, config.n_rb), dtype=np.float32)))
+                    episode_v2i_interference_linear.append(info.get("v2i_interference_linear", np.zeros((config.number_agents, config.n_rb), dtype=np.float32)))
+                    episode_v2v_interference_linear.append(info.get("v2v_interference_linear", np.zeros((config.number_agents, config.scenario.platoon_size - 1, config.n_rb), dtype=np.float32)))
+                    episode_I_v2i_linear.append(info.get("I_v2i_linear", episode_v2i_interference_linear[-1]))
+                    episode_I_v2v_linear.append(info.get("I_v2v_linear", episode_v2v_interference_linear[-1]))
+                    episode_I_mode_db.append(info.get("I_mode_db", episode_interference_linear[-1]))
                 seed_aoi.append(episode_aoi)
                 seed_success.append(episode_success)
                 seed_demand.append(episode_demand)
@@ -466,6 +576,14 @@ def evaluate_from_checkpoint(
                 seed_power.append(episode_power)
                 seed_rb.append(episode_rb)
                 seed_mode.append(episode_mode)
+                seed_v2v_rate_all.append(episode_v2v_rate_all)
+                seed_selected_interference.append(episode_selected_interference)
+                seed_interference_linear.append(episode_interference_linear)
+                seed_v2i_interference_linear.append(episode_v2i_interference_linear)
+                seed_v2v_interference_linear.append(episode_v2v_interference_linear)
+                seed_I_v2i_linear.append(episode_I_v2i_linear)
+                seed_I_v2v_linear.append(episode_I_v2v_linear)
+                seed_I_mode_db.append(episode_I_mode_db)
             raw_aoi.append(seed_aoi)
             raw_success.append(seed_success)
             raw_demand.append(seed_demand)
@@ -475,6 +593,14 @@ def evaluate_from_checkpoint(
             raw_power.append(seed_power)
             raw_rb.append(seed_rb)
             raw_mode.append(seed_mode)
+            raw_v2v_rate_all.append(seed_v2v_rate_all)
+            raw_selected_interference.append(seed_selected_interference)
+            raw_interference_linear.append(seed_interference_linear)
+            raw_v2i_interference_linear.append(seed_v2i_interference_linear)
+            raw_v2v_interference_linear.append(seed_v2v_interference_linear)
+            raw_I_v2i_linear.append(seed_I_v2i_linear)
+            raw_I_v2v_linear.append(seed_I_v2v_linear)
+            raw_I_mode_db.append(seed_I_mode_db)
     finally:
         # Evaluation uses private environment generators and must not perturb
         # the caller's training RNG streams.
@@ -490,6 +616,14 @@ def evaluate_from_checkpoint(
         "power_dbm": np.asarray(raw_power, dtype=np.float32),
         "rb": np.asarray(raw_rb, dtype=np.int64),
         "mode": np.asarray(raw_mode, dtype=np.int64),
+        "v2v_rate_all": np.asarray(raw_v2v_rate_all, dtype=np.float32),
+        "selected_interference_db": np.asarray(raw_selected_interference, dtype=np.float32),
+        "interference_linear": np.asarray(raw_interference_linear, dtype=np.float32),
+        "v2i_interference_linear": np.asarray(raw_v2i_interference_linear, dtype=np.float32),
+        "v2v_interference_linear": np.asarray(raw_v2v_interference_linear, dtype=np.float32),
+        "I_v2i_linear": np.asarray(raw_I_v2i_linear, dtype=np.float32),
+        "I_v2v_linear": np.asarray(raw_I_v2v_linear, dtype=np.float32),
+        "I_mode_db": np.asarray(raw_I_mode_db, dtype=np.float32),
     }
     np.savez_compressed(eval_dir / "metrics.npz", **arrays)
     try:
@@ -515,6 +649,8 @@ def evaluate_from_checkpoint(
     summary = {
         "eval_id": eval_id,
         "eval_purpose": eval_purpose,
+        "scope": scope,
+        "release_status": "validation_ready" if scope == "validation" else ("final_release" if formal_eval else "evaluation_complete"),
         "statistics_schema_version": EVAL_STATISTICS_SCHEMA_VERSION,
         "eval_seeds": [int(seed) for seed in eval_seeds],
         "eval_episodes": int(eval_episodes),
@@ -529,11 +665,23 @@ def evaluate_from_checkpoint(
         "reproduction_git_commit": eval_git.get("reproduction_git_commit"),
         "reproduction_git_branch": eval_git.get("reproduction_git_branch"),
         "reproduction_git_dirty": eval_git.get("reproduction_git_dirty"),
+        "reproduction_tracked_tree_sha256": eval_git.get("reproduction_tracked_tree_sha256"),
+        "source_manifest_sha256": _source_manifest_digest(),
+        "python": sys.version,
+        "numpy": np.__version__,
+        "torch": torch.__version__,
+        "cuda_available": bool(torch.cuda.is_available()),
+        "cuda_device_count": int(torch.cuda.device_count()),
+        "cuda_version": torch.version.cuda,
+        "cuda_driver": eval_git.get("cuda_driver"),
+        "gpu_names": eval_git.get("gpu_names", []),
         "global_reward_normalization": config.global_reward_normalization,
         "mobility_model": config.mobility_model,
+        "mobility_revision": config.mobility_revision,
         "gap_definition": config.gap_definition,
         "vehicle_length_m": float(config.vehicle_length_m),
         "effective_center_spacing_m": float(config.effective_center_spacing_m),
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
         "checkpoint_sha256": checkpoint_hash,
         "checkpoint": checkpoint_reference,
         "checkpoint_path_is_relative_to_run": True,
@@ -541,6 +689,9 @@ def evaluate_from_checkpoint(
             "aoi_ms": ["eval_seed", "scored_episode", "slot", "agent"],
             "success": ["eval_seed", "scored_episode", "slot", "agent"],
             "remaining_demand": ["eval_seed", "scored_episode", "slot", "agent"],
+            "interference_db": ["eval_seed", "scored_episode", "slot", "agent", "rb"],
+            "v2v_rate_all": ["eval_seed", "scored_episode", "slot", "agent", "follower"],
+            "v2v_interference_linear": ["eval_seed", "scored_episode", "slot", "agent", "follower", "rb"],
         },
         "mean_AoI_ms_per_seed_agent": per_seed_aoi_agent.tolist(),
         "mean_AoI_ms_per_seed": per_seed_aoi.tolist(),
@@ -572,13 +723,37 @@ def evaluate_from_checkpoint(
         "training_seed": int(config.seed),
         "eval_purpose": eval_purpose,
         "statistics_schema_version": EVAL_STATISTICS_SCHEMA_VERSION,
+        "mobility_revision": config.mobility_revision,
+        "effective_center_spacing_m": float(config.effective_center_spacing_m),
+        "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
         "checkpoint": checkpoint_reference,
         "checkpoint_sha256": checkpoint_hash,
         "is_formal_result": formal_eval,
         "gap_definition": config.gap_definition,
         "vehicle_length_m": float(config.vehicle_length_m),
+        "source_manifest_sha256": _source_manifest_digest(),
+        "python": sys.version,
+        "numpy": np.__version__,
+        "torch": torch.__version__,
+        "cuda_available": bool(torch.cuda.is_available()),
+        "cuda_device_count": int(torch.cuda.device_count()),
+        "cuda_version": torch.version.cuda,
+        "cuda_driver": eval_git.get("cuda_driver"),
+        "gpu_names": eval_git.get("gpu_names", []),
+        "scope": scope,
+        "release_status": "validation_ready" if scope == "validation" else ("final_release" if formal_eval else "evaluation_complete"),
     }
     _write_json(eval_dir / "provenance.json", eval_provenance)
     _write_json(eval_dir / "summary.json", summary)
     _write_json(eval_dir / "EVAL_COMPLETE.json", summary)
+    _write_json(marker_path, {
+        "status": "validation_ready" if scope == "validation" else "final_release",
+        "scope": scope,
+        "eval_purpose": eval_purpose,
+        "eval_id": eval_id,
+        "checkpoint_sha256": checkpoint_hash,
+        "semantic_version": config.semantic_version,
+        "mobility_revision": config.mobility_revision,
+        "is_formal_result": formal_eval,
+    })
     return {"eval_dir": str(eval_dir), **summary}

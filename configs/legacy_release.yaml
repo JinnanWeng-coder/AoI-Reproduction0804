@@ -17,6 +17,7 @@ eval_protocol: sequential_warm
 eval_warmup_episodes: 5
 global_reward_normalization: legacy_scalar
 mobility_model: legacy_source
+mobility_revision: legacy_source_v1
 gap_definition: center_to_center
 vehicle_length_m: 4.0
 statistics_schema_version: eval_seed_cluster_v1

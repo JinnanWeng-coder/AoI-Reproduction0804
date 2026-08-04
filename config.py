@@ -17,6 +17,12 @@ from typing import Any, Dict, Iterable, List, Optional, Union
 ROOT = Path(__file__).resolve().parent
 SCENARIO_DIR = ROOT / "configs" / "scenarios"
 
+PAPER_SEMANTIC_VERSION = "paper_faithful_v4"
+PAPER_MOBILITY_REVISION = "lane_graph_exit_safe_v1"
+LEGACY_SEMANTIC_VERSION = "legacy_release_v1"
+LEGACY_MOBILITY_REVISION = "legacy_source_v1"
+CHECKPOINT_SCHEMA_VERSION = "checkpoint_v4"
+
 
 DEFAULT_SCENARIOS: Dict[str, Dict[str, Any]] = {
     "p05_n04_g05": {"id": "p05_n04_g05", "number_platoons": 5, "platoon_size": 4, "gap_m": 5.0},
@@ -31,7 +37,7 @@ DEFAULT_SCENARIOS: Dict[str, Dict[str, Any]] = {
 
 
 COMMON_DEFAULTS: Dict[str, Any] = {
-    "semantic_version": "paper_faithful_v3",
+    "semantic_version": PAPER_SEMANTIC_VERSION,
     "episodes": 500,
     "steps_per_episode": 100,
     "slot_ms": 1.0,
@@ -78,6 +84,7 @@ COMMON_DEFAULTS: Dict[str, Any] = {
     "eval_warmup_episodes": 5,
     "global_reward_normalization": "source_normalized_per_rb_mean",
     "mobility_model": "urban_grid_correlated",
+    "mobility_revision": PAPER_MOBILITY_REVISION,
     "gap_definition": "bumper_to_bumper",
     "vehicle_length_m": 4.0,
     "statistics_schema_version": "eval_seed_cluster_v1",
@@ -87,7 +94,7 @@ COMMON_DEFAULTS: Dict[str, Any] = {
 PROFILE_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "paper_faithful": {},
     "legacy_release": {
-        "semantic_version": "legacy_release_v1",
+        "semantic_version": LEGACY_SEMANTIC_VERSION,
         "tau": 0.005,
         "global_actor_weight": 2.0,
         "global_update_mode": "legacy_detach",
@@ -103,6 +110,7 @@ PROFILE_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "current_interference_reward": False,
         "global_reward_normalization": "legacy_scalar",
         "mobility_model": "legacy_source",
+        "mobility_revision": LEGACY_MOBILITY_REVISION,
         # The byte-preserved source uses Gap directly because its
         # v_length is zero.  Keep that center-to-center interpretation in
         # the compatibility profile while recording the physical vehicle
@@ -128,7 +136,7 @@ class ScenarioConfig:
 class ExperimentConfig:
     profile: str
     scenario: ScenarioConfig
-    semantic_version: str = "paper_faithful_v3"
+    semantic_version: str = PAPER_SEMANTIC_VERSION
     seed: int = 2
     episodes: int = 500
     steps_per_episode: int = 100
@@ -176,6 +184,7 @@ class ExperimentConfig:
     eval_warmup_episodes: int = 5
     global_reward_normalization: str = "source_normalized_per_rb_mean"
     mobility_model: str = "urban_grid_correlated"
+    mobility_revision: str = PAPER_MOBILITY_REVISION
     gap_definition: str = "bumper_to_bumper"
     vehicle_length_m: float = 4.0
     statistics_schema_version: str = "eval_seed_cluster_v1"
@@ -339,7 +348,7 @@ def validate_config(config: ExperimentConfig) -> None:
         raise ValueError("paper_faithful default global_actor_weight must remain 1.0")
     if config.global_update_mode not in {"legacy_detach", "synchronous_joint"}:
         raise ValueError("unsupported global_update_mode")
-    expected_version = "paper_faithful_v3" if config.profile == "paper_faithful" else "legacy_release_v1"
+    expected_version = PAPER_SEMANTIC_VERSION if config.profile == "paper_faithful" else LEGACY_SEMANTIC_VERSION
     if config.semantic_version != expected_version:
         raise ValueError(f"{config.profile} requires semantic_version={expected_version}")
     if config.initial_aoi_ms < 0:
@@ -352,6 +361,9 @@ def validate_config(config: ExperimentConfig) -> None:
         raise ValueError("unsupported global_reward_normalization")
     if config.mobility_model not in {"urban_grid_correlated", "legacy_source"}:
         raise ValueError("unsupported mobility_model")
+    expected_mobility_revision = PAPER_MOBILITY_REVISION if config.profile == "paper_faithful" else LEGACY_MOBILITY_REVISION
+    if config.mobility_revision != expected_mobility_revision:
+        raise ValueError(f"{config.profile} requires mobility_revision={expected_mobility_revision}")
     if config.gap_definition not in {"bumper_to_bumper", "center_to_center"}:
         raise ValueError("unsupported gap_definition")
     if config.vehicle_length_m < 0:
@@ -364,9 +376,9 @@ def validate_config(config: ExperimentConfig) -> None:
         raise ValueError("rsu_position must have two coordinates")
     if config.profile == "paper_faithful" and config.is_formal_result:
         if config.gap_definition != "bumper_to_bumper":
-            raise ValueError("formal paper_faithful_v3 requires gap_definition=bumper_to_bumper")
+            raise ValueError("formal paper_faithful_v4 requires gap_definition=bumper_to_bumper")
         if not math.isclose(config.vehicle_length_m, 4.0, rel_tol=0.0, abs_tol=1e-9):
-            raise ValueError("paper_faithful_v3 requires vehicle_length_m=4.0")
+            raise ValueError("paper_faithful_v4 requires vehicle_length_m=4.0")
         expected = [config.map_width_m / 2.0, config.map_height_m / 2.0]
         if not all(math.isclose(a, b, rel_tol=0.0, abs_tol=1e-6) for a, b in zip(config.rsu_position, expected)):
             raise ValueError("paper_faithful RSU must be centered")
@@ -445,9 +457,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--episodes", type=int, default=None)
     parser.add_argument("--steps-per-episode", type=int, default=None)
     parser.add_argument("--eval-only", action="store_true")
+    parser.add_argument("--scope", choices=("train", "validation", "final_release"), default="train")
     parser.add_argument("--eval-episodes", type=int, default=100)
     parser.add_argument("--eval-seeds", default=None)
-    parser.add_argument("--eval-purpose", choices=("validation", "final_test"), default="final_test")
+    parser.add_argument("--eval-purpose", choices=("validation", "final_test"), default=None)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--checkpoint-every", type=int, default=None)
     parser.add_argument("--smoke", action="store_true")

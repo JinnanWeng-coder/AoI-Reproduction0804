@@ -61,7 +61,7 @@ def test_global_reward_hand_fixture_and_eq16_diagnostic():
     db = 10.0 * np.log10(linear)
     normalized = (db + 60.0) / 60.0
     expected_mean = -float(normalized.mean())
-    expected_sum = -float(normalized.sum())
+    expected_sum = -float(np.log10(linear).sum()) / linear.shape[0]
     assert compute_global_reward(linear, "source_normalized_per_rb_mean") == pytest.approx(expected_mean)
     assert compute_global_reward(linear, "eq16_sum") == pytest.approx(expected_sum)
 
@@ -109,12 +109,82 @@ def test_all_turns_use_exact_manhattan_path_and_reanchor_followers(direction, tu
     distance = leader.velocity * env.time_slow
     env._renew_positions()
     after = np.asarray(leader.position, dtype=np.float64)
+    trace = env._last_mobility_trace[0]
 
     assert leader.direction == turn
     assert abs(after[0] - before[0]) + abs(after[1] - before[1]) == pytest.approx(distance)
+    assert trace["route_length_m"] == pytest.approx(distance, abs=1e-9)
+    assert sum(segment["distance_m"] for segment in trace["route_segments"]) == pytest.approx(distance, abs=1e-9)
     assert all(vehicle.direction == turn for vehicle in env.vehicles[: env.size_platoon])
     assert all(vehicle.velocity == pytest.approx(leader.velocity) for vehicle in env.vehicles[: env.size_platoon])
     spacing = config.effective_center_spacing_m
     for index, follower in enumerate(env.vehicles[1 : env.size_platoon], start=1):
         delta = np.asarray(follower.position) - after
         assert np.linalg.norm(delta) == pytest.approx(index * spacing)
+
+
+@pytest.mark.parametrize(
+    "direction,position",
+    [
+        ("u", [501.75, 600.0]),
+        ("d", [501.75, 600.0]),
+        ("l", [600.0, 434.75]),
+        ("r", [600.0, 431.25]),
+    ],
+)
+def test_straight_lane_graph_routes_consume_exact_distance(direction, position):
+    env = PaperEnviron(_config())
+    env.reset_world(72)
+    env.change_direction_prob = 0.0
+    leader = env.vehicles[0]
+    leader.direction = direction
+    leader.position = list(position)
+    distance = leader.velocity * env.time_slow
+    env._renew_positions()
+    trace = env._last_mobility_trace[0]
+    assert not any(event["type"] == "exit" for event in trace["events"])
+    assert trace["route_length_m"] == pytest.approx(distance, abs=1e-9)
+    assert sum(segment["distance_m"] for segment in trace["route_segments"]) == pytest.approx(distance, abs=1e-9)
+    assert leader.direction == direction
+
+
+@pytest.mark.parametrize(
+    "direction,position,expected",
+    [
+        ("u", [501.75, 1297.0], "r"),
+        ("d", [501.75, 2.0], "l"),
+        ("l", [2.0, 434.75], "u"),
+        ("r", [748.0, 431.25], "d"),
+    ],
+)
+def test_exit_routes_use_explicit_lane_graph_mapping(direction, position, expected):
+    env = PaperEnviron(_config())
+    env.reset_world(73)
+    env.change_direction_prob = 0.0
+    leader = env.vehicles[0]
+    leader.direction = direction
+    leader.position = list(position)
+    distance = leader.velocity * env.time_slow
+    env._renew_positions()
+    trace = env._last_mobility_trace[0]
+    assert leader.direction == expected
+    assert any(event["type"] == "exit" and event["to"] == expected for event in trace["events"])
+    assert trace["route_length_m"] == pytest.approx(distance, abs=1e-9)
+    assert sum(segment["distance_m"] for segment in trace["route_segments"]) == pytest.approx(distance, abs=1e-9)
+    graph = env._graph_bounds(env._lane_sets())
+    assert graph["x_min"] <= leader.position[0] <= graph["x_max"]
+    assert graph["y_min"] <= leader.position[1] <= graph["y_max"]
+
+
+def test_lane_graph_mobility_is_fixed_seed_reproducible():
+    first = PaperEnviron(_config(slow_update_every_episodes=1))
+    second = PaperEnviron(_config(slow_update_every_episodes=1))
+    first.reset_world(74)
+    second.reset_world(74)
+    first.start_episode(1)
+    second.start_episode(1)
+    np.testing.assert_allclose(
+        np.asarray([vehicle.position for vehicle in first.vehicles]),
+        np.asarray([vehicle.position for vehicle in second.vehicles]),
+    )
+    assert first._last_mobility_trace == second._last_mobility_trace

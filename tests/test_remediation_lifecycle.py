@@ -13,7 +13,8 @@ def _config(**overrides):
 def test_semantic_version_and_lifecycle_defaults_are_explicit():
     paper = _config()
     legacy = resolve_config("legacy_release", "p05_n04_g25")
-    assert paper.semantic_version == "paper_faithful_v3"
+    assert paper.semantic_version == "paper_faithful_v4"
+    assert paper.mobility_revision == "lane_graph_exit_safe_v1"
     assert legacy.semantic_version == "legacy_release_v1"
     assert paper.initial_aoi_ms == 100.0
     assert paper.eval_protocol == "sequential_warm"

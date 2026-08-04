@@ -57,7 +57,7 @@ def test_frozen_eval_creates_new_artifact_without_overwriting_checkpoint(tmp_pat
     checkpoint = Path(result["run_dir"]) / "checkpoints" / "latest.pt"
     before_hash = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
     before_rng = capture_rng_state()
-    evaluated = evaluate_from_checkpoint(config, str(checkpoint), eval_episodes=2, eval_seeds=[101, 102])
+    evaluated = evaluate_from_checkpoint(config, str(checkpoint), eval_episodes=2, eval_seeds=[201, 202], eval_purpose="validation", scope="validation")
     after_hash = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
     after_rng = capture_rng_state()
     assert before_hash == after_hash
@@ -68,8 +68,8 @@ def test_frozen_eval_creates_new_artifact_without_overwriting_checkpoint(tmp_pat
     assert evaluated["is_frozen_eval"] is True
     eval_dir = Path(evaluated["eval_dir"])
     summary = json.loads((eval_dir / "summary.json").read_text(encoding="utf-8"))
-    assert summary["eval_seeds"] == [101, 102]
-    assert summary["eval_purpose"] == "final_test"
+    assert summary["eval_seeds"] == [201, 202]
+    assert summary["eval_purpose"] == "validation"
     assert summary["statistics_schema_version"] == "eval_seed_cluster_v1"
     assert summary["checkpoint"] == "checkpoints/latest.pt"
     assert summary["eval_protocol"] == "sequential_warm"
@@ -85,19 +85,30 @@ def test_validation_and_final_test_artifacts_are_separate(tmp_path):
     config = _small_config(tmp_path / "purpose", "run")
     result = train(config)
     checkpoint = Path(result["run_dir"]) / "checkpoints" / "latest.pt"
-    validation = evaluate_from_checkpoint(config, str(checkpoint), eval_episodes=1, eval_seeds=[201, 202], eval_purpose="validation")
-    final = evaluate_from_checkpoint(config, str(checkpoint), eval_episodes=1, eval_seeds=[101, 102], eval_purpose="final_test")
+    validation = evaluate_from_checkpoint(config, str(checkpoint), eval_episodes=1, eval_seeds=[201, 202], eval_purpose="validation", scope="validation")
+    with pytest.raises(ValueError, match="formal training checkpoint"):
+        evaluate_from_checkpoint(config, str(checkpoint), eval_episodes=1, eval_seeds=[101, 102], eval_purpose="final_test", scope="final_release")
     assert validation["eval_purpose"] == "validation"
-    assert final["eval_purpose"] == "final_test"
-    assert validation["eval_id"] != final["eval_id"]
     assert validation["is_formal_result"] is False
-    assert final["is_formal_result"] is False
 
 
 def test_v1_checkpoint_is_rejected_before_loading_state(tmp_path):
     config = _small_config(tmp_path / "v1", "run")
     path = tmp_path / "v1.pt"
     torch.save({"config_hash": config.canonical_hash(), "config": config.to_dict()}, path)
+    with pytest.raises(ValueError, match="semantic_version"):
+        _load_checkpoint(path, config, [], SimpleNamespace(device=torch.device("cpu")), None, None, None)
+
+
+def test_paper_v3_checkpoint_is_rejected_by_v4_loader(tmp_path):
+    config = _small_config(tmp_path / "v3", "run")
+    path = tmp_path / "paper_v3.pt"
+    torch.save({
+        "checkpoint_version": 3,
+        "semantic_version": "paper_faithful_v3",
+        "config_hash": config.canonical_hash(),
+        "config": config.to_dict(),
+    }, path)
     with pytest.raises(ValueError, match="semantic_version"):
         _load_checkpoint(path, config, [], SimpleNamespace(device=torch.device("cpu")), None, None, None)
 
@@ -119,6 +130,6 @@ def test_eval_uses_one_cold_reset_and_sequential_episode_indices(tmp_path, monke
             return super().start_episode(episode_index, update_mobility)
 
     monkeypatch.setattr(runner_module, "PaperEnviron", TrackingEnvironment)
-    runner_module.evaluate_from_checkpoint(config, str(checkpoint), eval_episodes=2, eval_seeds=[101, 102])
-    assert resets == [101, 102]
+    runner_module.evaluate_from_checkpoint(config, str(checkpoint), eval_episodes=2, eval_seeds=[201, 202], eval_purpose="validation", scope="validation")
+    assert resets == [201, 202]
     assert starts == list(range(7)) + list(range(7))

@@ -31,7 +31,9 @@ def compute_global_reward(interference_linear, normalization_mode: str = "source
     if normalization_mode == "source_normalized_per_rb_mean":
         return -float(np.mean(normalized))
     if normalization_mode == "eq16_sum":
-        return -float(np.sum(normalized))
+        # Diagnostic-only Eq. (16): -(1/P) sum_j sum_k log10(I_jk).
+        # The formal source-compatible reward above is intentionally unchanged.
+        return -float(np.sum(np.log10(linear)) / linear.shape[0])
     if normalization_mode == "legacy_scalar":
         return -float(np.mean(normalized))
     raise ValueError(f"unsupported global reward normalization: {normalization_mode}")
@@ -129,6 +131,7 @@ class PaperEnviron:
         self.step_count = 0
         self.episode_index = 0
         self._world_initialized = False
+        self._last_mobility_trace = []
 
     @property
     def state_dim(self):
@@ -147,6 +150,7 @@ class PaperEnviron:
 
     def _build_vehicles(self):
         lanes = self._lane_sets()
+        graph = self._graph_bounds(lanes)
         self.vehicles = []
         directions = ["d", "u", "l", "r"]
         for platoon in range(self.n_platoon):
@@ -155,9 +159,21 @@ class PaperEnviron:
             lane = lanes[direction][lane_index]
             velocity = float(self.rng.uniform(self.config.speed_min_mps, self.config.speed_max_mps))
             if direction in {"u", "d"}:
-                start = [lane, float(self.rng.uniform(0, self.height))]
+                if direction == "u":
+                    low = graph["y_min"] + (self.size_platoon - 1) * self.center_spacing_m
+                    high = graph["y_max"]
+                else:
+                    low = graph["y_min"]
+                    high = graph["y_max"] - (self.size_platoon - 1) * self.center_spacing_m
+                start = [lane, float(self.rng.uniform(low, high))]
             else:
-                start = [float(self.rng.uniform(0, self.width)), lane]
+                if direction == "r":
+                    low = graph["x_min"] + (self.size_platoon - 1) * self.center_spacing_m
+                    high = graph["x_max"]
+                else:
+                    low = graph["x_min"]
+                    high = graph["x_max"] - (self.size_platoon - 1) * self.center_spacing_m
+                start = [float(self.rng.uniform(low, high)), lane]
             for follower in range(self.size_platoon):
                 offset = follower * self.center_spacing_m
                 if direction == "u":
@@ -169,6 +185,16 @@ class PaperEnviron:
                 else:
                     position = [start[0] - offset, start[1]]
                 self.vehicles.append(Vehicle(position, direction, velocity))
+
+    @staticmethod
+    def _graph_bounds(lanes):
+        """Return the legal lane-graph segment bounds, not map projections."""
+        return {
+            "x_min": float(lanes["u"][0]),
+            "x_max": float(lanes["d"][-1]),
+            "y_min": float(lanes["l"][0]),
+            "y_max": float(lanes["r"][-1]),
+        }
 
     def _initialize_shadowing(self):
         """Draw initial shadowing once per cold world reset."""
@@ -216,115 +242,135 @@ class PaperEnviron:
         fading_i = np.abs(self.rng.normal(0, 1, (len(self.vehicles), self.n_rb)) + 1j * self.rng.normal(0, 1, (len(self.vehicles), self.n_rb))) / math.sqrt(2)
         self.v2i_channels_fast = np.repeat(self.v2i_channels_abs[:, None], self.n_rb, axis=1) - 20 * np.log10(fading_i)
 
-    def _renew_positions(self):
-        """Advance platoons on the public urban grid with correlated turns.
+    @staticmethod
+    def _translate(x, y, direction, distance):
+        if direction == "u":
+            return x, y + distance
+        if direction == "d":
+            return x, y - distance
+        if direction == "r":
+            return x + distance, y
+        return x - distance, y
 
-        Leaders make the only stochastic routing decision.  Followers are
-        then re-anchored to the leader with the configured platoon gap, so a
-        turn cannot tear a platoon apart.  The explicit Generator keeps this
-        mobility stream independent from Python/torch/global NumPy RNGs.
-        """
+    @staticmethod
+    def _axis_value(x, y, direction):
+        return y if direction in {"u", "d"} else x
+
+    @staticmethod
+    def _exit_spec(direction, lanes):
+        return {
+            "u": ("r", lanes["r"][-1]),
+            "d": ("l", lanes["l"][0]),
+            "l": ("u", lanes["u"][0]),
+            "r": ("d", lanes["d"][-1]),
+        }[direction]
+
+    @staticmethod
+    def _turn_targets(direction, lanes):
+        if direction == "u":
+            return [("l", value) for value in lanes["l"]] + [("r", value) for value in lanes["r"]]
+        if direction == "d":
+            return [("l", value) for value in lanes["l"]] + [("r", value) for value in lanes["r"]]
+        if direction == "r":
+            return [("u", value) for value in lanes["u"]] + [("d", value) for value in lanes["d"]]
+        return [("u", value) for value in lanes["u"]] + [("d", value) for value in lanes["d"]]
+
+    def _advance_leader_on_lane_graph(self, leader, distance, lanes):
+        """Consume exactly ``distance`` along legal lane-graph segments."""
+        remaining = float(distance)
+        x, y = map(float, leader.position)
+        initial = np.asarray([x, y], dtype=np.float64)
+        events = []
+        route_segments = []
+        route_length = 0.0
+        epsilon = 1e-12
+
+        def consume(segment_distance):
+            nonlocal x, y, route_length
+            segment_distance = max(0.0, float(segment_distance))
+            before = [float(x), float(y)]
+            x, y = self._translate(x, y, leader.direction, segment_distance)
+            after = [float(x), float(y)]
+            actual = float(abs(after[0] - before[0]) + abs(after[1] - before[1]))
+            route_length += actual
+            route_segments.append({"from": before, "to": after, "distance_m": actual, "direction": leader.direction})
+            return actual
+
+        for _ in range(32):
+            if remaining <= epsilon:
+                break
+            direction = leader.direction
+            axis = self._axis_value(x, y, direction)
+            sign = 1.0 if direction in {"u", "r"} else -1.0
+            exit_direction, exit_axis = self._exit_spec(direction, lanes)
+            exit_distance = (float(exit_axis) - axis) * sign
+
+            # A manually injected pre-exit point is defensively re-anchored to
+            # the lane graph.  Normal paper trajectories never enter here
+            # because _build_vehicles samples only legal lane segments.
+            if exit_distance < -epsilon:
+                x, y = self._translate(x, y, direction, exit_distance)
+                axis = float(exit_axis)
+                exit_distance = 0.0
+                events.append({"type": "defensive_exit_reanchor", "direction": direction})
+
+            next_turn = None
+            for target_direction, crossing in self._turn_targets(direction, lanes):
+                turn_distance = (float(crossing) - axis) * sign
+                if turn_distance <= epsilon or turn_distance > remaining + epsilon:
+                    continue
+                if next_turn is None or turn_distance < next_turn[0]:
+                    next_turn = (turn_distance, target_direction, float(crossing))
+
+            if exit_distance <= remaining + epsilon and (next_turn is None or exit_distance <= next_turn[0] + epsilon):
+                consumed = consume(max(0.0, exit_distance))
+                remaining -= consumed
+                leader.direction = exit_direction
+                events.append({"type": "exit", "from": direction, "to": exit_direction, "axis": float(exit_axis)})
+                continue
+
+            if next_turn is not None:
+                turn_distance, target_direction, crossing = next_turn
+                consumed = consume(turn_distance)
+                remaining -= consumed
+                if self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
+                    leader.direction = target_direction
+                    events.append({"type": "turn", "from": direction, "to": target_direction, "axis": crossing})
+                else:
+                    events.append({"type": "straight_through_intersection", "direction": direction, "axis": crossing})
+                continue
+
+            remaining -= consume(remaining)
+
+        if remaining > epsilon:
+            raise RuntimeError("lane graph mobility could not consume the full route distance")
+        if not np.isclose(route_length, float(distance), rtol=0.0, atol=1e-9):
+            raise RuntimeError(f"lane graph route length mismatch: {route_length} != {distance}")
+        leader.position = [float(x), float(y)]
+        final = np.asarray(leader.position, dtype=np.float64)
+        return {
+            "before": initial.tolist(),
+            "after": final.tolist(),
+            "path_length_m": float(distance),
+            "route_length_m": float(route_length),
+            "endpoint_manhattan_m": float(np.abs(final - initial).sum()),
+            "direction": leader.direction,
+            "events": events,
+            "route_segments": route_segments,
+        }
+
+    def _renew_positions(self):
+        """Advance platoons by lane-graph path consumption without projection."""
         lanes = self._lane_sets()
+        traces = []
         for platoon in range(self.n_platoon):
             leader_index = platoon * self.size_platoon
             leader = self.vehicles[leader_index]
             distance = float(leader.velocity * self.time_slow)
+            trace = self._advance_leader_on_lane_graph(leader, distance, lanes)
+            trace["platoon"] = platoon
+            traces.append(trace)
             x, y = leader.position
-            direction = leader.direction
-            changed = False
-            if direction == "u":
-                for crossing in lanes["l"]:
-                    if y <= crossing <= y + distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
-                        x -= distance - (crossing - y)
-                        y = crossing
-                        direction = "l"
-                        changed = True
-                        break
-                if not changed:
-                    for crossing in lanes["r"]:
-                        if y <= crossing <= y + distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
-                            # Preserve the public source's turn geometry.
-                            # The first leg reaches the intersection; only
-                            # the residual distance is spent on the turn.
-                            x += distance - (crossing - y)
-                            y = crossing
-                            direction = "r"
-                            changed = True
-                            break
-                if not changed:
-                    y += distance
-            elif direction == "d":
-                for crossing in lanes["l"]:
-                    if y >= crossing >= y - distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
-                        x -= distance - (y - crossing)
-                        y = crossing
-                        direction = "l"
-                        changed = True
-                        break
-                if not changed:
-                    for crossing in lanes["r"]:
-                        if y >= crossing >= y - distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
-                            x += distance - (y - crossing)
-                            y = crossing
-                            direction = "r"
-                            changed = True
-                            break
-                if not changed:
-                    y -= distance
-            elif direction == "r":
-                for crossing in lanes["u"]:
-                    if x <= crossing <= x + distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
-                        y += distance - (crossing - x)
-                        x = crossing
-                        direction = "u"
-                        changed = True
-                        break
-                if not changed:
-                    for crossing in lanes["d"]:
-                        if x <= crossing <= x + distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
-                            y -= distance - (crossing - x)
-                            x = crossing
-                            direction = "d"
-                            changed = True
-                            break
-                if not changed:
-                    x += distance
-            else:  # direction == "l"
-                for crossing in lanes["u"]:
-                    if x >= crossing >= x - distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
-                        y += distance - (x - crossing)
-                        x = crossing
-                        direction = "u"
-                        changed = True
-                        break
-                if not changed:
-                    for crossing in lanes["d"]:
-                        if x >= crossing >= x - distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
-                            y -= distance - (x - crossing)
-                            x = crossing
-                            direction = "d"
-                            changed = True
-                            break
-                if not changed:
-                    x -= distance
-
-            # The source sends a platoon to the next boundary lane instead of
-            # wrapping coordinates with modulo arithmetic.
-            if x < 0 or y < 0 or x > self.width or y > self.height:
-                if direction == "u":
-                    direction = "r"
-                    y = lanes["r"][-1]
-                elif direction == "d":
-                    direction = "l"
-                    y = lanes["l"][0]
-                elif direction == "l":
-                    direction = "u"
-                    x = lanes["u"][0]
-                else:
-                    direction = "d"
-                    x = lanes["d"][-1]
-            leader.position = [x, y]
-            leader.direction = direction
             for follower in range(1, self.size_platoon):
                 if leader.direction == "u":
                     position = [x, y - follower * self.center_spacing_m]
@@ -337,6 +383,8 @@ class PaperEnviron:
                 self.vehicles[leader_index + follower].direction = leader.direction
                 self.vehicles[leader_index + follower].position = position
                 self.vehicles[leader_index + follower].velocity = leader.velocity
+        self._last_mobility_trace = traces
+        return traces
 
     def _build_episode_world(self):
         self._build_vehicles()
@@ -349,6 +397,7 @@ class PaperEnviron:
         self.aoi = np.full(self.n_platoon, self.config.initial_aoi_ms, dtype=np.float64)
         self.previous_interference = np.full((self.n_platoon, self.n_rb), self.sig2_db, dtype=np.float64)
         self.step_count = 0
+        self._last_mobility_trace = []
 
     def reset_world(self, seed: Optional[int] = None):
         """Cold-reset the world and its private RNG stream.
