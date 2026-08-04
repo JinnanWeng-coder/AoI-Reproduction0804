@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import hashlib
 import os
@@ -462,28 +463,79 @@ def _run_provenance(config: ExperimentConfig, git: Dict[str, Any]) -> Dict[str, 
     return provenance
 
 
+_RENAMEAT2_NOREPLACE = 1  # Linux RENAME_NOREPLACE
+
+
+def _unsupported_renameat2_errnos() -> frozenset:
+    """Errnos that mean the filesystem cannot honor RENAME_NOREPLACE."""
+    values = {errno.EINVAL, errno.ENOSYS}
+    for name in ("EOPNOTSUPP", "ENOTSUP"):
+        value = getattr(errno, name, None)
+        if value is not None:
+            values.add(value)
+    return frozenset(values)
+
+
+def _renameat2_noreplace(staging: Path, run_dir: Path) -> None:
+    """Attempt renameat2(RENAME_NOREPLACE). Raises OSError on failure."""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise OSError(errno.ENOSYS, "renameat2 is unavailable", str(run_dir))
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    if renameat2(-100, os.fsencode(staging), -100, os.fsencode(run_dir), _RENAMEAT2_NOREPLACE) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(run_dir))
+
+
+def _publish_via_mkdir_reservation(staging: Path, run_dir: Path) -> None:
+    """Occupy ``run_dir`` with ``mkdir``, then replace the empty reservation.
+
+    Never uses exists()+rename (TOCTOU). Never deletes conflicting or unknown
+    directories. If the replace step fails after reservation, leave both
+    ``staging`` and the empty reservation intact for inspection.
+    """
+    try:
+        os.mkdir(run_dir)
+    except FileExistsError:
+        raise FileExistsError(
+            errno.EEXIST,
+            f"Refusing to publish over existing run directory: {run_dir}",
+            str(run_dir),
+        ) from None
+    try:
+        os.rename(staging, run_dir)
+    except OSError as exc:
+        raise OSError(
+            exc.errno,
+            (
+                "Failed to replace empty run-dir reservation with staging "
+                f"(staging and reservation preserved for inspection): {exc.strerror}"
+            ),
+            str(run_dir),
+        ) from exc
+
+
 def _publish_staged_run_no_replace(staging: Path, run_dir: Path) -> None:
     """Atomically publish a sibling staging directory without clobbering."""
     if os.name == "nt":
         os.rename(staging, run_dir)  # Windows rename fails if the target exists.
         return
     if sys.platform.startswith("linux"):
-        import ctypes
-
-        libc = ctypes.CDLL(None, use_errno=True)
-        renameat2 = getattr(libc, "renameat2", None)
-        if renameat2 is not None:
-            renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-            renameat2.restype = ctypes.c_int
-            if renameat2(-100, os.fsencode(staging), -100, os.fsencode(run_dir), 1) != 0:
-                error = ctypes.get_errno()
-                raise OSError(error, os.strerror(error), str(run_dir))
+        try:
+            _renameat2_noreplace(staging, run_dir)
             return
-    # Fallback for platforms without renameat2.  The authoritative remote
-    # target is Linux and Windows has native no-replace behavior above.
-    if run_dir.exists():
-        raise FileExistsError(f"Refusing to publish over existing run directory: {run_dir}")
-    os.rename(staging, run_dir)
+        except OSError as exc:
+            if exc.errno == errno.EEXIST:
+                raise FileExistsError(exc.errno, os.strerror(exc.errno), str(run_dir)) from exc
+            if exc.errno not in _unsupported_renameat2_errnos():
+                raise
+            # Filesystem cannot honor RENAME_NOREPLACE (e.g. some NFS mounts).
+    _publish_via_mkdir_reservation(staging, run_dir)
 
 
 def _initialize_run_atomically(run_dir: Path, config: ExperimentConfig, git: Dict[str, Any]) -> None:
