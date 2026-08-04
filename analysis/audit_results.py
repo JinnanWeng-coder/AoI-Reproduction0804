@@ -26,6 +26,7 @@ EXPECTED_EVAL_SEEDS = {
     "validation": [201, 202, 203, 204, 205, 206],
     "final_test": [101, 102, 103, 104, 105, 106],
 }
+EXPECTED_FIGURE_BASELINES = ["Modified_MADDPG", "MADDPG_FDec", "DDPG"]
 
 
 def _sha256(path: Path) -> str:
@@ -344,6 +345,8 @@ def audit_study_manifest(path: Path) -> Dict[str, Any]:
     manifest_base = path.parent
     if schema_version >= 2 and manifest.get("path_base") != "manifest_parent":
         errors.append("path_base")
+    if schema_version >= 2 and manifest.get("required_baselines") != EXPECTED_FIGURE_BASELINES:
+        errors.append("required_baselines")
     identities = set()
     for index, entry in enumerate(entries):
         missing = sorted(required.difference(entry))
@@ -362,6 +365,10 @@ def audit_study_manifest(path: Path) -> Dict[str, Any]:
         run_path = (manifest_base / run_ref).resolve() if not run_ref.is_absolute() else run_ref
         if not run_path.is_dir():
             errors.append(f"entry{index}:run_missing")
+        else:
+            run_provenance = _read_json(run_path / "provenance.json", errors, f"entry{index}:run_provenance")
+            if entry.get("config_hash") is not None and run_provenance is not None and entry.get("config_hash") != run_provenance.get("config_hash"):
+                errors.append(f"entry{index}:config_hash_mismatch")
         checkpoint_ref = Path(str(entry.get("checkpoint_path", "")))
         checkpoint_path = (manifest_base / checkpoint_ref).resolve() if not checkpoint_ref.is_absolute() else checkpoint_ref
         if entry.get("checkpoint_sha256") is not None:

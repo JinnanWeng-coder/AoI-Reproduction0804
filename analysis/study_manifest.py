@@ -26,17 +26,17 @@ def _sha256(path: Path) -> str:
 def _json(path: Path) -> Optional[Dict[str, Any]]:
     if not path.is_file():
         return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else None
+    except Exception:
+        return None
 
 
 def _relative_reference(path: Optional[Path], base: Path) -> Optional[str]:
     if path is None:
         return None
     return Path(os.path.relpath(Path(path).resolve(), base.resolve())).as_posix()
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else None
-    except Exception:
-        return None
 
 
 def build_study_manifest(run_root: Path, output: Path, algorithm: str = "Modified_MADDPG_with_TDec", run_paths: Optional[List[Path]] = None) -> Dict[str, Any]:

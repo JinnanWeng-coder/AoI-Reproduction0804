@@ -405,11 +405,14 @@ def main(argv=None):
     if args.figure in {"3", "all"}:
         results.append(str(plot_fig3(root, output_dir / "fig3_training.png", scenarios[0], args.smooth_window)))
     if args.figure in {"4", "all"}:
-        for scenario in scenarios if args.scenario else ["p05_n04_g05", "p07_n04_g05"]:
-            suffix = "" if len(scenarios) == 1 else f"_{scenario}"
+        fig4_scenarios = scenarios if args.scenario else ["p05_n04_g05", "p07_n04_g05"]
+        for scenario in fig4_scenarios:
+            suffix = "" if len(fig4_scenarios) == 1 else f"_{scenario}"
             results.append(str(plot_fig4(root, output_dir / f"fig4_global_combined{suffix}.png", scenario, allow_incomplete=args.allow_incomplete_baselines)))
     if args.figure in {"5", "all"}:
-        results.append(str(plot_fig5(root, output_dir / "fig5_sweep.png", args.fig5_x, allow_incomplete=args.allow_incomplete_baselines or True)))
+        # Fig.5 may be generated as an explicitly labelled current-algorithm
+        # partial while the three baselines are still unavailable.
+        results.append(str(plot_fig5(root, output_dir / "fig5_sweep.png", args.fig5_x, allow_incomplete=True)))
     print(json.dumps({"outputs": results}, indent=2))
     return 0
 

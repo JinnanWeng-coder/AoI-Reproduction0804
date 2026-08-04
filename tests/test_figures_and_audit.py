@@ -1,11 +1,13 @@
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from analysis.build_paper_figures import plot_fig3, plot_fig4, plot_fig5
-from analysis.audit_results import audit_eval
+from analysis.audit_results import audit_eval, audit_study_manifest
+from analysis.study_manifest import build_study_manifest
 
 
 def _write_run(root: Path, name: str, seed: int, with_eval: bool = True):
@@ -59,6 +61,10 @@ def test_synthetic_fig3_and_fig5_aggregation(tmp_path):
     rows = json.loads(fig5.with_suffix(".json").read_text(encoding="utf-8"))["rows"]
     assert rows[0]["AoI_ms"]["count"] == 2
     assert json.loads(fig5.with_suffix(".json").read_text(encoding="utf-8"))["partial"] is True
+    fig3_meta = json.loads(fig3.with_suffix(".json").read_text(encoding="utf-8"))
+    assert fig3_meta["agent_count"] == 5
+    with np.load(fig3.with_suffix(".npz"), allow_pickle=False) as fig3_data:
+        assert fig3_data["task1_raw"].shape == (2, 3, 5)
     assert rows[0]["AoI_ms"]["ci95"] >= 0
 
 
@@ -70,6 +76,7 @@ def test_fig4_missing_baseline_guard(tmp_path):
         plot_fig4(manifest_path, tmp_path / "fig4.png")
     marker = json.loads((tmp_path / "INCOMPLETE_BASELINES.json").read_text(encoding="utf-8"))
     assert marker["status"] == "INCOMPLETE_BASELINES"
+    assert marker["required"] == ["Modified_MADDPG", "MADDPG_FDec", "DDPG"]
 
 
 def test_negative_eval_audit_rejects_duplicate_seeds_and_wrong_protocol(tmp_path):
@@ -96,3 +103,28 @@ def test_negative_eval_audit_rejects_duplicate_seeds_and_wrong_protocol(tmp_path
     assert report["ok"] is False
     assert "heldout_seed_uniqueness" in report["errors"]
     assert "eval_protocol" in report["errors"]
+
+
+def test_study_manifest_and_figure_loader_survive_artifact_relocation(tmp_path):
+    run = tmp_path / "runs" / "run1"
+    run.mkdir(parents=True)
+    (run / "config.resolved.json").write_text(json.dumps({
+        "profile": "paper_faithful",
+        "semantic_version": "paper_faithful_v3",
+        "seed": 2,
+        "scenario": {"id": "p05_n04_g25"},
+    }), encoding="utf-8")
+    (run / "provenance.json").write_text(json.dumps({"config_hash": "synthetic"}), encoding="utf-8")
+    (run / "COMPLETE.json").write_text(json.dumps({"status": "complete"}), encoding="utf-8")
+    manifest_path = tmp_path / "manifests" / "study.json"
+    build_study_manifest(run.parent, manifest_path, run_paths=[run])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert not Path(manifest["entries"][0]["run_path"]).is_absolute()
+    assert audit_study_manifest(manifest_path)["ok"] is True
+
+    relocated = tmp_path / "relocated"
+    shutil.copytree(run.parent, relocated / "runs")
+    (relocated / "manifests").mkdir(parents=True)
+    shutil.copy2(manifest_path, relocated / "manifests" / "study.json")
+    relocated_report = audit_study_manifest(relocated / "manifests" / "study.json")
+    assert relocated_report["ok"] is True
