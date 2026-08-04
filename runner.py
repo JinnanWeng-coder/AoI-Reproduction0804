@@ -396,6 +396,8 @@ def _validate_formal_eval_preconditions(run_dir: Path, checkpoint_path: Path, pa
     for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_tracked_tree_sha256"):
         if not provenance.get(key) or provenance.get(key) != current.get(key):
             raise RuntimeError(f"formal evaluation provenance mismatch: {key}")
+    if provenance.get("source_manifest_sha256") != _source_manifest_digest():
+        raise RuntimeError("formal evaluation source manifest mismatch")
     if payload.get("reproduction_git_dirty") is not False:
         raise RuntimeError("formal checkpoint must record dirty=false")
     for key in ("reproduction_git_commit", "reproduction_git_branch"):

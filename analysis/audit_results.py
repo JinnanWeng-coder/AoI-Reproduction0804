@@ -265,6 +265,12 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
         for key in RUNTIME_PROVENANCE_KEYS:
             if key not in provenance:
                 errors.append(f"provenance_missing:{key}")
+        if formal:
+            for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_tracked_tree_sha256", "source_manifest_sha256"):
+                if not provenance.get(key):
+                    errors.append(f"formal_provenance_missing:{key}")
+            if not isinstance(provenance.get("reproduction_git_dirty"), bool):
+                errors.append("formal_provenance_dirty_flag")
         if provenance.get("semantic_version") != expected_semantic:
             errors.append("provenance_semantic_version")
         manifest = run_dir.parents[1] / "SOURCE_MANIFEST.json"
@@ -297,6 +303,10 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
             errors.append("complete_config_hash")
         if provenance is not None and complete.get("reproduction_git_commit") != provenance.get("reproduction_git_commit"):
             errors.append("complete_git_commit")
+        if provenance is not None and complete.get("source_manifest_sha256") != provenance.get("source_manifest_sha256"):
+            errors.append("complete_source_manifest")
+        if provenance is not None and complete.get("reproduction_tracked_tree_sha256") != provenance.get("reproduction_tracked_tree_sha256"):
+            errors.append("complete_tree_digest")
         if formal and complete.get("reproduction_git_branch") != (None if provenance is None else provenance.get("reproduction_git_branch")):
             errors.append("complete_git_branch")
         if formal:
@@ -330,6 +340,10 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
                 errors.append(f"checkpoint_tree_digest:{name}")
             if payload.get("source_manifest_sha256") is not None and payload.get("source_manifest_sha256") != provenance.get("source_manifest_sha256"):
                 errors.append(f"checkpoint_source_manifest:{name}")
+            if formal:
+                for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_git_dirty", "reproduction_tracked_tree_sha256", "source_manifest_sha256"):
+                    if key not in payload:
+                        errors.append(f"formal_checkpoint_missing:{name}:{key}")
             if payload.get("mobility_revision") is not None and payload.get("mobility_revision") != provenance.get("mobility_revision"):
                 errors.append(f"checkpoint_mobility_revision:{name}")
             if payload.get("checkpoint_schema_version") is not None and payload.get("checkpoint_schema_version") != provenance.get("checkpoint_schema_version"):
@@ -496,6 +510,8 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
             errors.append("eval_checkpoint_schema_version")
         if summary.get("is_frozen_eval") is not True:
             errors.append("not_frozen_eval")
+        if summary.get("is_formal_result") and summary.get("reproduction_git_dirty") is not False:
+            errors.append("formal_eval_git_dirty")
         for key in ("mean_AoI_ms_per_seed", "sd_AoI_ms_per_seed", "endpoint_success_probability_per_seed"):
             try:
                 if not np.all(np.isfinite(np.asarray(summary[key], dtype=np.float64))):
@@ -572,6 +588,9 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
         run_provenance_path = eval_dir.parent.parent / "provenance.json"
         run_provenance = _read_json(run_provenance_path, errors, "run_provenance") if run_provenance_path.is_file() else None
         if run_provenance is not None:
+            manifest_path = eval_dir.parent.parent.parents[1] / "SOURCE_MANIFEST.json"
+            if manifest_path.is_file() and summary.get("source_manifest_sha256") != _sha256(manifest_path):
+                errors.append("eval_source_manifest_hash")
             for key in ("semantic_version", "config_hash", "mobility_revision", "reproduction_git_commit", "reproduction_git_branch", "reproduction_tracked_tree_sha256", "source_manifest_sha256"):
                 if summary.get(key) != run_provenance.get(key):
                     errors.append(f"eval_run_provenance_{key}")

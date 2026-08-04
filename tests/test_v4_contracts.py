@@ -263,6 +263,13 @@ def test_formal_audit_rejects_missing_provenance_wrong_shape_and_checkpoint_comm
     report = audit_run(wrong_checkpoint, scope="train")
     assert any(error == "checkpoint_git_commit:latest.pt" for error in report["errors"])
 
+    missing_checkpoint = _write_formal_audit_run(tmp_path / "missing_checkpoint", None)
+    payload = torch.load(missing_checkpoint / "checkpoints" / "latest.pt", map_location="cpu", weights_only=False)
+    payload.pop("source_manifest_sha256")
+    torch.save(payload, missing_checkpoint / "checkpoints" / "latest.pt")
+    report = audit_run(missing_checkpoint, scope="train")
+    assert any(error == "formal_checkpoint_missing:latest.pt:source_manifest_sha256" for error in report["errors"])
+
 
 def test_main_eval_only_requires_explicit_purpose():
     with pytest.raises(SystemExit, match="explicit --eval-purpose"):
