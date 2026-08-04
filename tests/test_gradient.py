@@ -62,3 +62,17 @@ def test_joint_actor_update_is_invariant_to_optimizer_step_order():
         for left_parameter, right_parameter in zip(left.actor.parameters(), right.actor.parameters()):
             assert torch.equal(left_parameter, right_parameter)
     np.testing.assert_array_equal(forward["actor_parameter_deltas"], reverse["actor_parameter_deltas"])
+
+
+def test_global_target_critics_update_on_every_learner_step():
+    config, _agents, learner = _learner("synchronous_joint")
+    config.tau = 1.0
+    batch = _batch(config)
+    before = [parameter.detach().clone() for parameter in learner.global_target_critic1.parameters()]
+    first = learner.learn(batch)
+    assert first["actor_loss"] is None
+    assert any(not torch.equal(old, new) for old, new in zip(before, learner.global_target_critic1.parameters()))
+    for target, source in zip(learner.global_target_critic1.parameters(), learner.global_critic1.parameters()):
+        torch.testing.assert_close(target, source)
+    for target, source in zip(learner.global_target_critic2.parameters(), learner.global_critic2.parameters()):
+        torch.testing.assert_close(target, source)

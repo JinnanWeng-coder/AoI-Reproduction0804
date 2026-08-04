@@ -1,0 +1,9 @@
+{
+  "aggregation": "mean over seeds then agents",
+  "figure": "Fig.3",
+  "runs": [
+    "E:\\Research\\Article_Reimplementation\\reproduction\\1-Modified_MADDPG_with_TDec\\scratch\\remediation-v2-cpu"
+  ],
+  "scenario": "p05_n06_g25",
+  "smoothing_window": 1
+}

@@ -14,6 +14,34 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 
+def compute_global_reward(interference_linear, normalization_mode: str = "source_normalized_per_rb_mean"):
+    """Compute the global interference reward from a linear P-by-K tensor.
+
+    ``source_normalized_per_rb_mean`` is the source-compatible normalized
+    mean over platoons and resource blocks.  ``eq16_sum`` is retained as an
+    explicit diagnostic alternative and is never selected implicitly.
+    """
+    linear = np.asarray(interference_linear, dtype=np.float64)
+    if linear.ndim != 2:
+        raise ValueError(f"interference_linear must have shape [P,K], got {linear.shape}")
+    if not np.all(np.isfinite(linear)) or np.any(linear <= 0):
+        raise ValueError("interference_linear must be finite and strictly positive")
+    interference_db = 10.0 * np.log10(linear)
+    normalized = (interference_db + 60.0) / 60.0
+    if normalization_mode == "source_normalized_per_rb_mean":
+        return -float(np.mean(normalized))
+    if normalization_mode == "eq16_sum":
+        return -float(np.sum(normalized))
+    if normalization_mode == "legacy_scalar":
+        return -float(np.mean(normalized))
+    raise ValueError(f"unsupported global reward normalization: {normalization_mode}")
+
+
+def power_penalty(power_dbm: float) -> float:
+    """Finite, non-negative, monotone power penalty used by paper rewards."""
+    return 0.5 * math.log(max(float(power_dbm), 1.0), 5)
+
+
 @dataclass
 class Vehicle:
     position: List[float]
@@ -93,6 +121,7 @@ class PaperEnviron:
         self.bs_noise_figure = 5.0
         self.veh_ant_gain = 3.0
         self.veh_noise_figure = 9.0
+        self.change_direction_prob = 0.4
         self.rng = np.random.default_rng(config.seed)
         self.v2v_channels = V2Vchannels(self.rng)
         self.v2i_channels = V2Ichannels(self.rng, config.rsu_position)
@@ -100,8 +129,6 @@ class PaperEnviron:
         self.step_count = 0
         self.episode_index = 0
         self._world_initialized = False
-        self._build_episode_world()
-        self._world_initialized = True
 
     @property
     def state_dim(self):
@@ -109,9 +136,9 @@ class PaperEnviron:
 
     def _lane_sets(self):
         up = [1.75, 5.25, 251.75, 255.25, 501.75, 505.25]
-        down = [241.25, 248.25, 491.25, 498.25, 741.25, 748.25]
+        down = [244.75, 248.25, 494.75, 498.25, 744.75, 748.25]
         left = [1.75, 5.25, 434.75, 438.25, 867.75, 871.25]
-        right = [424.75, 431.75, 857.75, 864.75, 1290.25, 1297.25]
+        right = [427.75, 431.25, 860.75, 864.75, 1293.75, 1297.25]
         return {"u": up, "d": down, "l": left, "r": right}
 
     def _build_vehicles(self):
@@ -139,12 +166,18 @@ class PaperEnviron:
                     position = [start[0] - offset, start[1]]
                 self.vehicles.append(Vehicle(position, direction, velocity))
 
+    def _initialize_shadowing(self):
+        """Draw initial shadowing once per cold world reset."""
+        count = len(self.vehicles)
+        self.v2v_shadowing = self.rng.normal(0, 3, (count, count))
+        self.v2i_shadowing = self.rng.normal(0, 8, count)
+
     def _renew_channel(self):
         count = len(self.vehicles)
         self.v2v_pathloss = np.zeros((count, count), dtype=np.float64) + 50 * np.identity(count)
         self.v2i_pathloss = np.zeros(count, dtype=np.float64)
-        self.v2v_shadowing = self.rng.normal(0, 3, (count, count))
-        self.v2i_shadowing = self.rng.normal(0, 8, count)
+        if not hasattr(self, "v2v_shadowing") or self.v2v_shadowing.shape != (count, count):
+            self._initialize_shadowing()
         self.delta_distance = np.asarray([vehicle.velocity * self.time_slow for vehicle in self.vehicles])
         for i in range(count):
             for j in range(i + 1, count):
@@ -166,34 +199,127 @@ class PaperEnviron:
         self.v2i_channels_fast = np.repeat(self.v2i_channels_abs[:, None], self.n_rb, axis=1) - 20 * np.log10(fading_i)
 
     def _renew_positions(self):
-        """Advance each platoon by one slow-fading interval on its lane."""
+        """Advance platoons on the public urban grid with correlated turns.
+
+        Leaders make the only stochastic routing decision.  Followers are
+        then re-anchored to the leader with the configured platoon gap, so a
+        turn cannot tear a platoon apart.  The explicit Generator keeps this
+        mobility stream independent from Python/torch/global NumPy RNGs.
+        """
+        lanes = self._lane_sets()
         for platoon in range(self.n_platoon):
             leader_index = platoon * self.size_platoon
             leader = self.vehicles[leader_index]
             distance = float(leader.velocity * self.time_slow)
             x, y = leader.position
-            if leader.direction == "u":
-                y = (y + distance) % self.height
-            elif leader.direction == "d":
-                y = (y - distance) % self.height
-            elif leader.direction == "l":
-                x = (x - distance) % self.width
-            else:
-                x = (x + distance) % self.width
+            direction = leader.direction
+            changed = False
+            if direction == "u":
+                for crossing in lanes["l"]:
+                    if y <= crossing <= y + distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
+                        x -= distance - (crossing - y)
+                        y = crossing
+                        direction = "l"
+                        changed = True
+                        break
+                if not changed:
+                    for crossing in lanes["r"]:
+                        if y <= crossing <= y + distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
+                            # Preserve the public source's turn geometry.
+                            x += distance + (crossing - y)
+                            y = crossing
+                            direction = "r"
+                            changed = True
+                            break
+                if not changed:
+                    y += distance
+            elif direction == "d":
+                for crossing in lanes["l"]:
+                    if y >= crossing >= y - distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
+                        x -= distance - (y - crossing)
+                        y = crossing
+                        direction = "l"
+                        changed = True
+                        break
+                if not changed:
+                    for crossing in lanes["r"]:
+                        if y >= crossing >= y - distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
+                            x += distance + (y - crossing)
+                            y = crossing
+                            direction = "r"
+                            changed = True
+                            break
+                if not changed:
+                    y -= distance
+            elif direction == "r":
+                for crossing in lanes["u"]:
+                    if x <= crossing <= x + distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
+                        y += distance - (crossing - x)
+                        x = crossing
+                        direction = "u"
+                        changed = True
+                        break
+                if not changed:
+                    for crossing in lanes["d"]:
+                        if x <= crossing <= x + distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
+                            y -= distance - (crossing - x)
+                            x = crossing
+                            direction = "d"
+                            changed = True
+                            break
+                if not changed:
+                    x += distance
+            else:  # direction == "l"
+                for crossing in lanes["u"]:
+                    if x >= crossing >= x - distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
+                        y += distance - (x - crossing)
+                        x = crossing
+                        direction = "u"
+                        changed = True
+                        break
+                if not changed:
+                    for crossing in lanes["d"]:
+                        if x >= crossing >= x - distance and self.rng.uniform(0.0, 1.0) < self.change_direction_prob:
+                            y -= distance - (x - crossing)
+                            x = crossing
+                            direction = "d"
+                            changed = True
+                            break
+                if not changed:
+                    x -= distance
+
+            # The source sends a platoon to the next boundary lane instead of
+            # wrapping coordinates with modulo arithmetic.
+            if x < 0 or y < 0 or x > self.width or y > self.height:
+                if direction == "u":
+                    direction = "r"
+                    y = lanes["r"][-1]
+                elif direction == "d":
+                    direction = "l"
+                    y = lanes["l"][0]
+                elif direction == "l":
+                    direction = "u"
+                    x = lanes["u"][0]
+                else:
+                    direction = "d"
+                    x = lanes["d"][-1]
             leader.position = [x, y]
+            leader.direction = direction
             for follower in range(1, self.size_platoon):
                 if leader.direction == "u":
-                    position = [x, (y - follower * self.config.scenario.gap_m) % self.height]
+                    position = [x, y - follower * self.config.scenario.gap_m]
                 elif leader.direction == "d":
-                    position = [x, (y + follower * self.config.scenario.gap_m) % self.height]
+                    position = [x, y + follower * self.config.scenario.gap_m]
                 elif leader.direction == "l":
-                    position = [(x + follower * self.config.scenario.gap_m) % self.width, y]
+                    position = [x + follower * self.config.scenario.gap_m, y]
                 else:
-                    position = [(x - follower * self.config.scenario.gap_m) % self.width, y]
+                    position = [x - follower * self.config.scenario.gap_m, y]
+                self.vehicles[leader_index + follower].direction = leader.direction
                 self.vehicles[leader_index + follower].position = position
 
     def _build_episode_world(self):
         self._build_vehicles()
+        self._initialize_shadowing()
         self._renew_channel()
         self._renew_fast_fading()
         self.v2v_demand = np.full(self.n_platoon, self.v2v_demand_size, dtype=np.float64)
@@ -237,11 +363,11 @@ class PaperEnviron:
         if episode_index > 0 and update_mobility and episode_index % self.config.slow_update_every_episodes == 0:
             self._renew_positions()
             self._renew_channel()
+        if episode_index > 0:
+            self._renew_fast_fading()
         self.v2v_demand.fill(self.v2v_demand_size)
         self.individual_time_limit.fill(self.config.steps_per_episode * self.time_fast)
         self.active_links[:] = True
-        if episode_index > 0:
-            self._renew_fast_fading()
         self.episode_index = episode_index
         self.step_count = 0
         return self.get_observations()
@@ -265,35 +391,65 @@ class PaperEnviron:
     def _compute_metrics(self, decoded):
         p = self.n_platoon
         n = self.size_platoon
+        rb_indices = decoded[:, 0].astype(np.int64)
+        modes = decoded[:, 1].astype(np.int64)
         self.v2i_interference = np.full((p, self.n_rb), self.sig2, dtype=np.float64)
         self.v2v_interference = np.full((p, n - 1, self.n_rb), self.sig2, dtype=np.float64)
-        v2i_signal = np.zeros(p, dtype=np.float64)
-        v2v_signal = np.zeros((p, n - 1), dtype=np.float64)
-        for rb in range(self.n_rb):
-            selected = np.flatnonzero(decoded[:, 0].astype(int) == rb)
-            for receiver in selected:
-                for transmitter in selected:
-                    if receiver == transmitter:
+        # Every victim and every RB receives contributions from all other
+        # transmitters using that RB.  This deliberately includes RBs that no
+        # victim selected, which must not silently remain at noise only.
+        for receiver in range(p):
+            receiver_start = receiver * n
+            for rb in range(self.n_rb):
+                for transmitter in np.flatnonzero(rb_indices == rb):
+                    if transmitter == receiver:
                         continue
                     leader_tx = transmitter * n
-                    if int(decoded[receiver, 1]) == 0:
-                        self.v2i_interference[receiver, rb] += 10 ** ((decoded[transmitter, 2] - self.v2i_channels_fast[leader_tx, rb] + self.veh_ant_gain + self.bs_ant_gain - self.bs_noise_figure) / 10.0)
-                    else:
-                        receiver_start = receiver * n
-                        for follower in range(n - 1):
-                            self.v2v_interference[receiver, follower, rb] += 10 ** ((decoded[transmitter, 2] - self.v2v_channels_fast[leader_tx, receiver_start + follower + 1, rb] + 2 * self.veh_ant_gain - self.veh_noise_figure) / 10.0)
-                leader = receiver * n
-                if int(decoded[receiver, 1]) == 0:
-                    v2i_signal[receiver] = 10 ** ((decoded[receiver, 2] - self.v2i_channels_fast[leader, rb] + self.veh_ant_gain + self.bs_ant_gain - self.bs_noise_figure) / 10.0)
-                else:
+                    self.v2i_interference[receiver, rb] += 10 ** (
+                        (decoded[transmitter, 2] - self.v2i_channels_fast[leader_tx, rb] + self.veh_ant_gain + self.bs_ant_gain - self.bs_noise_figure) / 10.0
+                    )
                     for follower in range(n - 1):
-                        v2v_signal[receiver, follower] = 10 ** ((decoded[receiver, 2] - self.v2v_channels_fast[leader, leader + follower + 1, rb] + 2 * self.veh_ant_gain - self.veh_noise_figure) / 10.0)
-        v2i_rate = np.log2(1.0 + v2i_signal / (self.v2i_interference[np.arange(p), decoded[:, 0].astype(int)])) * self.time_fast * self.bandwidth
-        v2v_rate_all = np.log2(1.0 + v2v_signal / self.v2v_interference[np.arange(p), :, decoded[:, 0].astype(int)]) * self.time_fast * self.bandwidth
+                        self.v2v_interference[receiver, follower, rb] += 10 ** (
+                            (decoded[transmitter, 2] - self.v2v_channels_fast[leader_tx, receiver_start + follower + 1, rb] + 2 * self.veh_ant_gain - self.veh_noise_figure) / 10.0
+                        )
+        v2i_signal = np.zeros(p, dtype=np.float64)
+        v2v_signal = np.zeros((p, n - 1), dtype=np.float64)
+        for receiver in range(p):
+            rb = int(rb_indices[receiver])
+            leader = receiver * n
+            if modes[receiver] == 0:
+                v2i_signal[receiver] = 10 ** (
+                    (decoded[receiver, 2] - self.v2i_channels_fast[leader, rb] + self.veh_ant_gain + self.bs_ant_gain - self.bs_noise_figure) / 10.0
+                )
+            else:
+                for follower in range(n - 1):
+                    v2v_signal[receiver, follower] = 10 ** (
+                        (decoded[receiver, 2] - self.v2v_channels_fast[leader, leader + follower + 1, rb] + 2 * self.veh_ant_gain - self.veh_noise_figure) / 10.0
+                    )
+        v2i_selected_interference = self.v2i_interference[np.arange(p), rb_indices]
+        v2v_selected_interference = self.v2v_interference[np.arange(p), :, rb_indices]
+        v2i_rate = np.log2(1.0 + v2i_signal / v2i_selected_interference) * self.time_fast * self.bandwidth
+        v2v_rate_all = np.log2(1.0 + v2v_signal / v2v_selected_interference) * self.time_fast * self.bandwidth
         v2v_rate = v2v_rate_all.min(axis=1)
-        interference_db = 10.0 * np.log10(np.where(decoded[:, 1].astype(int)[:, None] == 0, self.v2i_interference, np.maximum(self.v2v_interference.max(axis=1), self.sig2)))
-        selected_interference = interference_db[np.arange(p), decoded[:, 0].astype(int)]
-        return v2i_rate, v2v_rate, v2v_rate_all, interference_db, selected_interference
+        interference_linear = np.where(modes[:, None] == 0, self.v2i_interference, np.maximum(self.v2v_interference.max(axis=1), self.sig2))
+        interference_db = 10.0 * np.log10(np.maximum(interference_linear, np.finfo(np.float64).tiny))
+        selected_interference = interference_db[np.arange(p), rb_indices]
+        self.I_v2i_linear = self.v2i_interference.copy()
+        self.I_v2v_linear = self.v2v_interference.copy()
+        self.I_mode_db = interference_db.copy()
+        return {
+            "v2i_rate": v2i_rate,
+            "v2v_rate": v2v_rate,
+            "v2v_rate_all": v2v_rate_all,
+            "interference_db": interference_db,
+            "selected_interference_db": selected_interference,
+            "interference_linear": interference_linear,
+            "v2i_interference_linear": self.v2i_interference.copy(),
+            "v2v_interference_linear": self.v2v_interference.copy(),
+            "I_v2i_linear": self.I_v2i_linear,
+            "I_v2v_linear": self.I_v2v_linear,
+            "I_mode_db": self.I_mode_db,
+        }
 
     def _state_for_agent(self, idx: int):
         n = self.size_platoon
@@ -319,7 +475,12 @@ class PaperEnviron:
 
     def step(self, actions):
         decoded = self.decode_actions(actions)
-        v2i_rate, v2v_rate, v2v_rate_all, interference_db, selected_interference = self._compute_metrics(decoded)
+        metrics = self._compute_metrics(decoded)
+        v2i_rate = metrics["v2i_rate"]
+        v2v_rate = metrics["v2v_rate"]
+        v2v_rate_all = metrics["v2v_rate_all"]
+        interference_db = metrics["interference_db"]
+        selected_interference = metrics["selected_interference_db"]
         for i in range(self.n_platoon):
             self.aoi[i] = 1.0 if v2i_rate[i] >= self.v2i_min else min(float(self.config.steps_per_episode), self.aoi[i] + 1.0)
         self.v2v_demand = np.maximum(0.0, self.v2v_demand - v2v_rate)
@@ -329,15 +490,15 @@ class PaperEnviron:
         task1 = np.empty(self.n_platoon, dtype=np.float64)
         task2 = np.empty(self.n_platoon, dtype=np.float64)
         for i in range(self.n_platoon):
-            power_penalty = 0.5 * math.log(max(float(decoded[i, 2]), 1e-12), 5)
+            power_cost = power_penalty(decoded[i, 2])
             revenue = 1.0 if v2i_rate[i] >= self.v2i_min else 0.0
             if int(decoded[i, 1]) == 0:
                 task1[i] = -4.95 * (self.v2v_demand[i] / self.v2v_demand_size)
-                task2[i] = 0.05 * revenue - power_penalty - self.aoi[i] / 20.0
+                task2[i] = 0.05 * revenue - power_cost - self.aoi[i] / 20.0
             else:
-                task1[i] = -4.95 * (self.v2v_demand[i] / self.v2v_demand_size) - power_penalty
+                task1[i] = -4.95 * (self.v2v_demand[i] / self.v2v_demand_size) - power_cost
                 task2[i] = 0.05 * revenue - self.aoi[i] / 20.0
-        global_reward = -float(np.mean((interference_db + 60.0) / 60.0))
+        global_reward = compute_global_reward(metrics["interference_linear"], self.config.global_reward_normalization)
         self.previous_interference = interference_db.copy()
         self._renew_fast_fading()
         self.step_count += 1
@@ -355,6 +516,13 @@ class PaperEnviron:
             "v2v_rate_all": v2v_rate_all.astype(np.float32),
             "interference_db": interference_db.astype(np.float32),
             "selected_interference_db": selected_interference.astype(np.float32),
+            "interference_linear": metrics["interference_linear"].astype(np.float32),
+            "v2i_interference_linear": metrics["v2i_interference_linear"].astype(np.float32),
+            "v2v_interference_linear": metrics["v2v_interference_linear"].astype(np.float32),
+            "I_v2i_linear": metrics["I_v2i_linear"].astype(np.float32),
+            "I_v2v_linear": metrics["I_v2v_linear"].astype(np.float32),
+            "I_mode_db": metrics["I_mode_db"].astype(np.float32),
+            "global_reward_normalization": self.config.global_reward_normalization,
             "success": success.astype(np.float32),
         }
         return self.get_observations(), global_reward, task1.astype(np.float32), task2.astype(np.float32), terminated, info

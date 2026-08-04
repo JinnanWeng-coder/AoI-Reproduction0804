@@ -1,0 +1,8 @@
+# Validated in aoi_v2x on 2026-08-04 (CPU).
+numpy==1.23.5
+scipy==1.13.1
+matplotlib==3.9.4
+PyYAML==6.0.3
+pytest==8.4.2
+# CPU torch: 2.8.0+cpu
+# CUDA torch: 2.11.0+cu126 in the validated aoi_cuda environment

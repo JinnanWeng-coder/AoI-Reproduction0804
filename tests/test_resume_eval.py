@@ -1,11 +1,17 @@
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
+import torch
 
 from config import resolve_config
 from checkpointing import capture_rng_state
+from Classes.Environment_Platoon import PaperEnviron
+import runner as runner_module
+from runner import _load_checkpoint
 from runner import evaluate_from_checkpoint, train
 
 
@@ -63,6 +69,40 @@ def test_frozen_eval_creates_new_artifact_without_overwriting_checkpoint(tmp_pat
     eval_dir = Path(evaluated["eval_dir"])
     summary = json.loads((eval_dir / "summary.json").read_text(encoding="utf-8"))
     assert summary["eval_seeds"] == [101, 102]
+    assert summary["eval_protocol"] == "sequential_warm"
+    assert summary["eval_warmup_episodes"] == 5
+    assert len(summary["sd_AoI_ms_per_seed"]) == 2
+    assert len(summary["ci95_AoI_ms_per_seed"]) == 2
     with np.load(eval_dir / "metrics.npz", allow_pickle=False) as arrays:
         assert arrays["aoi_ms"].shape[:2] == (2, 2)
         assert np.all(np.isfinite(arrays["aoi_ms"]))
+
+
+def test_v1_checkpoint_is_rejected_before_loading_state(tmp_path):
+    config = _small_config(tmp_path / "v1", "run")
+    path = tmp_path / "v1.pt"
+    torch.save({"config_hash": config.canonical_hash(), "config": config.to_dict()}, path)
+    with pytest.raises(ValueError, match="semantic_version"):
+        _load_checkpoint(path, config, [], SimpleNamespace(device=torch.device("cpu")), None, None, None)
+
+
+def test_eval_uses_one_cold_reset_and_sequential_episode_indices(tmp_path, monkeypatch):
+    config = _small_config(tmp_path / "sequence", "run")
+    result = train(config)
+    checkpoint = Path(result["run_dir"]) / "checkpoints" / "latest.pt"
+    resets = []
+    starts = []
+
+    class TrackingEnvironment(PaperEnviron):
+        def reset_world(self, seed=None):
+            resets.append(int(seed))
+            return super().reset_world(seed)
+
+        def start_episode(self, episode_index, update_mobility=True):
+            starts.append(int(episode_index))
+            return super().start_episode(episode_index, update_mobility)
+
+    monkeypatch.setattr(runner_module, "PaperEnviron", TrackingEnvironment)
+    runner_module.evaluate_from_checkpoint(config, str(checkpoint), eval_episodes=2, eval_seeds=[101, 102])
+    assert resets == [101, 102]
+    assert starts == list(range(7)) + list(range(7))

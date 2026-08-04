@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import platform
 import random
@@ -117,9 +118,15 @@ def _prepare_run(config: ExperimentConfig, resume: Optional[str]) -> Tuple[Path,
         "source_manifest_sha256": _source_manifest_digest(),
         "profile": config.profile,
         "semantic_version": config.semantic_version,
+        "config_hash": config.canonical_hash(),
         "scenario": config.scenario.id,
         "seed": config.seed,
         "is_formal_result": bool(config.is_formal_result),
+        "smoke": bool(config.smoke),
+        "eval_protocol": config.eval_protocol,
+        "eval_warmup_episodes": int(config.eval_warmup_episodes),
+        "global_reward_normalization": config.global_reward_normalization,
+        "mobility_model": config.mobility_model,
     }
     _write_json(run_dir / "provenance.json", provenance)
     (run_dir / "stdout.log").write_text("run started\n", encoding="utf-8")
@@ -150,7 +157,14 @@ def _load_checkpoint(path: Path, config, agents, learner, replay, environment, m
 
 
 def _record_step(info: Dict[str, Any]) -> Dict[str, Any]:
-    return {key: np.asarray(value).copy() for key, value in info.items() if key not in {"actions_decoded"}}
+    # String metadata belongs in config/provenance, not in numeric NPZ
+    # tensors.  The raw per-RB arrays remain available for audit/smoke while
+    # this filter prevents accidental object/string arrays.
+    return {
+        key: np.asarray(value).copy()
+        for key, value in info.items()
+        if key not in {"actions_decoded", "global_reward_normalization"}
+    }
 
 
 def train(config: ExperimentConfig, resume: Optional[str] = None, max_episodes: Optional[int] = None) -> Dict[str, Any]:
@@ -206,6 +220,7 @@ def train(config: ExperimentConfig, resume: Optional[str] = None, max_episodes: 
     if not audit["ok"]:
         raise RuntimeError("result audit failed before completion marker: " + json.dumps(audit, sort_keys=True))
     complete = {
+        "status": "complete",
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "is_formal_result": bool(config.is_formal_result),
         "profile": config.profile,
@@ -222,22 +237,51 @@ def train(config: ExperimentConfig, resume: Optional[str] = None, max_episodes: 
     return {"run_dir": str(run_dir), "episodes": config.episodes, "device": str(device), "audit": audit}
 
 
-def _eval_id(seeds: Iterable[int], episodes: int) -> str:
-    return "eval_" + "-".join(str(int(seed)) for seed in seeds) + f"_ep{int(episodes)}"
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _eval_id(checkpoint_hash: str, protocol: str, warmup_episodes: int, seeds: Iterable[int], episodes: int, noise: float) -> str:
+    seed_token = "-".join(str(int(seed)) for seed in seeds)
+    noise_token = str(noise).replace(".", "p")
+    return f"eval_ckpt{checkpoint_hash[:12]}_{protocol}_warm{int(warmup_episodes)}_s{seed_token}_ep{int(episodes)}_noise{noise_token}"
+
+
+def _mean_sd_ci95(values: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    values = np.asarray(values, dtype=np.float64)
+    means = values.mean(axis=1)
+    if values.shape[1] > 1:
+        sd = values.std(axis=1, ddof=1)
+    else:
+        sd = np.zeros(values.shape[0], dtype=np.float64)
+    ci = 1.96 * sd / np.sqrt(max(1, values.shape[1]))
+    return means, sd, ci
 
 
 def evaluate_from_checkpoint(config: ExperimentConfig, checkpoint: str, eval_episodes: int, eval_seeds: Optional[List[int]] = None) -> Dict[str, Any]:
     checkpoint_path = Path(checkpoint).expanduser().resolve()
     run_dir = checkpoint_path.parent.parent
     caller_rng = capture_rng_state()
+    checkpoint_hash = _sha256_file(checkpoint_path)
     checkpoint_preview = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     saved_config = config_from_dict(checkpoint_preview["config"])
     if config.device != "auto":
         saved_config.device = config.device
     config = saved_config
     if eval_seeds is None:
-        eval_seeds = [config.seed + 1000, config.seed + 1001]
-    eval_id = _eval_id(eval_seeds, eval_episodes)
+        eval_seeds = [101, 102, 103, 104, 105, 106]
+    eval_seeds = [int(seed) for seed in eval_seeds]
+    if not eval_seeds or len(set(eval_seeds)) != len(eval_seeds):
+        raise ValueError("eval_seeds must be non-empty and unique")
+    if int(eval_episodes) < 1:
+        raise ValueError("eval_episodes must be positive")
+    warmup_episodes = int(config.eval_warmup_episodes)
+    eval_noise = 0.0
+    eval_id = _eval_id(checkpoint_hash, config.eval_protocol, warmup_episodes, eval_seeds, eval_episodes, eval_noise)
     eval_dir = run_dir / "eval" / eval_id
     if eval_dir.exists():
         raise FileExistsError(f"Refusing to overwrite existing eval directory: {eval_dir}")
@@ -266,9 +310,20 @@ def evaluate_from_checkpoint(config: ExperimentConfig, checkpoint: str, eval_epi
             seed_power = []
             seed_rb = []
             seed_mode = []
+
+            # One cold reset per held-out seed.  Warm-up and scored episodes
+            # then advance the same world sequentially, preserving AoI,
+            # previous interference, mobility, and slow fading history.
+            environment.reset_world(seed)
+            for warmup_index in range(warmup_episodes):
+                observations = environment.start_episode(warmup_index)
+                for _step in range(config.steps_per_episode):
+                    actions = np.asarray([agent.choose_action(observations[index], explore=False) for index, agent in enumerate(agents)], dtype=np.float32)
+                    observations, _rg, _t1, _t2, _done, _info = environment.step(actions)
+
             for episode in range(int(eval_episodes)):
-                environment.reset(int(seed) + episode)
-                observations = environment.get_observations()
+                episode_index = warmup_episodes + episode
+                observations = environment.start_episode(episode_index)
                 episode_aoi = []
                 episode_success = []
                 episode_demand = []
@@ -331,18 +386,34 @@ def evaluate_from_checkpoint(config: ExperimentConfig, checkpoint: str, eval_epi
         scipy.io.savemat(eval_dir / "metrics.mat", arrays)
     except ImportError:
         pass
-    per_seed_aoi = arrays["aoi_ms"].mean(axis=(1, 2, 3))
-    per_seed_success = arrays["success"][:, :, -1, :].mean(axis=(1, 2))
+    aoi_per_episode = arrays["aoi_ms"].mean(axis=(2, 3))
+    success_per_episode = arrays["success"][:, :, -1, :].mean(axis=2)
+    per_seed_aoi, sd_aoi, ci_aoi = _mean_sd_ci95(aoi_per_episode)
+    per_seed_success, sd_success, ci_success = _mean_sd_ci95(success_per_episode)
     summary = {
         "eval_id": eval_id,
         "eval_seeds": [int(seed) for seed in eval_seeds],
         "eval_episodes": int(eval_episodes),
+        "eval_protocol": config.eval_protocol,
+        "eval_warmup_episodes": warmup_episodes,
+        "eval_noise": eval_noise,
+        "semantic_version": config.semantic_version,
+        "global_reward_normalization": config.global_reward_normalization,
+        "mobility_model": config.mobility_model,
+        "checkpoint_sha256": checkpoint_hash,
         "mean_AoI_ms_per_seed": per_seed_aoi.tolist(),
+        "sd_AoI_ms_per_seed": sd_aoi.tolist(),
+        "ci95_AoI_ms_per_seed": ci_aoi.tolist(),
         "CAM_success_probability_per_seed": per_seed_success.tolist(),
+        "sd_CAM_success_probability_per_seed": sd_success.tolist(),
+        "ci95_CAM_success_probability_per_seed": ci_success.tolist(),
         "mean_AoI_ms": float(per_seed_aoi.mean()),
         "CAM_success_probability": float(per_seed_success.mean()),
+        "endpoint_success_probability_per_seed": per_seed_success.tolist(),
         "is_frozen_eval": True,
         "checkpoint": str(checkpoint_path),
+        "status": "complete",
+        "is_formal_result": bool(config.is_formal_result),
     }
     _write_json(eval_dir / "summary.json", summary)
     _write_json(eval_dir / "EVAL_COMPLETE.json", summary)

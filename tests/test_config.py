@@ -35,3 +35,7 @@ def test_safe_run_path_rejects_escape():
     with pytest.raises(ValueError):
         safe_run_dir(root, "nested/name")
 
+
+def test_unimplemented_sequential_actor_mode_is_rejected():
+    with pytest.raises(ValueError, match="unsupported global_update_mode"):
+        resolve_config("paper_faithful", "p05_n04_g25", global_update_mode="sequential_agent")

@@ -313,7 +313,7 @@ def validate_config(config: ExperimentConfig) -> None:
         raise ValueError("invalid power interval")
     if config.profile == "paper_faithful" and config.global_actor_weight != 1.0:
         raise ValueError("paper_faithful default global_actor_weight must remain 1.0")
-    if config.global_update_mode not in {"legacy_detach", "synchronous_joint", "sequential_agent"}:
+    if config.global_update_mode not in {"legacy_detach", "synchronous_joint"}:
         raise ValueError("unsupported global_update_mode")
     expected_version = "paper_faithful_v2" if config.profile == "paper_faithful" else "legacy_release_v1"
     if config.semantic_version != expected_version:
@@ -369,7 +369,16 @@ def matrix_specs(profile: str = "paper_faithful", seeds: Iterable[int] = range(2
         for seed in seeds:
             name = f"{profile}_{scenario.id}_seed{int(seed):02d}"
             config = resolve_config(profile=profile, scenario=scenario.id, seed=int(seed), run_name=name)
-            specs.append({"run_name": name, "profile": profile, "scenario": scenario.id, "seed": int(seed), "state_dim": config.state_dim, "action_dim": config.action_dim})
+            specs.append({
+                "run_name": name,
+                "profile": profile,
+                "semantic_version": config.semantic_version,
+                "scenario": scenario.id,
+                "seed": int(seed),
+                "state_dim": config.state_dim,
+                "action_dim": config.action_dim,
+                "config_hash": config.canonical_hash(),
+            })
     return specs
 
 

@@ -24,13 +24,13 @@ def plot_run(run_dir: Path, output: Optional[Path] = None) -> Path:
         task2 = metrics["task2_episode_mean"].mean(axis=1)
         local_total = metrics["local_total_episode_mean"].mean(axis=1)
         global_reward = metrics["global_episode_sum"]
-        objective_proxy = metrics["training_objective_proxy"].mean(axis=1)
+        objective_proxy = metrics["immediate_reward_proxy"].mean(axis=1)
     figure, axes = plt.subplots(4, 1, figsize=(8, 10), sharex=True)
     axes[0].plot(task1, label="task1")
     axes[1].plot(task2, label="task2")
     axes[2].plot(local_total, label="task1+task2 (local_total)")
     axes[3].plot(global_reward, label="global")
-    axes[3].plot(objective_proxy, label="training objective proxy", alpha=0.8)
+    axes[3].plot(objective_proxy, label="immediate reward proxy", alpha=0.8)
     for axis in axes:
         axis.legend()
         axis.grid(alpha=0.25)

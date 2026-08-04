@@ -1,0 +1,24 @@
+{
+  "figure": "Fig.5",
+  "reused_eval_artifacts": [
+    "E:\\Research\\Article_Reimplementation\\reproduction\\1-Modified_MADDPG_with_TDec\\scratch\\remediation-v2-cpu\\eval\\eval_ckpt9101fa649736_sequential_warm_warm5_s101-102_ep2_noise0p0"
+  ],
+  "rows": [
+    {
+      "AoI_ms": {
+        "ci95": 0.9212000560760497,
+        "count": 2,
+        "mean": 9.52999997138977,
+        "sd": 0.6646804147763292
+      },
+      "CAM_success_probability": {
+        "ci95": 0.0,
+        "count": 2,
+        "mean": 0.0,
+        "sd": 0.0
+      },
+      "x": 25.0
+    }
+  ],
+  "x_field": "gap_m"
+}

@@ -55,6 +55,7 @@ class MetricStore:
         global_step = np.stack([item["global_step"] for item in self.episodes]).astype(np.float32)
         local_total = (task1 + task2).mean(axis=1)
         global_episode_sum = global_step.sum(axis=1)
+        global_episode_mean = global_step.mean(axis=1)
         arrays = {
             "task1_step": task1,
             "task2_step": task2,
@@ -62,8 +63,11 @@ class MetricStore:
             "task1_episode_mean": task1.mean(axis=1),
             "task2_episode_mean": task2.mean(axis=1),
             "global_episode_sum": global_episode_sum,
+            "global_episode_mean": global_episode_mean,
             "local_total_episode_mean": local_total,
-            "training_objective_proxy": local_total + self.global_actor_weight * global_episode_sum[:, None],
+            # This is an immediate reward aggregation for plotting/audit, not
+            # the differentiable actor objective used by the learner.
+            "immediate_reward_proxy": local_total + self.global_actor_weight * global_episode_mean[:, None],
         }
         info_keys = sorted(self.episodes[0]["info"])
         for key in info_keys:

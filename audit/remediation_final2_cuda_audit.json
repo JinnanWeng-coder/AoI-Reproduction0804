@@ -1,0 +1,180 @@
+{
+  "array_dtypes": {
+    "I_mode_db": "float32",
+    "I_v2i_linear": "float32",
+    "I_v2v_linear": "float32",
+    "aoi_ms": "float32",
+    "global_episode_mean": "float32",
+    "global_episode_sum": "float32",
+    "global_step": "float32",
+    "immediate_reward_proxy": "float32",
+    "interference_db": "float32",
+    "interference_linear": "float32",
+    "local_total_episode_mean": "float32",
+    "mode": "float32",
+    "power_dbm": "float32",
+    "rb": "float32",
+    "remaining_demand": "float32",
+    "remaining_time_ms": "float32",
+    "selected_interference_db": "float32",
+    "success": "float32",
+    "task1_episode_mean": "float32",
+    "task1_step": "float32",
+    "task2_episode_mean": "float32",
+    "task2_step": "float32",
+    "v2i_interference_linear": "float32",
+    "v2i_rate": "float32",
+    "v2v_interference_linear": "float32",
+    "v2v_rate": "float32",
+    "v2v_rate_all": "float32"
+  },
+  "array_shapes": {
+    "I_mode_db": [
+      4,
+      10,
+      5,
+      3
+    ],
+    "I_v2i_linear": [
+      4,
+      10,
+      5,
+      3
+    ],
+    "I_v2v_linear": [
+      4,
+      10,
+      5,
+      3,
+      3
+    ],
+    "aoi_ms": [
+      4,
+      10,
+      5
+    ],
+    "global_episode_mean": [
+      4
+    ],
+    "global_episode_sum": [
+      4
+    ],
+    "global_step": [
+      4,
+      10
+    ],
+    "immediate_reward_proxy": [
+      4,
+      5
+    ],
+    "interference_db": [
+      4,
+      10,
+      5,
+      3
+    ],
+    "interference_linear": [
+      4,
+      10,
+      5,
+      3
+    ],
+    "local_total_episode_mean": [
+      4,
+      5
+    ],
+    "mode": [
+      4,
+      10,
+      5
+    ],
+    "power_dbm": [
+      4,
+      10,
+      5
+    ],
+    "rb": [
+      4,
+      10,
+      5
+    ],
+    "remaining_demand": [
+      4,
+      10,
+      5
+    ],
+    "remaining_time_ms": [
+      4,
+      10,
+      5
+    ],
+    "selected_interference_db": [
+      4,
+      10,
+      5
+    ],
+    "success": [
+      4,
+      10,
+      5
+    ],
+    "task1_episode_mean": [
+      4,
+      5
+    ],
+    "task1_step": [
+      4,
+      10,
+      5
+    ],
+    "task2_episode_mean": [
+      4,
+      5
+    ],
+    "task2_step": [
+      4,
+      10,
+      5
+    ],
+    "v2i_interference_linear": [
+      4,
+      10,
+      5,
+      3
+    ],
+    "v2i_rate": [
+      4,
+      10,
+      5
+    ],
+    "v2v_interference_linear": [
+      4,
+      10,
+      5,
+      3,
+      3
+    ],
+    "v2v_rate": [
+      4,
+      10,
+      5
+    ],
+    "v2v_rate_all": [
+      4,
+      10,
+      5,
+      3
+    ]
+  },
+  "checkpoint_status": {
+    "best.pt": true,
+    "latest.pt": true
+  },
+  "config_hash": "17b582feddad1c52b40155e9ca865a35ae33313e8b844780fd8175831cdce6f6",
+  "errors": [],
+  "eval_reports": [],
+  "formal_marker": false,
+  "ok": true,
+  "run_dir": "E:\\Research\\Article_Reimplementation\\reproduction\\1-Modified_MADDPG_with_TDec\\scratch\\remediation-v2-final2-cuda",
+  "semantic_version": "paper_faithful_v2"
+}

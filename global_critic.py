@@ -72,6 +72,10 @@ class Global_Critic:
         (loss1 + loss2).backward()
         self.global_critic1.optimizer.step()
         self.global_critic2.optimizer.step()
+        # Global target critics follow every global critic optimizer step.
+        # Local target networks remain policy-delayed and are updated below
+        # only when ``update_local`` is true.
+        self.update_global_network_parameters()
 
         local_losses = []
         if update_local:
@@ -191,7 +195,6 @@ class Global_Critic:
             deltas.append(float(torch.linalg.vector_norm(new - old).cpu()))
         for agent in self.agents_networks:
             agent.update_network_parameters()
-        self.update_global_network_parameters()
         return {"actor_loss": actor_loss, "global_actor_gradient_norms": global_norms, "actor_parameter_deltas": deltas}
 
     def learn(self, batch):

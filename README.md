@@ -1,8 +1,12 @@
 # Modified MADDPG with TDec reproduction
 
-This directory is the reproducible implementation workspace for Algorithm 1.
-The original source is preserved under `legacy_reference/` and its provenance is
-recorded in `SOURCE_MANIFEST.json`. The source Git clone at
+The leading `1-` is part of the research-task directory name. `TDec` denotes
+the task-decomposition branch (Algorithm 2); this directory provides the
+Algorithm 1 training orchestration.
+
+This directory is the reproducible implementation workspace. The original
+source is preserved under `legacy_reference/` and its provenance is recorded
+in `SOURCE_MANIFEST.json`. The source Git clone at
 `src/AoI-V2X-IEEE-TVT-2023-reimplement` is never modified by this project.
 
 The requested `src/...-main` path was absent after the source repository was
@@ -13,15 +17,15 @@ The implementation is split into `legacy_release` and `paper_faithful` profiles.
 Smoke runs are written below `scratch/`; formal runs are written below
 `experiments/runs/` and are never overwritten.
 
+`paper_faithful` artifacts use semantic version `paper_faithful_v2`. Existing
+pre-remediation paper checkpoints/results are incompatible and are rejected by
+the loader; they remain as historical artifacts and are not reused.
+
 ## Environments
 
-Use a Python environment with a suitable CPU or CUDA PyTorch build. The local
-validation used `aoi_v2x` (Python 3.9, CPU torch) and `aoi_cuda` (Python 3.10,
+See `ENVIRONMENT_INSTALL.md` and `requirements.lock.txt`. Validation used
+`aoi_v2x` (Python 3.9, CPU torch) and `aoi_cuda` (Python 3.10,
 torch `2.11.0+cu126`, one available CUDA device).
-
-```text
-python -m pip install -r requirements.txt
-```
 
 ## CLI and dry-run
 
@@ -40,19 +44,25 @@ run path without creating output. The second prints exactly 48 unique
 python Main.py --profile paper_faithful --scenario p05_n04_g25 \
   --seed 2 --device cpu --smoke --run-name smoke_paper
 python Main.py --profile paper_faithful --device cpu \
-  --eval-only --eval-episodes 100 --eval-seeds 102,103,104 \
+  --eval-only --eval-episodes 100 --eval-seeds 101,102,103,104,105,106 \
   --resume scratch/smoke_paper/checkpoints/latest.pt
-python analysis/audit_results.py scratch/smoke_paper
+python analysis/audit_results.py scratch/smoke_paper --allow-incomplete
 python -m analysis.plot_training scratch/smoke_paper
+python analysis/study_manifest.py experiments/runs --output study_manifest.json
+python analysis/build_paper_figures.py study_manifest.json --figure 3
 ```
 
-Smoke output is always placed under `scratch/` and marked
-`is_formal_result=false`. Existing run and eval directories are rejected; only
-an explicit `--resume` can continue an incomplete run. `latest.pt` contains
-networks, optimizers, replay, environment, metrics, and Python/NumPy/PyTorch RNG
-state. `train_metrics.npz` keeps separate task1/task2 arrays, the combined
-`local_total_episode_mean`, `global_episode_sum`, and
-`training_objective_proxy`; plotting reads these files only.
+Smoke output is marked `is_formal_result=false`. Existing run and eval
+directories are rejected; only an explicit `--resume` can continue an
+incomplete run. `latest.pt` contains networks, optimizers, replay, environment,
+metrics, and Python/NumPy/PyTorch RNG state. `train_metrics.npz` keeps separate
+task1/task2 arrays, `local_total_episode_mean`, `global_episode_sum`,
+`global_episode_mean`, and `immediate_reward_proxy`. The latter is an immediate
+reward aggregation for plotting, not a differentiable actor objective.
+
+Evaluation uses one `reset_world(eval_seed)` per held-out seed, five sequential
+warm-up episodes by default, then sequential scored episodes. Formal held-out
+seeds are 101..106 and summary files contain per-seed mean/SD/95% CI.
 
 The restart-safe matrix entry points are:
 
@@ -68,11 +78,17 @@ that matrix.
 ## Profiles
 
 `legacy_release` preserves the public source behavior, including the detached
-global actor term and old environment cadence, for compatibility tracing.
+global actor term and old environment cadence, for compatibility tracing. Its
+adapter also exposes unified `rb`, `mode`, and `power_dbm` info fields.
+
 `paper_faithful` is the formal default: continuous `[1,30]` dBm power, full
 `750×1299` geometry, centered RSU, per-RB previous interference, remaining time,
-current-interference reward, and one synchronized joint actor update with
-`global_actor_weight=1.0`.
+current-interference reward, correlated urban-grid mobility, and one
+synchronized joint actor update with `global_actor_weight=1.0`.
+
+Fig.4 requires declared baseline artifacts. If they are missing, the figure
+command exits nonzero and writes `INCOMPLETE_BASELINES.json`; this prevents
+silently presenting the current Algorithm1/TDec curve as a complete comparison.
 
 Formal 500-episode training and the 48-run matrix are intentionally not launched
 by this code-completion stage.
