@@ -1,0 +1,8 @@
+# Top-level packages validated in aoi_cuda on 2026-08-04 (Python 3.10.20).
+# Install torch/torchvision/torchaudio separately from the official cu126
+# index as documented in ENVIRONMENT_INSTALL.md.
+numpy==1.23.5
+scipy==1.15.3
+matplotlib==3.10.8
+PyYAML==6.0.3
+pytest==9.1.1

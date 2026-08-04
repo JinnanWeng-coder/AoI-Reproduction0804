@@ -1,48 +1,85 @@
-# Environment installation notes
+# Environment installation
 
-Validated environments:
+The formal remote lane is Linux, Python 3.10.20, and an NVIDIA CUDA device.
+The locally validated CUDA environment used PyTorch `2.11.0+cu126`. The CPU
+environment remains useful for tests and diagnostics, but it is not the
+recommended 48-run execution target.
 
-* `aoi_v2x`: Python 3.9.25, NumPy 1.23.5, PyTorch 2.8.0+cpu,
-  PyYAML 6.0.3, pytest 8.4.2.
-* `aoi_cuda`: Python 3.10.20, NumPy 1.23.5, PyTorch 2.11.0+cu126,
-  PyYAML 6.0.3, pytest 9.1.1, one CUDA device available.
+## Clone and establish provenance
 
-Install the pinned non-PyTorch dependencies with `requirements.lock.txt`, then
-select the PyTorch build matching the host:
+```bash
+git clone --branch main --single-branch \
+  https://github.com/JinnanWeng-coder/AoI-Reproduction0804.git
+cd AoI-Reproduction0804
 
-```text
-python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+test -n "$(git branch --show-current)"
+test -z "$(git status --porcelain --untracked-files=all)"
+git rev-parse HEAD
+```
+
+Formal train/resume/evaluation requires the same non-detached branch, commit,
+tracked-tree digest, clean worktree, and tracked `SOURCE_MANIFEST.json`.
+Do not pull, switch branches, edit tracked files, or generate unignored files
+inside the repository between these stages. `SOURCE_MANIFEST.json` contains
+historical Windows source paths; the remote machine does not need that original
+`src` clone and must not regenerate the manifest.
+
+Put runs, matrix reports, study manifests, and figures outside the Git checkout.
+The default `experiments/runs` and `scratch` directories are ignored, but an
+external high-capacity filesystem is preferred.
+
+## CUDA environment
+
+```bash
+conda create -n aoi_cuda python=3.10.20 -y
+conda activate aoi_cuda
+python -m pip install --upgrade pip
+python -m pip install -r requirements.cuda.lock.txt
+python -m pip install \
+  torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 \
+  --index-url https://download.pytorch.org/whl/cu126
+python -m pip check
+```
+
+The PyTorch command is the official CUDA 12.6 combination for version 2.11.0.
+The two requirements files pin the directly used non-PyTorch packages; they do
+not pretend to be a cross-platform lock for the CUDA wheel and all transitive
+dependencies.
+
+Verify the host before any formal run:
+
+```bash
+nvidia-smi
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 python -m pytest -q
+python scripts/preflight_network.py \
+  --scenario p05_n10_g25 --batch-size 64 --device cuda:0
 ```
 
-The lock file intentionally records CPU and CUDA torch separately; do not
-replace one with the other during a formal run.  The validated invocations are:
+Expected preflight properties are `status=pass`, `state_dim=46`, two global
+target updates, and delayed local/actor target updates `[false, true]`.
 
-```text
-C:\Users\67497\anaconda3\envs\aoi_v2x\python.exe -m pytest -q
-C:\Users\67497\anaconda3\envs\aoi_cuda\python.exe -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+## CPU diagnostic environment
+
+```bash
+conda create -n aoi_cpu python=3.9.25 -y
+conda activate aoi_cpu
+python -m pip install --upgrade pip
+python -m pip install -r requirements.lock.txt
+python -m pip install \
+  torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 \
+  --index-url https://download.pytorch.org/whl/cpu
+python -m pip check
+python -m pytest -q
+python scripts/preflight_network.py \
+  --scenario p05_n10_g25 --batch-size 64 --device cpu
 ```
 
-The paper-faithful release lane is `paper_faithful_v4` with mobility revision
-`lane_graph_exit_safe_v1` and checkpoint schema `checkpoint_v4`. Legacy
-historical checkpoints remain confined to `legacy_release_v1`; paper v1/v2/v3
-checkpoints are rejected.
+Validated local versions were:
 
-Before remote execution, run the largest-network preflight on the selected
-device. It performs two learner updates and verifies global-target-per-step
-plus delayed local/actor cadence:
+- CPU: Python 3.9.25, NumPy 1.23.5, SciPy 1.13.1, Matplotlib 3.9.4,
+  PyYAML 6.0.3, pytest 8.4.2, PyTorch 2.8.0+cpu.
+- CUDA: Python 3.10.20, NumPy 1.23.5, SciPy 1.15.3, Matplotlib 3.10.8,
+  PyYAML 6.0.3, pytest 9.1.1, PyTorch 2.11.0+cu126.
 
-```text
-C:\Users\67497\anaconda3\envs\aoi_v2x\python.exe scripts/preflight_network.py --scenario p05_n10_g25 --batch-size 64 --device cpu
-C:\Users\67497\anaconda3\envs\aoi_cuda\python.exe scripts/preflight_network.py --scenario p05_n10_g25 --batch-size 64 --device cuda:0
-```
-
-Formal execution also requires a clean reproduction Git worktree, matching
-commit/branch/tree digest, and an explicit lifecycle scope. Smoke and
-preflight artifacts are marked non-formal. A validation pilot uses
-`--scope validation --eval-purpose validation`; `final_test` is reserved for
-the final release lane and is not a pilot substitute.
-
-Use `--device cpu` for CPU preflight and `--device cuda:0` only when the CUDA
-check reports true. This code-completion task does not install packages or
-launch formal training.
+See `REMOTE_RUNBOOK.md` for the staged formal execution and recovery commands.

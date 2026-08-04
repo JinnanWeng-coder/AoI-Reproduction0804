@@ -7,8 +7,9 @@ implement a separate "Algorithm 1 training orchestration".
 
 This directory is the reproducible implementation workspace. The original
 source is preserved under `legacy_reference/` and its provenance is recorded
-in `SOURCE_MANIFEST.json`. The source Git clone at
-`src/AoI-V2X-IEEE-TVT-2023-reimplement` is never modified by this project.
+in `SOURCE_MANIFEST.json`. The source Git clone used during implementation was
+never modified. A remote experiment clone needs only this repository; the
+absolute Windows paths retained in the source manifest are historical records.
 
 The requested `src/...-main` path was absent after the source repository was
 created; the clean clone at commit `974e5f8` is byte-identical for the source
@@ -28,7 +29,8 @@ up->right, down->left, left->up, and right->down exits.
 
 ## Environments
 
-See `ENVIRONMENT_INSTALL.md` and `requirements.lock.txt`. Validation used
+See `ENVIRONMENT_INSTALL.md`, `REMOTE_RUNBOOK.md`, and the CPU/CUDA top-level
+requirement pins. Validation used
 `aoi_v2x` (Python 3.9, CPU torch) and `aoi_cuda` (Python 3.10,
 torch `2.11.0+cu126`, one available CUDA device).
 
@@ -60,7 +62,9 @@ python analysis/build_paper_figures.py study_manifest.json --figure 3
 
 Smoke output is marked `is_formal_result=false`. Existing run and eval
 directories are rejected; only an explicit `--resume` can continue an
-incomplete run. `latest.pt` contains networks, optimizers, replay, environment,
+incomplete run. Evaluation accepts only a completed, final-episode
+`checkpoints/latest.pt` or `best.pt` bound to `COMPLETE.json`. `latest.pt`
+contains networks, optimizers, replay, environment,
 metrics, and Python/NumPy/PyTorch RNG state. `train_metrics.npz` keeps separate
 task1/task2 arrays, `local_total_episode_mean`, `global_episode_sum`,
 `global_episode_mean`, and `immediate_reward_proxy`. The latter is an immediate
@@ -75,25 +79,33 @@ training seeds. The CLI requires `--scope validation --eval-purpose validation`
 for pilot/validation evaluation. `final_test` is reserved for a formal
 checkpoint and requires `--scope final_release`, seeds 101..106, warm-up 5,
 and 100 scored episodes. A training command always uses `--scope train` and
-does not accept an evaluation purpose. Validation and final-test artifacts
-cannot be mixed.
+does not accept an evaluation purpose. Each evaluation artifact has exactly
+one purpose; a study manifest may contain both purposes and filters them
+explicitly during analysis.
 
 The restart-safe matrix entry points are:
 
 ```text
-scripts/run_paper_matrix.sh --dry-run
-powershell -File scripts/run_paper_matrix.ps1 -DryRun
+CHECKPOINT_EVERY=5 scripts/run_paper_matrix.sh --dry-run --device cuda:0 --recover-empty-run
+powershell -File scripts/run_paper_matrix.ps1 -DryRun -Device cuda:0 -CheckpointEvery 5 -RecoverEmptyRun
 ```
 
-`matrix_runner.py --execute` defaults to train-only. Use
+`matrix_runner.py --execute` defaults to train-only, a five-episode checkpoint
+cadence, and no empty-run recovery unless `--recover-empty-run` is explicit. Use
 `--stage all --eval-purpose validation` explicitly for train -> validation
 eval -> validation audit; use `--eval-purpose final_test` only for the formal
 final-release lane. Existing directories are classified with structured
-recovery states and are never deleted or overwritten.
+recovery states and are never deleted or overwritten. A new run is published
+from a fully written sibling staging directory with a no-replace atomic rename.
+The explicit empty-run path accepts only the exact, provenance-verified
+initialization whitelist; ordinary incomplete checkpoints continue through
+`--resume`. Completed runs are skipped only after both final checkpoints and
+their hashes match `COMPLETE.json`.
 
 Use `--execute` only on the remote machine after the formal environment and
-storage policy have been confirmed. This code-completion stage does not execute
-that matrix.
+storage policy have been confirmed. Run one formal 500 x 100 training cell and
+its held-out validation first, then review it before the sequential 48-run
+matrix. Exact Linux commands are in `REMOTE_RUNBOOK.md`.
 
 ## Profiles
 
@@ -112,13 +124,20 @@ silently presenting the current Algorithm2/TDec curve as a complete comparison.
 The required baselines are `Modified_MADDPG`, `MADDPG_FDec`, and `DDPG`;
 `DQN` is not a paper Fig.4 baseline. The default Fig.4 stores and draws task1,
 task2, global, and combined metrics; raw panel data are saved beside the PNG.
-Fig.5 can produce an explicitly labelled current-algorithm `PARTIAL` output
-while the baselines are unavailable.
+Its complete grid is four algorithms x the selected scenario x training seeds
+2..7. Validation and final-test rows from the same training run are deduplicated
+by `run_path`; the same cell pointing to different runs is an error. Fig.5 can
+produce an explicitly labelled current-algorithm `PARTIAL` validation output
+while the baselines are unavailable, and a manifest holding both lifecycle
+purposes can be filtered without mixing them.
 
 Formal audit applies hard gates for paper_faithful_v4: 500 episodes, 100 slots,
 the resolved full network, training seeds 2..7, final-test seeds 101..106,
 warmup 5, scored episodes 100, endpoint-demand consistency, clean Git
-provenance, and one unique final-test artifact per training run.
+provenance, and one unique final-test artifact per training run. It also binds
+the final checkpoint hashes and recomputes released AoI/CAM per-agent,
+per-evaluation-seed, SD, and overall statistics directly from `metrics.npz`.
+`summary.json` and `EVAL_COMPLETE.json` must be identical.
 
 Fig.5 uses only the controlled gap grid
 `p05_n04_g05/g15/g25/g35` or size grid
@@ -128,5 +147,7 @@ Modified_MADDPG_with_TDec, Modified_MADDPG, MADDPG_FDec, and DDPG for every
 scenario and training seed 2..7. The three baselines are not implemented in
 this round.
 
-Formal 500-episode training, the final release, and the 48-run matrix are
-intentionally not launched by this code-completion stage.
+This repository is ready for a staged remote Algorithm 2 validation pilot and,
+after that pilot is reviewed, the Algorithm 2 48-run validation grid. It is not
+yet a complete reproduction of the paper's cross-algorithm conclusions: the
+three comparison algorithms and their formal artifacts remain future work.
