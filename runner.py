@@ -529,7 +529,10 @@ def _prepare_run(
 
 
 def _load_checkpoint(path: Path, config, agents, learner, replay, environment, metrics):
-    payload = torch.load(path, map_location=learner.device, weights_only=False)
+    # Deserialize portable checkpoint data on CPU.  Module/optimizer
+    # load_state_dict calls below copy their tensors to the live parameter
+    # device, while CPU-only RNG state remains valid for torch.set_rng_state.
+    payload = torch.load(path, map_location="cpu", weights_only=False)
     checkpoint_semantic_version = payload.get("semantic_version")
     checkpoint_version = int(payload.get("checkpoint_version", 0))
     legacy_compat = False

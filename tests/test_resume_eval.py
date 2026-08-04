@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from config import resolve_config
-from checkpointing import capture_rng_state
+from checkpointing import capture_rng_state, restore_rng_state
 from Classes.Environment_Platoon import PaperEnviron
 import runner as runner_module
 from runner import _load_checkpoint
@@ -49,6 +49,106 @@ def test_checkpoint_resume_matches_uninterrupted_run(tmp_path):
         assert set(expected.files) == set(actual.files)
         for key in expected.files:
             np.testing.assert_array_equal(expected[key], actual[key], err_msg=key)
+
+
+def test_restore_rng_state_moves_generator_byte_tensors_to_cpu(monkeypatch):
+    expected_cpu = torch.get_rng_state()
+    observed = {}
+
+    class DeviceMappedState:
+        def __init__(self, name):
+            self.name = name
+            self.detached = False
+            self.moved_to_cpu = False
+
+        def detach(self):
+            self.detached = True
+            return self
+
+        def cpu(self):
+            self.moved_to_cpu = True
+            return expected_cpu
+
+    cpu_rng_mapped_to_device = DeviceMappedState("torch")
+    cuda_rng_mapped_to_device = DeviceMappedState("torch_cuda")
+    monkeypatch.setattr(torch, "set_rng_state", lambda value: observed.setdefault("torch", value))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        torch.cuda,
+        "set_rng_state_all",
+        lambda values: observed.setdefault("torch_cuda", values),
+    )
+
+    restore_rng_state(
+        {
+            "python": __import__("random").getstate(),
+            "numpy": np.random.get_state(),
+            "torch": cpu_rng_mapped_to_device,
+            "torch_cuda": [cuda_rng_mapped_to_device],
+        }
+    )
+
+    assert cpu_rng_mapped_to_device.detached and cpu_rng_mapped_to_device.moved_to_cpu
+    assert cuda_rng_mapped_to_device.detached and cuda_rng_mapped_to_device.moved_to_cpu
+    assert observed["torch"] is expected_cpu
+    assert observed["torch_cuda"] == [expected_cpu]
+
+
+def test_checkpoint_payload_is_deserialized_on_cpu(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "resume.pt"
+    checkpoint.write_bytes(b"placeholder")
+    observed = {}
+
+    def stop_after_load(path, *, map_location, weights_only):
+        observed.update(path=path, map_location=map_location, weights_only=weights_only)
+        raise RuntimeError("stop after checking deserialization device")
+
+    monkeypatch.setattr(runner_module.torch, "load", stop_after_load)
+    learner = SimpleNamespace(device=torch.device("cuda:0"))
+    with pytest.raises(RuntimeError, match="stop after checking"):
+        _load_checkpoint(checkpoint, SimpleNamespace(), [], learner, None, None, None)
+
+    assert observed == {
+        "path": checkpoint,
+        "map_location": "cpu",
+        "weights_only": False,
+    }
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_cuda_checkpoint_can_resume_from_episode_one_to_two(tmp_path):
+    config = resolve_config(
+        "paper_faithful",
+        "p05_n04_g25",
+        seed=31,
+        episodes=2,
+        steps_per_episode=4,
+        batch_size=4,
+        replay_capacity=32,
+        checkpoint_every=1,
+        actor_hidden=[16, 8],
+        local_critic_hidden=[16, 8],
+        global_critic_hidden=[16, 8, 4],
+        device="cuda:0",
+        output_root=str(tmp_path),
+        run_name="cuda_resume",
+        smoke=True,
+        is_formal_result=False,
+    )
+
+    interrupted = train(config, max_episodes=1)
+    checkpoint = Path(interrupted["run_dir"]) / "checkpoints" / "latest.pt"
+    saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    assert saved["episode"] == 1
+    assert saved["completed"] is False
+    assert saved["rng"]["torch"].device.type == "cpu"
+    assert all(value.device.type == "cpu" for value in saved["rng"]["torch_cuda"])
+
+    resumed = train(config, resume=str(checkpoint))
+    assert resumed["episodes"] == 2
+    completed = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    assert completed["episode"] == 2
+    assert completed["completed"] is True
 
 
 def test_frozen_eval_creates_new_artifact_without_overwriting_checkpoint(tmp_path):

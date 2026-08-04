@@ -54,9 +54,13 @@ def capture_rng_state() -> Dict[str, Any]:
 def restore_rng_state(state: Dict[str, Any]) -> None:
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
-    torch.set_rng_state(state["torch"])
+    # RNG byte tensors are generator state, not model state.  They must stay
+    # on CPU even when a checkpoint was deserialized with a CUDA map_location.
+    torch.set_rng_state(state["torch"].detach().cpu())
     if torch.cuda.is_available() and "torch_cuda" in state:
-        torch.cuda.set_rng_state_all(state["torch_cuda"])
+        torch.cuda.set_rng_state_all(
+            [cuda_state.detach().cpu() for cuda_state in state["torch_cuda"]]
+        )
 
 
 def atomic_torch_save(payload: Dict[str, Any], path: Path) -> None:
