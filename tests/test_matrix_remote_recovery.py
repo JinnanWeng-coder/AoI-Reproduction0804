@@ -176,6 +176,59 @@ def test_matrix_report_records_recovery_and_checkpoint_policy(tmp_path, capsys):
     assert all("--recover-empty-run" in entry["train"] for entry in data["commands"])
 
 
+def test_eight_way_matrix_shards_are_disjoint_and_cover_all_48_cells(tmp_path, capsys):
+    run_root = (tmp_path / "runs").resolve()
+    all_run_names = set()
+    all_train_commands = set()
+
+    for shard_index in range(8):
+        report = tmp_path / f"matrix-shard-{shard_index}.json"
+        assert matrix_runner.main(
+            [
+                "--dry-run",
+                "--device",
+                "cuda:0",
+                "--output-root",
+                str(run_root),
+                "--shard-count",
+                "8",
+                "--shard-index",
+                str(shard_index),
+                "--report",
+                str(report),
+            ]
+        ) == 0
+        capsys.readouterr()
+        data = json.loads(report.read_text(encoding="utf-8"))
+        assert data["full_matrix_count"] == 48
+        assert data["matrix_count"] == data["unique_count"] == 6
+        assert data["shard_count"] == 8
+        assert data["shard_index"] == shard_index
+        shard_names = {entry["run_name"] for entry in data["commands"]}
+        shard_commands = {tuple(entry["train"]) for entry in data["commands"]}
+        assert len(shard_names) == len(shard_commands) == 6
+        assert all_run_names.isdisjoint(shard_names)
+        assert all_train_commands.isdisjoint(shard_commands)
+        all_run_names.update(shard_names)
+        all_train_commands.update(shard_commands)
+
+    assert len(all_run_names) == len(all_train_commands) == 48
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--shard-count", "0"],
+        ["--shard-count", "8", "--shard-index", "8"],
+        ["--shard-count", "49", "--shard-index", "0"],
+        ["--shard-index", "-1"],
+    ],
+)
+def test_invalid_matrix_shard_arguments_fail_fast(arguments):
+    with pytest.raises(SystemExit):
+        matrix_runner.main(["--dry-run", *arguments])
+
+
 def test_remote_incomplete_resumes_and_completed_skips_without_overwrite(tmp_path):
     args = _args((tmp_path / "remote runs").resolve())
     item = matrix_runner._resolved_item(matrix_specs()[0], args)

@@ -107,6 +107,9 @@ storage policy have been confirmed. Run one formal 500 x 100 training cell and
 its held-out validation first, then review it before the sequential 48-run
 matrix. Exact Linux commands are in `REMOTE_RUNBOOK.md`.
 
+For the UNNC `Q10` eight-L20 workflow, start with `hpc/README_HPC.md`; the
+ready-to-paste Cursor/Grok operating prompt is in `hpc/GROK_HANDOFF.md`.
+
 ## Profiles
 
 `legacy_release` preserves the public source behavior, including the detached

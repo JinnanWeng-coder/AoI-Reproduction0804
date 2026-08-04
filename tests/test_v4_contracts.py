@@ -377,7 +377,15 @@ def test_matrix_default_validation_commands_and_recovery_states(tmp_path, capsys
 def test_source_manifest_read_only_verification():
     manifest_path = ROOT / "SOURCE_MANIFEST.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["manifest_version"] == 1
+    assert manifest["file_count"] == len(manifest["files"]) == 25
+    for entry in manifest["files"]:
+        assert set(entry) == {"path", "bytes", "sha256"}
+        assert int(entry["bytes"]) >= 0
+        assert len(entry["sha256"]) == 64
     source_root = Path(manifest["source_root"])
+    if not source_root.is_dir():
+        pytest.skip("historical source checkout is unavailable on this deployment host")
     before = {entry["path"]: (source_root / entry["path"]).stat().st_mtime_ns for entry in manifest["files"]}
     for entry in manifest["files"]:
         source_path = source_root / entry["path"]

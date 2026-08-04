@@ -56,6 +56,12 @@ python scripts/preflight_network.py \
   --scenario p05_n10_g25 --batch-size 64 --device cuda:0
 ```
 
+On Linux the read-only test that reopens the historical Windows source checkout
+is expected to skip because that separate checkout is intentionally not copied
+to the remote host. The tracked manifest schema/digest and all formal runtime
+provenance gates remain active; a skip of any other formal-contract test is not
+expected on the GPU node.
+
 Expected preflight properties are `status=pass`, `state_dim=46`, two global
 target updates, and delayed local/actor target updates `[false, true]`.
 

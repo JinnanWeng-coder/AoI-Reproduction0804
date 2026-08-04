@@ -31,6 +31,13 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be a non-negative integer")
+    return parsed
+
+
 def _resolved_item(item, args) -> dict:
     """Resolve exactly the config encoded by :func:`_command`.
 
@@ -73,6 +80,17 @@ def _resolved_item(item, args) -> dict:
 
 def _matrix_specs_for_args(args) -> list:
     return [_resolved_item(item, args) for item in matrix_specs(args.profile)]
+
+
+def _matrix_shard(specs: list, shard_count: int, shard_index: int) -> list:
+    """Return one deterministic, disjoint operational shard of the matrix."""
+    if shard_count < 1:
+        raise ValueError("shard_count must be positive")
+    if shard_count > len(specs):
+        raise ValueError("shard_count cannot exceed the full matrix size")
+    if shard_index < 0 or shard_index >= shard_count:
+        raise ValueError("shard_index must satisfy 0 <= shard_index < shard_count")
+    return [item for offset, item in enumerate(specs) if offset % shard_count == shard_index]
 
 
 def _identity_from_dict(config: dict) -> dict:
@@ -490,18 +508,38 @@ def main(argv=None):
     parser.add_argument("--eval-purpose", choices=("validation", "final_test"), default="validation")
     parser.add_argument("--log-dir", default="batch_logs")
     parser.add_argument("--report", default=None, help="write a JSON dry-run/execution report")
+    parser.add_argument(
+        "--shard-count",
+        type=_positive_int,
+        default=1,
+        help="split the complete 48-cell matrix into this many deterministic, disjoint workers",
+    )
+    parser.add_argument(
+        "--shard-index",
+        type=_non_negative_int,
+        default=0,
+        help="zero-based worker index within --shard-count",
+    )
     args = parser.parse_args(argv)
     if args.eval_seeds is None:
         args.eval_seeds = "201,202,203,204,205,206" if args.eval_purpose == "validation" else "101,102,103,104,105,106"
     if args.dry_run == args.execute:
         parser.error("choose exactly one of --dry-run or --execute")
-    specs = _matrix_specs_for_args(args)
+    full_specs = _matrix_specs_for_args(args)
+    full_keys = {(item["profile"], item["scenario"], item["seed"]) for item in full_specs}
+    if len(full_specs) != 48 or len(full_keys) != 48:
+        raise RuntimeError("full matrix must contain exactly 48 unique tasks")
+    try:
+        specs = _matrix_shard(full_specs, args.shard_count, args.shard_index)
+    except ValueError as exc:
+        parser.error(str(exc))
     keys = {(item["profile"], item["scenario"], item["seed"]) for item in specs}
     print(json.dumps(specs, indent=2, sort_keys=True))
+    print(f"full_matrix_count={len(full_specs)}")
     print(f"matrix_count={len(specs)}")
     print(f"unique_count={len(keys)}")
-    if len(specs) != 48 or len(keys) != 48:
-        raise RuntimeError("matrix must contain exactly 48 unique tasks")
+    if len(specs) != len(keys):
+        raise RuntimeError("selected matrix shard contains duplicate tasks")
     if args.dry_run:
         report_commands = []
         for item in specs:
@@ -517,8 +555,8 @@ def main(argv=None):
             report_commands.append({"run_name": item["run_name"], "train": train_command, "eval": eval_command, "audit": audit_command, "scope": audit_scope, "eval_purpose": args.eval_purpose, "checkpoint_every": args.checkpoint_every, "recover_empty_run": bool(args.recover_empty_run)})
         for command_name in ("train", "eval", "audit"):
             unique_commands = {tuple(entry[command_name]) for entry in report_commands}
-            if len(unique_commands) != 48:
-                raise RuntimeError(f"matrix must contain exactly 48 unique {command_name} commands")
+            if len(unique_commands) != len(specs):
+                raise RuntimeError(f"matrix shard contains duplicate {command_name} commands")
         if args.report:
             report_path = Path(args.report).expanduser()
             if not report_path.is_absolute():
@@ -526,7 +564,7 @@ def main(argv=None):
             if report_path.exists():
                 raise FileExistsError(f"Refusing to overwrite matrix report: {report_path}")
             report_path.parent.mkdir(parents=True, exist_ok=True)
-            report_path.write_text(json.dumps({"status": "dry_run", "profile": args.profile, "semantic_version": specs[0]["semantic_version"], "eval_purpose": args.eval_purpose, "scope": "validation" if args.eval_purpose == "validation" else "final_release", "checkpoint_every": args.checkpoint_every, "recover_empty_run": bool(args.recover_empty_run), "matrix_count": len(specs), "unique_count": len(keys), "specs": specs, "commands": report_commands}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            report_path.write_text(json.dumps({"status": "dry_run", "profile": args.profile, "semantic_version": specs[0]["semantic_version"], "eval_purpose": args.eval_purpose, "scope": "validation" if args.eval_purpose == "validation" else "final_release", "checkpoint_every": args.checkpoint_every, "recover_empty_run": bool(args.recover_empty_run), "full_matrix_count": len(full_specs), "matrix_count": len(specs), "unique_count": len(keys), "shard_count": args.shard_count, "shard_index": args.shard_index, "specs": specs, "commands": report_commands}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return 0
 
     stages = ("train", "eval", "audit") if args.stage == "all" else (args.stage,)
@@ -596,7 +634,7 @@ def main(argv=None):
                 if _run(_audit_command(run_dir, args), log_path) != 0:
                     failures.append({"stage": stage, "run": item["run_name"]})
                     break
-    report = {"status": "failed" if failures else "complete", "failures": failures, "recovery_events": recovery_events, "eval_purpose": args.eval_purpose, "checkpoint_every": args.checkpoint_every, "recover_empty_run": bool(args.recover_empty_run), "matrix_count": len(specs), "unique_count": len(keys)}
+    report = {"status": "failed" if failures else "complete", "failures": failures, "recovery_events": recovery_events, "eval_purpose": args.eval_purpose, "checkpoint_every": args.checkpoint_every, "recover_empty_run": bool(args.recover_empty_run), "full_matrix_count": len(full_specs), "matrix_count": len(specs), "unique_count": len(keys), "shard_count": args.shard_count, "shard_index": args.shard_index}
     if args.report:
         report_path = Path(args.report).expanduser()
         if not report_path.is_absolute():

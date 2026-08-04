@@ -9,6 +9,11 @@ The current repository can run the Algorithm 2 grid. It cannot by itself
 reproduce the paper's complete cross-algorithm Fig.4/Fig.5 conclusions because
 `Modified_MADDPG`, `MADDPG_FDec`, and `DDPG` are not implemented here.
 
+For the UNNC `Q10` eight-L20 Slurm workflow, use `hpc/README_HPC.md`. The matrix
+runner supports deterministic `--shard-count` and `--shard-index` operational
+partitioning; the default remains the complete, strictly checked 48-cell
+matrix.
+
 ## 1. Host and checkout gate
 
 Complete `ENVIRONMENT_INSTALL.md`, then verify:
