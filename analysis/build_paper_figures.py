@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -25,6 +26,11 @@ FORMAL_TRAINING_SEEDS = tuple(range(2, 8))
 
 def _load_json(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _path_identity(value: Any) -> str:
+    """Return a platform-correct identity for an artifact path."""
+    return os.path.normcase(str(Path(str(value)).expanduser().resolve()))
 
 
 def _entries(manifest_or_root: Path) -> List[Dict[str, Any]]:
@@ -210,17 +216,33 @@ def plot_fig4(
     manifest_path = Path(manifest_or_root).expanduser().resolve()
     manifest_data = _load_json(manifest_path) if manifest_path.is_file() else {}
     entries = _entries(manifest_path)
-    available = {
+    expected = list(dict.fromkeys(str(name) for name in manifest_data.get("required_baselines", required_baselines)))
+    omitted_paper_baselines = [algorithm for algorithm in REQUIRED_BASELINES if algorithm not in expected]
+    if omitted_paper_baselines:
+        raise ValueError(f"Fig.4 required_baselines cannot omit paper baselines: {omitted_paper_baselines}")
+    if CURRENT_ALGORITHM in expected:
+        raise ValueError("Fig.4 required_baselines must not contain the current algorithm")
+    expected_algorithms = (CURRENT_ALGORITHM,) + tuple(expected)
+    expected_training_seeds = tuple(sorted({
+        int(seed)
+        for seed in (FORMAL_TRAINING_SEEDS if expected_training_seeds is None else expected_training_seeds)
+    }))
+    if not expected_training_seeds:
+        raise ValueError("Fig.4 expected_training_seeds must be non-empty")
+
+    # Preserve a fast, explicit missing-baseline diagnostic before validating
+    # per-cell metadata.  This is more useful than reporting an unrelated
+    # malformed current entry when an entire comparison algorithm is absent.
+    raw_available_baselines = {
         str(entry.get("algorithm"))
         for entry in entries
         if entry.get("scenario") == scenario
-        and entry.get("algorithm") != CURRENT_ALGORITHM
         and entry.get("status", "complete") == "complete"
+        and str(entry.get("algorithm")) in expected
     }
-    expected = list(manifest_data.get("required_baselines", required_baselines))
-    missing = [name for name in expected if name not in available]
+    entirely_missing_baselines = [algorithm for algorithm in expected if algorithm not in raw_available_baselines]
     output = Path(output).expanduser().resolve()
-    if missing and not allow_incomplete:
+    if entirely_missing_baselines and not allow_incomplete:
         marker = output.parent / "INCOMPLETE_BASELINES.json"
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(json.dumps({
@@ -228,27 +250,110 @@ def plot_fig4(
             "figure": "Fig.4",
             "scenario": scenario,
             "required": expected,
-            "missing": missing,
-            "available": sorted(available),
+            "required_algorithms": list(expected_algorithms),
+            "expected_training_seeds": list(expected_training_seeds),
+            "missing": entirely_missing_baselines,
+            "available": sorted(raw_available_baselines),
+            "missing_cells": [
+                {"algorithm": algorithm, "scenario": scenario, "training_seed": seed}
+                for algorithm in entirely_missing_baselines
+                for seed in expected_training_seeds
+            ],
         }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        raise RuntimeError(f"Fig.4 baselines are incomplete: {', '.join(missing)}")
+        raise RuntimeError(f"Fig.4 baselines are incomplete: {', '.join(entirely_missing_baselines)}")
 
-    current_runs = _unique_run_entries(entries, scenario=scenario, algorithm=CURRENT_ALGORITHM)
+    # A training seed is the independent experimental unit.  Do not silently
+    # collapse duplicate manifest entries (for example, two eval rows pointing
+    # at the same training run) because that can otherwise bias a curve while
+    # still looking like a complete study.
+    cell_entries: Dict[tuple, Dict[str, Any]] = {}
+    cell_run_identities: Dict[tuple, str] = {}
+    duplicate_cells = []
+    unexpected_cells = []
+    for entry in entries:
+        if entry.get("scenario") != scenario or entry.get("status", "complete") != "complete":
+            continue
+        algorithm = str(entry.get("algorithm"))
+        if algorithm not in expected_algorithms:
+            continue
+        seed = entry.get("training_seed")
+        if seed is None:
+            raise ValueError(f"Fig.4 requires training_seed for {algorithm} in {scenario}")
+        seed = int(seed)
+        cell = (algorithm, scenario, seed)
+        if seed not in expected_training_seeds:
+            unexpected_cells.append({"algorithm": algorithm, "scenario": scenario, "training_seed": seed})
+            continue
+        run_path = entry.get("run_path")
+        if not run_path:
+            raise ValueError(f"Fig.4 cell has no run_path: {cell}")
+        run_identity = _path_identity(run_path)
+        if cell in cell_entries:
+            if cell_run_identities[cell] == run_identity:
+                # A study manifest has one row per eval artifact.  Validation
+                # and final-test rows from the same training run are therefore
+                # legitimate aliases of one Fig.4 training cell.
+                continue
+            duplicate_cells.append({
+                "algorithm": algorithm,
+                "scenario": scenario,
+                "training_seed": seed,
+                "first_run_path": cell_entries[cell]["run_path"],
+                "duplicate_run_path": run_path,
+            })
+            continue
+        cell_entries[cell] = entry
+        cell_run_identities[cell] = run_identity
+    if unexpected_cells:
+        raise ValueError(f"Fig.4 contains training seeds outside the expected grid: {unexpected_cells}")
+    if duplicate_cells:
+        raise ValueError(f"Fig.4 duplicate algorithm/scenario/training-seed cells: {duplicate_cells}")
+
+    expected_cells = [
+        (algorithm, scenario, seed)
+        for algorithm in expected_algorithms
+        for seed in expected_training_seeds
+    ]
+    missing_cells = [
+        {"algorithm": algorithm, "scenario": scenario_id, "training_seed": seed}
+        for algorithm, scenario_id, seed in expected_cells
+        if (algorithm, scenario_id, seed) not in cell_entries
+    ]
+    available = {
+        algorithm
+        for algorithm in expected
+        if any(cell[0] == algorithm for cell in cell_entries)
+    }
+    missing = [algorithm for algorithm in expected if algorithm not in available]
+    per_algorithm_training_seeds = {
+        algorithm: sorted(cell[2] for cell in cell_entries if cell[0] == algorithm)
+        for algorithm in expected_algorithms
+    }
+    current_runs = [
+        cell_entries[(CURRENT_ALGORITHM, scenario, seed)]
+        for seed in expected_training_seeds
+        if (CURRENT_ALGORITHM, scenario, seed) in cell_entries
+    ]
     if not current_runs:
         raise FileNotFoundError(f"no current-algorithm runs for Fig.4 scenario {scenario}")
 
-    expected_training_seeds = tuple(sorted({int(seed) for seed in (FORMAL_TRAINING_SEEDS if expected_training_seeds is None else expected_training_seeds)}))
-    observed_training_seeds = []
-    for entry in current_runs:
-        seed = entry.get("training_seed")
-        if seed is None:
-            raise ValueError("Fig.4 requires training_seed in every current-algorithm run")
-        observed_training_seeds.append(int(seed))
-    if len(observed_training_seeds) != len(set(observed_training_seeds)):
-        raise ValueError("Fig.4 duplicate training seed")
-    missing_training_seeds = [seed for seed in expected_training_seeds if seed not in observed_training_seeds]
-    if missing_training_seeds and not allow_incomplete:
-        raise RuntimeError("Fig.4 training-seed grid is incomplete: " + ", ".join(map(str, missing_training_seeds)))
+    if missing_cells and not allow_incomplete:
+        marker = output.parent / "INCOMPLETE_BASELINES.json"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps({
+            "status": "INCOMPLETE_BASELINES" if missing else "INCOMPLETE_GRID",
+            "figure": "Fig.4",
+            "scenario": scenario,
+            "required": expected,
+            "required_algorithms": list(expected_algorithms),
+            "expected_training_seeds": list(expected_training_seeds),
+            "missing": missing,
+            "available": sorted(available),
+            "missing_cells": missing_cells,
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if missing:
+            raise RuntimeError(f"Fig.4 baselines are incomplete: {', '.join(missing)}; grid has {len(missing_cells)} missing cells")
+        raise RuntimeError(f"Fig.4 algorithm/scenario/training-seed grid is incomplete: {len(missing_cells)} missing cells")
 
     def _metric(entry, key, fallback=None):
         with np.load(Path(entry["run_path"]) / "train_metrics.npz", allow_pickle=False) as metrics:
@@ -266,11 +371,15 @@ def plot_fig4(
         "objective_proxy": np.mean(np.stack([_metric(entry, "immediate_reward_proxy") for entry in current_runs]), axis=0),
     }
     curves = {CURRENT_ALGORITHM: current_metrics["combined"]}
-    for algorithm in sorted(available):
-        baseline_runs = _unique_run_entries(entries, scenario=scenario, algorithm=algorithm)
+    for algorithm in expected:
+        baseline_runs = [
+            cell_entries[(algorithm, scenario, seed)]
+            for seed in expected_training_seeds
+            if (algorithm, scenario, seed) in cell_entries
+        ]
         if baseline_runs:
             curves[algorithm] = np.mean(np.stack([_metric(entry, "reward_episode_mean", "global_episode_mean") for entry in baseline_runs]), axis=0)
-    partial = bool(missing or missing_training_seeds)
+    partial = bool(missing_cells)
     if partial and allow_incomplete and "PARTIAL" not in output.stem:
         output = output.with_name(output.stem + "_PARTIAL" + output.suffix)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -279,7 +388,9 @@ def plot_fig4(
     for axis, key, ylabel in panels:
         axis.plot(current_metrics[key], label=CURRENT_ALGORITHM)
         if key == "combined":
-            for algorithm in sorted(available):
+            for algorithm in expected:
+                if algorithm not in curves:
+                    continue
                 axis.plot(curves[algorithm], label=algorithm)
         axis.set_xlabel("episode")
         axis.set_ylabel(ylabel)
@@ -289,26 +400,41 @@ def plot_fig4(
     figure.tight_layout()
     figure.savefig(output, dpi=180)
     plt.close(figure)
-    np.savez_compressed(
-        output.with_suffix(".npz"),
-        task1=current_metrics["task1"],
-        task2=current_metrics["task2"],
-        global_reward=current_metrics["global"],
-        combined=current_metrics["combined"],
-        training_objective_proxy=current_metrics["objective_proxy"],
-    )
+    saved_arrays = {
+        "task1": current_metrics["task1"],
+        "task2": current_metrics["task2"],
+        "global_reward": current_metrics["global"],
+        "combined": current_metrics["combined"],
+        "training_objective_proxy": current_metrics["objective_proxy"],
+    }
+    algorithm_curve_artifacts = {}
+    for index, algorithm in enumerate(expected_algorithms):
+        if algorithm in curves:
+            artifact_key = f"algorithm_curve_{index}"
+            saved_arrays[artifact_key] = curves[algorithm]
+            algorithm_curve_artifacts[algorithm] = artifact_key
+    np.savez_compressed(output.with_suffix(".npz"), **saved_arrays)
     _write_sidecar(output, {
         "figure": "Fig.4",
         "scenario": scenario,
         "runs": [item["run_path"] for item in current_runs],
         "baselines": sorted(available),
         "required_baselines": expected,
-        "status": "INCOMPLETE_BASELINES" if partial else "complete",
+        "required_algorithms": list(expected_algorithms),
+        "status": "PARTIAL" if partial else "complete",
         "partial": partial,
         "curves": sorted(curves),
-        "training_seeds": observed_training_seeds,
+        "training_seeds": per_algorithm_training_seeds[CURRENT_ALGORITHM],
+        "per_algorithm_training_seeds": per_algorithm_training_seeds,
         "expected_training_seeds": list(expected_training_seeds),
-        "missing_training_seeds": missing_training_seeds,
+        "missing_training_seeds": sorted({
+            cell["training_seed"]
+            for cell in missing_cells
+            if cell["algorithm"] == CURRENT_ALGORITHM
+        }),
+        "missing_cells": missing_cells,
+        "aggregation_unit": "training_seed",
+        "algorithm_curve_artifacts": algorithm_curve_artifacts,
         "current_algorithm_metrics": ["task1_episode_mean", "task2_episode_mean", "global_episode_mean", "local_total_episode_mean", "immediate_reward_proxy"],
         "saved_metric_artifact": output.with_suffix(".npz").name,
         "drawn_panels": ["task1", "task2", "global", "combined"],
@@ -353,7 +479,12 @@ def plot_fig5(
     if not expected_training_seeds:
         raise ValueError("Fig.5 expected_training_seeds must be non-empty")
     entries = _entries(manifest_or_root)
+    required_algorithms = tuple(dict.fromkeys(str(name) for name in required_algorithms))
     required = set(required_algorithms)
+    paper_algorithms = (CURRENT_ALGORITHM,) + REQUIRED_BASELINES
+    omitted_paper_algorithms = [algorithm for algorithm in paper_algorithms if algorithm not in required]
+    if omitted_paper_algorithms:
+        raise ValueError(f"Fig.5 required_algorithms cannot omit paper algorithms: {omitted_paper_algorithms}")
     expected_scenarios = FIG5_GAP_SCENARIOS if x_field == "gap_m" else FIG5_SIZE_SCENARIOS
     expected_algorithm_set = {CURRENT_ALGORITHM} if eval_purpose == "validation" else required
     rows: Dict[str, Dict[float, List[float]]] = {}
@@ -373,16 +504,29 @@ def plot_fig5(
         algorithm = str(entry.get("algorithm"))
         eval_path = Path(entry["eval_path"]).resolve()
         summary_path = eval_path / "summary.json"
-        run_config_path = Path(entry["run_path"]) / "config.resolved.json"
-        if not summary_path.is_file() or not run_config_path.is_file():
-            raise ValueError(f"Fig.5 artifact is missing summary/config: {eval_path}")
+        if not summary_path.is_file():
+            raise ValueError(f"Fig.5 artifact is missing summary: {eval_path}")
         summary = _load_json(summary_path)
-        purpose = summary.get("eval_purpose", entry.get("eval_purpose"))
-        if purpose is None:
+        summary_purpose = summary.get("eval_purpose")
+        if summary_purpose is None:
             raise ValueError(f"Fig.5 artifact has no eval_purpose: {eval_path}")
+        summary_purpose = str(summary_purpose)
+        entry_purpose = entry.get("eval_purpose")
+        if entry_purpose is not None and str(entry_purpose) != summary_purpose:
+            raise ValueError(
+                f"Fig.5 entry/summary eval purpose mismatch for {eval_path}: "
+                f"entry={entry_purpose}, summary={summary_purpose}"
+            )
+        # A complete lifecycle manifest legitimately contains both validation
+        # and final-test rows.  Select the requested population only after the
+        # row's own provenance fields have been cross-checked.
+        if summary_purpose != eval_purpose:
+            continue
+        purpose = summary_purpose
         observed_purposes.add(str(purpose))
-        if purpose != eval_purpose:
-            raise ValueError(f"Fig.5 mixed/mismatched eval purpose: expected {eval_purpose}, got {purpose}")
+        run_config_path = Path(entry["run_path"]) / "config.resolved.json"
+        if not run_config_path.is_file():
+            raise ValueError(f"Fig.5 artifact is missing run config: {eval_path}")
         if summary.get("scope") != ("validation" if eval_purpose == "validation" else "final_release"):
             raise ValueError(f"Fig.5 scope mismatch for {eval_path}")
         if summary.get("is_formal_result") is not (False if eval_purpose == "validation" else True):
@@ -430,9 +574,14 @@ def plot_fig5(
         raise FileNotFoundError("no complete frozen-eval artifacts for Fig.5")
 
     missing_algorithms = [algorithm for algorithm in required_algorithms if algorithm not in available_algorithms]
-    expected_cells = [
+    current_expected_cells = [
+        (CURRENT_ALGORITHM, scenario_id, seed)
+        for scenario_id in expected_scenarios
+        for seed in expected_training_seeds
+    ]
+    paper_expected_cells = [
         (algorithm, scenario_id, seed)
-        for algorithm in sorted(expected_algorithm_set)
+        for algorithm in required_algorithms
         for scenario_id in expected_scenarios
         for seed in expected_training_seeds
     ]
@@ -440,14 +589,26 @@ def plot_fig5(
         (algorithm, scenario_id, seed)
         for algorithm, scenario_id, seed, _purpose in identities
     }
-    missing_cells = [
+    current_missing_cells = [
         {"algorithm": algorithm, "scenario": scenario_id, "training_seed": seed}
-        for algorithm, scenario_id, seed in expected_cells
+        for algorithm, scenario_id, seed in current_expected_cells
         if (algorithm, scenario_id, seed) not in observed_cells
     ]
-    partial = bool(missing_algorithms or missing_cells)
-    if partial and not allow_incomplete and eval_purpose != "validation":
-        raise RuntimeError("Fig.5 grid is incomplete; see missing cells in the sidecar")
+    paper_missing_cells = [
+        {"algorithm": algorithm, "scenario": scenario_id, "training_seed": seed}
+        for algorithm, scenario_id, seed in paper_expected_cells
+        if (algorithm, scenario_id, seed) not in observed_cells
+    ]
+    # ``missing_cells`` retains the validation-pilot meaning used by existing
+    # consumers.  ``paper_missing_cells`` is the full four-algorithm study grid
+    # and makes explicit why validation output can never be a paper-complete
+    # Fig.5, even when every current-algorithm pilot cell is present.
+    missing_cells = current_missing_cells if eval_purpose == "validation" else paper_missing_cells
+    validation_current_grid_complete = not current_missing_cells if eval_purpose == "validation" else None
+    paper_grid_complete = not paper_missing_cells
+    partial = eval_purpose == "validation" or not paper_grid_complete
+    if eval_purpose == "final_test" and not paper_grid_complete:
+        raise RuntimeError("Fig.5 final_test grid is incomplete; see paper missing cells")
     table = []
     for algorithm in sorted(rows):
         for value in sorted(rows[algorithm]):
@@ -492,7 +653,12 @@ def plot_fig5(
         "scenario_grid": list(expected_scenarios),
         "available_algorithms": sorted(available_algorithms),
         "missing_algorithms": missing_algorithms,
+        "status": "PARTIAL" if partial else "complete",
         "missing_cells": missing_cells,
+        "current_missing_cells": current_missing_cells,
+        "paper_missing_cells": paper_missing_cells,
+        "validation_current_grid_complete": validation_current_grid_complete,
+        "paper_grid_complete": paper_grid_complete,
         "partial": partial,
         "ci_independent_unit": "training_seed",
         "eval_seeds_are_clustered_within_training_seed": True,

@@ -57,15 +57,16 @@ def _write_fig5_cell(root: Path, algorithm: str, scenario_id: str, seed: int, pu
     run = root / f"{algorithm}_{scenario_id}_{purpose}_{seed}"
     eval_path = run / "eval" / "eval1"
     eval_path.mkdir(parents=True)
+    is_final = purpose == "final_test"
     config = resolve_config(
         "paper_faithful",
         scenario_id,
         seed=seed,
-        episodes=3,
-        steps_per_episode=2,
+        episodes=500 if is_final else 3,
+        steps_per_episode=100 if is_final else 2,
         run_name=run.name,
         output_root=str(root),
-        is_formal_result=purpose == "final_test",
+        is_formal_result=is_final,
     )
     (run / "config.resolved.json").write_text(json.dumps(config.to_dict()), encoding="utf-8")
     (run / "COMPLETE.json").write_text(json.dumps({"status": "complete"}), encoding="utf-8")
@@ -139,7 +140,10 @@ def test_fig4_saves_task_global_and_combined_panels(tmp_path):
         {"algorithm": "Modified_MADDPG_with_TDec", "scenario": "p05_n06_g25", "training_seed": 2, "run_path": str(run2), "status": "complete"},
     ]
     for algorithm in ("Modified_MADDPG", "MADDPG_FDec", "DDPG"):
-        entries.append({"algorithm": algorithm, "scenario": "p05_n06_g25", "training_seed": 1, "run_path": str(run1), "status": "complete"})
+        entries.extend([
+            {"algorithm": algorithm, "scenario": "p05_n06_g25", "training_seed": 1, "run_path": str(run1), "status": "complete"},
+            {"algorithm": algorithm, "scenario": "p05_n06_g25", "training_seed": 2, "run_path": str(run2), "status": "complete"},
+        ])
     manifest = tmp_path / "fig4_manifest.json"
     manifest.write_text(json.dumps({"entries": entries}), encoding="utf-8")
     output = plot_fig4(manifest, tmp_path / "fig4.png", scenario="p05_n06_g25", expected_training_seeds=[1, 2])
@@ -199,8 +203,10 @@ def test_fig5_controlled_grid_purpose_partial_and_full_negative_gates(tmp_path):
     mixed_entries = [pilot_entries[0], final_entries[0]]
     mixed_manifest = tmp_path / "mixed_manifest.json"
     mixed_manifest.write_text(json.dumps({"entries": mixed_entries}), encoding="utf-8")
-    with pytest.raises(ValueError, match="eval purpose"):
-        plot_fig5(mixed_manifest, tmp_path / "mixed.png", "gap_m", eval_purpose="validation", expected_training_seeds=[2, 3, 4])
+    mixed_output = plot_fig5(mixed_manifest, tmp_path / "mixed.png", "gap_m", eval_purpose="validation", expected_training_seeds=[2, 3, 4])
+    mixed_sidecar = json.loads(mixed_output.with_suffix(".json").read_text(encoding="utf-8"))
+    assert mixed_sidecar["eval_purpose"] == "validation"
+    assert mixed_sidecar["reused_eval_artifacts"] == [Path(pilot_entries[0]["eval_path"]).resolve().as_posix()]
 
     duplicate_manifest = tmp_path / "duplicate_manifest.json"
     duplicate_cell = _write_fig5_cell(tmp_path / "duplicate", "Modified_MADDPG_with_TDec", "p05_n04_g05", 2, "final_test")
