@@ -60,14 +60,20 @@ def build_study_manifest(run_root: Path, output: Path, algorithm: str = "Modifie
             continue
         provenance = _json(run_dir / "provenance.json") or {}
         complete = _json(run_dir / "COMPLETE.json") or {}
-        checkpoint = run_dir / "checkpoints" / "latest.pt"
-        checkpoint_hash = _sha256(checkpoint) if checkpoint.is_file() else None
         eval_root = run_dir / "eval"
         eval_dirs = sorted(path for path in eval_root.iterdir() if path.is_dir()) if eval_root.is_dir() else []
         if not eval_dirs:
             eval_dirs = [None]
+        checkpoint_hashes: Dict[str, Optional[str]] = {}
         for eval_dir in eval_dirs:
             summary = _json(eval_dir / "summary.json") if eval_dir is not None else None
+            checkpoint_name = "latest.pt" if summary is None else str(summary.get("checkpoint_name", "latest.pt"))
+            if checkpoint_name not in {"latest.pt", "best.pt"}:
+                checkpoint_name = "latest.pt"
+            checkpoint = run_dir / "checkpoints" / checkpoint_name
+            if checkpoint_name not in checkpoint_hashes:
+                checkpoint_hashes[checkpoint_name] = _sha256(checkpoint) if checkpoint.is_file() else None
+            checkpoint_hash = checkpoint_hashes[checkpoint_name]
             entries.append({
                 "algorithm": algorithm,
                 "semantic_version": config.get("semantic_version"),
@@ -85,6 +91,7 @@ def build_study_manifest(run_root: Path, output: Path, algorithm: str = "Modifie
                 "is_formal_result": bool(False if summary is None else summary.get("is_formal_result", config.get("is_formal_result", True))),
                 "eval_protocol": None if summary is None else summary.get("eval_protocol"),
                 "eval_purpose": None if summary is None else summary.get("eval_purpose"),
+                "eval_noise": None if summary is None else summary.get("eval_noise", 0.0),
                 "scope": None if summary is None else summary.get("scope"),
                 "release_status": None if summary is None else summary.get("release_status"),
                 "statistics_schema_version": None if summary is None else summary.get("statistics_schema_version", config.get("statistics_schema_version")),
@@ -105,7 +112,7 @@ def build_study_manifest(run_root: Path, output: Path, algorithm: str = "Modifie
         "expected_algorithms": [algorithm],
         "expected_scenarios": EXPECTED_SCENARIOS,
         "expected_training_seeds": list(range(2, 8)),
-        "study_identity_fields": ["algorithm", "scenario", "training_seed", "eval_purpose"],
+        "study_identity_fields": ["algorithm", "scenario", "training_seed", "eval_purpose", "eval_noise"],
         "statistics_schema_version": "eval_seed_cluster_v1",
         "mobility_revisions": sorted({entry.get("mobility_revision") for entry in entries if entry.get("mobility_revision")}),
         "entries": entries,

@@ -80,5 +80,6 @@ def test_legacy_golden_trace_matches_original_source():
     np.testing.assert_allclose(original[4], reproduced[5]["v2i_rate"], rtol=0, atol=0)
     np.testing.assert_allclose(original[5], reproduced[5]["v2v_rate"], rtol=0, atol=0)
     np.testing.assert_allclose(original[6], reproduced[5]["remaining_demand"], rtol=0, atol=0)
-    np.testing.assert_allclose(original[7], reproduced[5]["success"], rtol=0, atol=0)
+    np.testing.assert_allclose(original[7], reproduced[5]["success_rate"], rtol=0, atol=0)
+    np.testing.assert_array_equal((~original_env.active_links).astype(np.float32), reproduced[5]["success"])
     np.testing.assert_allclose(original_env.Interference_all, adapter.Interference_all, rtol=0, atol=0)

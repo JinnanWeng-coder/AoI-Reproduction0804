@@ -119,8 +119,12 @@ def _audit_checkpoint(
             errors.append(f"checkpoint_embedded_config_hash:{path.name}")
     if require_completed and payload.get("completed") is not True:
         errors.append(f"checkpoint_not_completed:{path.name}")
-    if require_completed and expected_episode is not None and int(payload.get("episode", -1)) != int(expected_episode):
+    selected_best = path.name == "best.pt" and payload.get("checkpoint_role") == "best_selection_validation"
+    if require_completed and expected_episode is not None and int(payload.get("episode", -1)) != int(expected_episode) and not selected_best:
         errors.append(f"checkpoint_final_episode:{path.name}")
+    if selected_best:
+        if payload.get("training_completed") is not True or int(payload.get("selected_episode", -1)) != int(payload.get("episode", -2)):
+            errors.append(f"checkpoint_best_selection_metadata:{path.name}")
     return payload
 
 
@@ -461,7 +465,8 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
                 errors.append(f"checkpoint_schema_version:{name}")
             if formal and payload.get("reproduction_git_dirty") is not False:
                 errors.append(f"formal_checkpoint_git_dirty:{name}")
-            if formal and payload.get("episode") != (None if config is None else int(config.get("episodes", -1))) and require_complete:
+            selected_best = name == "best.pt" and payload.get("checkpoint_role") == "best_selection_validation"
+            if formal and payload.get("episode") != (None if config is None else int(config.get("episodes", -1))) and require_complete and not selected_best:
                 errors.append(f"formal_checkpoint_final_episode:{name}")
 
     eval_reports = []
@@ -653,13 +658,14 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
                         errors.append(f"checkpoint_{key}")
                 if checkpoint_payload.get("completed") is not True:
                     errors.append("checkpoint_not_completed")
-                if resolved_run_config is not None and int(checkpoint_payload.get("episode", -1)) != int(resolved_run_config.episodes):
+                selected_best = checkpoint.name == "best.pt" and checkpoint_payload.get("checkpoint_role") == "best_selection_validation"
+                if resolved_run_config is not None and int(checkpoint_payload.get("episode", -1)) != int(resolved_run_config.episodes) and not selected_best:
                     errors.append("checkpoint_final_episode")
                 if summary.get("checkpoint_name") != checkpoint.name:
                     errors.append("checkpoint_name")
                 if summary.get("checkpoint_completed") is not True:
                     errors.append("summary_checkpoint_completed")
-                if resolved_run_config is not None and int(summary.get("checkpoint_episode", -1)) != int(resolved_run_config.episodes):
+                if resolved_run_config is not None and int(summary.get("checkpoint_episode", -1)) != int(resolved_run_config.episodes) and not selected_best:
                     errors.append("summary_checkpoint_episode")
                 if formal_training and checkpoint_payload.get("reproduction_git_dirty") is not False:
                     errors.append("formal_checkpoint_git_dirty")
@@ -742,7 +748,7 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
                 errors.append(f"eval_config_resolve:{exc}")
         if provenance is not None:
             for key in (
-                "semantic_version", "config_hash", "eval_purpose", "scope", "release_status",
+                "semantic_version", "config_hash", "eval_purpose", "eval_noise", "scope", "release_status",
                 "eval_id",
                 "training_device_config", "evaluation_device_requested", "evaluation_device_resolved",
                 "statistics_schema_version", "checkpoint_sha256", "checkpoint_schema_version",
@@ -825,7 +831,13 @@ def audit_study_manifest(path: Path) -> Dict[str, Any]:
         if identity in identities:
             errors.append(f"entry{index}:duplicate:{identity}")
         identities.add(identity)
-        purpose_identity = (entry.get("algorithm"), entry.get("scenario"), entry.get("training_seed"), entry.get("eval_purpose"))
+        purpose_identity = (
+            entry.get("algorithm"),
+            entry.get("scenario"),
+            entry.get("training_seed"),
+            entry.get("eval_purpose"),
+            entry.get("eval_noise", 0.0),
+        )
         if purpose_identity in purpose_identities:
             errors.append(f"entry{index}:duplicate_training_seed_purpose:{purpose_identity}")
         purpose_identities.add(purpose_identity)

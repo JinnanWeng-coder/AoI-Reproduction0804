@@ -13,7 +13,8 @@ __pycache__/
 experiments/runs/
 experiments/scratch/
 scratch/
+audit/
+diagnostics/
 checkpoints/
 legacy_reference/**/__pycache__/
 legacy_reference/**/*.py[cod]
-

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 import torch
@@ -23,14 +23,24 @@ class Agent:
         self.target_critic_task2 = CriticNetwork(config.state_dim, config.local_critic_hidden, config.action_dim, config.critic_lr, self.device)
         self.update_network_parameters(tau=1.0)
 
-    def choose_action(self, observation, explore=True):
+    def choose_action(
+        self,
+        observation,
+        explore=True,
+        noise_std: Optional[float] = None,
+        rng: Optional[np.random.Generator] = None,
+    ):
         was_training = self.actor.training
         self.actor.eval()
         state = torch.as_tensor(np.asarray(observation, dtype=np.float32), dtype=torch.float32, device=self.device).unsqueeze(0)
         with torch.no_grad():
             action = self.actor(state).squeeze(0).cpu().numpy()
-        if explore and self.config.exploration_noise > 0:
-            action = action + np.random.normal(0.0, self.config.exploration_noise, size=self.config.action_dim)
+        applied_noise = float(self.config.exploration_noise) if explore and noise_std is None else float(noise_std or 0.0)
+        if applied_noise < 0.0:
+            raise ValueError("noise_std must be non-negative")
+        if applied_noise > 0.0:
+            noise_source = np.random if rng is None else rng
+            action = action + noise_source.normal(0.0, applied_noise, size=self.config.action_dim)
         if was_training:
             self.actor.train()
         return np.clip(action, -self.config.target_action_clip, self.config.target_action_clip).astype(np.float32)
@@ -68,4 +78,3 @@ class Agent:
         self.actor.optimizer.load_state_dict(state["actor_optimizer"])
         self.critic_task1.optimizer.load_state_dict(state["critic_task1_optimizer"])
         self.critic_task2.optimizer.load_state_dict(state["critic_task2_optimizer"])
-

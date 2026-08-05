@@ -250,6 +250,33 @@ def test_remote_incomplete_resumes_and_completed_skips_without_overwrite(tmp_pat
     assert checkpoint.read_bytes() == complete_before
 
 
+def test_completed_run_accepts_an_earlier_selection_best_checkpoint(tmp_path):
+    args = _args(tmp_path.resolve())
+    item = matrix_runner._resolved_item(matrix_specs()[0], args)
+    run_dir = Path(item["output_root"]) / item["run_name"]
+    latest = _write_checkpoint(run_dir, item, completed=True, episode=500, marker=True)
+    best = run_dir / "checkpoints" / "best.pt"
+    best_payload = _payload(item, completed=True, episode=250)
+    best_payload.update({
+        "checkpoint_role": "best_selection_validation",
+        "selected_episode": 250,
+        "training_completed": True,
+        "selection_validation": {"score": 0.75},
+    })
+    torch.save(best_payload, best)
+    marker_path = run_dir / "COMPLETE.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["checkpoint_sha256"] = {
+        "latest.pt": hashlib.sha256(latest.read_bytes()).hexdigest(),
+        "best.pt": hashlib.sha256(best.read_bytes()).hexdigest(),
+    }
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+
+    recovery = matrix_runner._recovery_state(run_dir, item)
+    assert recovery["code"] == "COMPLETE"
+    assert recovery["action"] == "skip"
+
+
 def test_verified_empty_formal_run_requires_explicit_opt_in_and_is_not_overwritten(monkeypatch, tmp_path):
     args = _args(tmp_path.resolve())
     item = matrix_runner._resolved_item(matrix_specs()[0], args)

@@ -106,14 +106,22 @@ class Global_Critic:
             "local_critic_loss": local_losses,
         }
 
-    def _joint_actor_terms(self, states):
+    def _actor_component_terms(self, states):
         local_states = self._split_states(states)
         live_actions = [agent.actor(local_state) for agent, local_state in zip(self.agents_networks, local_states)]
         joint_action = torch.cat(live_actions, dim=1)
         global_loss = -float(self.config.global_actor_weight) * self.global_critic1(states, joint_action).mean()
-        local_loss = torch.zeros((), dtype=states.dtype, device=self.device)
+        task1_losses = []
+        task2_losses = []
         for agent, local_state, action in zip(self.agents_networks, local_states, live_actions):
-            local_loss = local_loss - agent.critic_task1(local_state, action).mean() - agent.critic_task2(local_state, action).mean()
+            task1_losses.append(-agent.critic_task1(local_state, action).mean())
+            task2_losses.append(-agent.critic_task2(local_state, action).mean())
+        local_loss = sum(task1_losses, torch.zeros((), dtype=states.dtype, device=self.device))
+        local_loss = local_loss + sum(task2_losses, torch.zeros((), dtype=states.dtype, device=self.device))
+        return global_loss, local_loss, live_actions, task1_losses, task2_losses
+
+    def _joint_actor_terms(self, states):
+        global_loss, local_loss, live_actions, _task1, _task2 = self._actor_component_terms(states)
         return global_loss, local_loss, live_actions
 
     @staticmethod
@@ -126,10 +134,77 @@ class Global_Critic:
                 values.append(float(torch.linalg.vector_norm(gradient).detach().cpu()))
         return values
 
+    def _actor_gradient_diagnostics(self, task1_losses, task2_losses, global_grads_by_agent, global_contributes: bool):
+        field_names = (
+            "task1_grad_l2", "task2_grad_l2", "local_sum_grad_l2", "global_grad_l2",
+            "global_to_local_ratio", "global_to_task1_ratio", "global_to_task2_ratio",
+            "task1_to_task2_ratio", "global_vs_local_cosine", "global_vs_task1_cosine",
+            "global_vs_task2_cosine", "task1_vs_task2_cosine",
+        )
+        parameters_by_agent = [list(agent.actor.parameters()) for agent in self.agents_networks]
+        flat_parameters = [parameter for parameters in parameters_by_agent for parameter in parameters]
+        task1_total = sum(task1_losses, torch.zeros((), device=self.device))
+        task2_total = sum(task2_losses, torch.zeros((), device=self.device))
+        flat_task1 = torch.autograd.grad(task1_total, flat_parameters, retain_graph=True, allow_unused=True)
+        flat_task2 = torch.autograd.grad(task2_total, flat_parameters, retain_graph=True, allow_unused=True)
+
+        rows = []
+        cursor = 0
+        epsilon = 1e-30
+        for index, parameters in enumerate(parameters_by_agent):
+            count = len(parameters)
+            task1_grads = flat_task1[cursor:cursor + count]
+            task2_grads = flat_task2[cursor:cursor + count]
+            cursor += count
+
+            def flatten(values):
+                return torch.cat([
+                    (torch.zeros_like(parameter) if value is None else value).reshape(-1)
+                    for parameter, value in zip(parameters, values)
+                ])
+
+            task1_vector = flatten(task1_grads)
+            task2_vector = flatten(task2_grads)
+            global_vector = flatten(global_grads_by_agent[index])
+            local_vector = task1_vector + task2_vector
+            task1_norm = torch.linalg.vector_norm(task1_vector)
+            task2_norm = torch.linalg.vector_norm(task2_vector)
+            local_norm = torch.linalg.vector_norm(local_vector)
+            global_norm = torch.linalg.vector_norm(global_vector)
+
+            def ratio(numerator, denominator):
+                return numerator / torch.clamp(denominator, min=epsilon)
+
+            def cosine(left, right, left_norm, right_norm):
+                denominator = left_norm * right_norm
+                value = torch.dot(left, right) / torch.clamp(denominator, min=epsilon)
+                return torch.clamp(value, -1.0, 1.0)
+
+            rows.append(torch.stack((
+                task1_norm,
+                task2_norm,
+                local_norm,
+                global_norm,
+                ratio(global_norm, local_norm),
+                ratio(global_norm, task1_norm),
+                ratio(global_norm, task2_norm),
+                ratio(task1_norm, task2_norm),
+                cosine(global_vector, local_vector, global_norm, local_norm),
+                cosine(global_vector, task1_vector, global_norm, task1_norm),
+                cosine(global_vector, task2_vector, global_norm, task2_norm),
+                cosine(task1_vector, task2_vector, task1_norm, task2_norm),
+            )))
+        values = torch.stack(rows).detach().cpu().numpy()
+        fields = {name: values[:, column].astype(np.float64).tolist() for column, name in enumerate(field_names)}
+        fields["mode"] = self.config.global_update_mode
+        fields["global_contributes_to_actor"] = bool(global_contributes)
+        fields["finite"] = bool(np.all(np.isfinite(values)))
+        return fields
+
     def actor_global_gradient_audit(self, states: np.ndarray) -> Dict[str, object]:
         tensor_states = torch.as_tensor(np.asarray(states, dtype=np.float32), device=self.device)
-        if self.config.global_update_mode == "legacy_detach":
-            return {"mode": "legacy_detach", "global_gradient_norms": [0.0 for _ in self.agents_networks], "finite": True}
+        if self.config.global_update_mode in {"legacy_detach", "detached_actor"}:
+            return {"mode": self.config.global_update_mode, "global_gradient_norms": [0.0 for _ in self.agents_networks], "finite": True}
         critics = [self.global_critic1, *[agent.critic_task1 for agent in self.agents_networks], *[agent.critic_task2 for agent in self.agents_networks]]
         with _freeze_modules(critics):
             global_loss, _, _ = self._joint_actor_terms(tensor_states)
@@ -159,8 +234,30 @@ class Global_Critic:
         for agent in self.agents_networks:
             agent.actor.optimizer.zero_grad(set_to_none=True)
         before = [torch.cat([parameter.detach().flatten() for parameter in agent.actor.parameters()]) for agent in self.agents_networks]
-        if self.config.global_update_mode == "legacy_detach":
+        gradient_diagnostics = None
+        if self.config.global_update_mode in {"legacy_detach", "detached_actor"}:
             with _freeze_modules(critics):
+                if bool(getattr(self.config, "diagnostics", False)):
+                    counterfactual_global, _local, _actions, task1_losses, task2_losses = self._actor_component_terms(states)
+                    actor_parameters = [list(agent.actor.parameters()) for agent in self.agents_networks]
+                    flat_parameters = [parameter for parameters in actor_parameters for parameter in parameters]
+                    flat_global_grads = torch.autograd.grad(
+                        counterfactual_global,
+                        flat_parameters,
+                        retain_graph=True,
+                        allow_unused=True,
+                    )
+                    global_grads_by_agent = []
+                    cursor = 0
+                    for parameters in actor_parameters:
+                        global_grads_by_agent.append(flat_global_grads[cursor:cursor + len(parameters)])
+                        cursor += len(parameters)
+                    gradient_diagnostics = self._actor_gradient_diagnostics(
+                        task1_losses,
+                        task2_losses,
+                        global_grads_by_agent,
+                        global_contributes=False,
+                    )
                 global_loss, _, _ = self._joint_actor_terms(states)
                 for agent, local_state in zip(self.agents_networks, self._split_states(states)):
                     agent.actor.optimizer.zero_grad(set_to_none=True)
@@ -172,11 +269,24 @@ class Global_Critic:
             actor_loss = float("nan")
         else:
             with _freeze_modules(critics):
-                global_loss, local_loss, _ = self._joint_actor_terms(states)
+                global_loss, local_loss, _, task1_losses, task2_losses = self._actor_component_terms(states)
                 gradients = []
                 for agent in self.agents_networks:
                     gradients.extend(list(agent.actor.parameters()))
                 global_grads = torch.autograd.grad(global_loss, gradients, retain_graph=True, allow_unused=True)
+                global_grads_by_agent = []
+                cursor = 0
+                for agent in self.agents_networks:
+                    count = sum(1 for _ in agent.actor.parameters())
+                    global_grads_by_agent.append(global_grads[cursor:cursor + count])
+                    cursor += count
+                if bool(getattr(self.config, "diagnostics", False)):
+                    gradient_diagnostics = self._actor_gradient_diagnostics(
+                        task1_losses,
+                        task2_losses,
+                        global_grads_by_agent,
+                        global_contributes=True,
+                    )
                 total_loss = global_loss + local_loss
                 total_loss.backward()
                 for index in actor_step_order:
@@ -195,7 +305,12 @@ class Global_Critic:
             deltas.append(float(torch.linalg.vector_norm(new - old).cpu()))
         for agent in self.agents_networks:
             agent.update_network_parameters()
-        return {"actor_loss": actor_loss, "global_actor_gradient_norms": global_norms, "actor_parameter_deltas": deltas}
+        return {
+            "actor_loss": actor_loss,
+            "global_actor_gradient_norms": global_norms,
+            "actor_parameter_deltas": deltas,
+            "actor_gradient_diagnostics": gradient_diagnostics,
+        }
 
     def learn(self, batch):
         states, actions, rewards_g, rewards_t1, rewards_t2, next_states, done = batch
@@ -222,7 +337,7 @@ class Global_Critic:
         if update_local:
             diagnostics.update(self._actor_step(states_t))
         else:
-            diagnostics.update({"actor_loss": None, "global_actor_gradient_norms": [], "actor_parameter_deltas": []})
+            diagnostics.update({"actor_loss": None, "global_actor_gradient_norms": [], "actor_parameter_deltas": [], "actor_gradient_diagnostics": None})
         diagnostics["learn_step"] = self.learn_step_counter
         diagnostics["global_target_update"] = True
         diagnostics["local_target_update"] = bool(update_local)

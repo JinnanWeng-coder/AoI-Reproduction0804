@@ -51,6 +51,67 @@ def test_checkpoint_resume_matches_uninterrupted_run(tmp_path):
             np.testing.assert_array_equal(expected[key], actual[key], err_msg=key)
 
 
+def test_resume_repairs_interruption_between_latest_and_best_writes(tmp_path):
+    config = _small_config(tmp_path / "repair", "run")
+    interrupted = train(config, max_episodes=2)
+    run_dir = Path(interrupted["run_dir"])
+    latest_path = run_dir / "checkpoints" / "latest.pt"
+    best_path = run_dir / "checkpoints" / "best.pt"
+    latest = torch.load(latest_path, map_location="cpu", weights_only=False)
+    episode = int(latest["episode"])
+    selection_state = dict(latest["selection_state"])
+    selection_state.update({
+        "best_episode": episode,
+        "best_score": 1.0,
+        "best_metrics": {
+            "episode": episode,
+            "score": 1.0,
+            "criterion": runner_module.BEST_SELECTION_CRITERION,
+            "seeds": list(config.selection_validation_seeds),
+        },
+    })
+    latest["selection_state"] = selection_state
+    best_path.unlink()
+
+    runner_module._repair_selection_best_after_resume(run_dir, latest, selection_state)
+
+    repaired = torch.load(best_path, map_location="cpu", weights_only=False)
+    assert repaired["checkpoint_role"] == "best_selection_validation"
+    assert repaired["selected_episode"] == repaired["episode"] == episode
+    assert repaired["training_completed"] is False
+
+
+def test_verified_empty_run_recovery_accepts_an_explicit_nonformal_diagnostic(monkeypatch, tmp_path):
+    config = resolve_config(
+        "paper_faithful",
+        "p05_n04_g25",
+        seed=3,
+        output_root=str(tmp_path),
+        run_name="detached_diagnostic",
+        global_update_mode="detached_actor",
+        diagnostics=True,
+        is_formal_result=False,
+        smoke=False,
+    )
+    git = {
+        "reproduction_git_commit": "diagnostic-test",
+        "reproduction_git_branch": "main",
+        "reproduction_git_dirty": False,
+        "reproduction_tracked_tree_sha256": "tree-test",
+        "gpu_names": [],
+        "cuda_driver": None,
+    }
+    monkeypatch.setattr(runner_module, "_git_metadata", lambda: dict(git))
+    monkeypatch.setattr(runner_module, "_source_manifest_digest", lambda: "manifest-test")
+    run_dir, is_resume = runner_module._prepare_run(config, None)
+
+    verification = runner_module._validate_empty_run_for_reinitialization(run_dir, config)
+
+    assert is_resume is False
+    assert verification["status"] == "verified_empty_run"
+    assert verification["config_hash"] == config.canonical_hash()
+
+
 def test_restore_rng_state_moves_generator_byte_tensors_to_cpu(monkeypatch):
     expected_cpu = torch.get_rng_state()
     observed = {}
@@ -233,3 +294,58 @@ def test_eval_uses_one_cold_reset_and_sequential_episode_indices(tmp_path, monke
     runner_module.evaluate_from_checkpoint(config, str(checkpoint), eval_episodes=2, eval_seeds=[201, 202], eval_purpose="validation", scope="validation")
     assert resets == [201, 202]
     assert starts == list(range(7)) + list(range(7))
+
+
+def test_best_checkpoint_is_selected_not_an_alias_of_latest(tmp_path, monkeypatch):
+    config = _small_config(tmp_path / "selection", "run")
+    calls = []
+
+    def fake_selection(config, agents):
+        episode = len(calls) + 1
+        calls.append(episode)
+        score = 10.0 if episode == 1 else float(-episode)
+        return {
+            "criterion": runner_module.BEST_SELECTION_CRITERION,
+            "seeds": list(config.selection_validation_seeds),
+            "scored_episodes": config.selection_validation_episodes,
+            "warmup_episodes": config.selection_validation_warmup_episodes,
+            "mean_aoi_ms_per_agent": [float(episode)] * config.number_agents,
+            "endpoint_cam_per_agent": [0.5] * config.number_agents,
+            "worst_agent_mean_aoi_ms": float(episode),
+            "worst_agent_endpoint_cam": 0.5,
+            "score": score,
+        }
+
+    monkeypatch.setattr(runner_module, "_selection_validation", fake_selection)
+    result = train(config)
+    run = Path(result["run_dir"])
+    best = torch.load(run / "checkpoints" / "best.pt", map_location="cpu", weights_only=False)
+    latest = torch.load(run / "checkpoints" / "latest.pt", map_location="cpu", weights_only=False)
+    assert best["checkpoint_role"] == "best_selection_validation"
+    assert best["selected_episode"] == best["episode"] == 1
+    assert best["completed"] is True and best["training_completed"] is True
+    assert latest["checkpoint_role"] == "latest_final"
+    assert latest["episode"] == config.episodes
+    assert len(list((run / "checkpoints" / "periodic").glob("*_actor.pt"))) == config.episodes
+
+
+def test_eval_noise_sweep_can_coexist_and_is_bounded(tmp_path):
+    config = _small_config(tmp_path / "noise", "run")
+    result = train(config)
+    checkpoint = Path(result["run_dir"]) / "checkpoints" / "best.pt"
+    deterministic = evaluate_from_checkpoint(
+        config, str(checkpoint), eval_episodes=1, eval_seeds=[201], eval_purpose="validation", scope="validation", eval_noise=0.0
+    )
+    noisy = evaluate_from_checkpoint(
+        config, str(checkpoint), eval_episodes=1, eval_seeds=[201], eval_purpose="validation", scope="validation", eval_noise=0.05
+    )
+    assert deterministic["eval_noise"] == 0.0
+    assert noisy["eval_noise"] == 0.05
+    assert deterministic["eval_dir"] != noisy["eval_dir"]
+    assert not (Path(deterministic["eval_dir"]) / "metrics.mat").exists()
+    assert not (Path(noisy["eval_dir"]) / "metrics.mat").exists()
+    assert noisy["release_status"] == "diagnostic_evaluation"
+    with pytest.raises(ValueError, match="eval_noise"):
+        evaluate_from_checkpoint(
+            config, str(checkpoint), eval_episodes=1, eval_seeds=[201], eval_purpose="validation", scope="validation", eval_noise=1.01
+        )

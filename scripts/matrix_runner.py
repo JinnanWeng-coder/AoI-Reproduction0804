@@ -364,7 +364,24 @@ def _recovery_state(run_dir: Path, item, recover_empty_run: bool = False) -> dic
                     run_dir,
                     completed=best_payload.get("completed"),
                 )
-            if best_payload.get("episode") != expected_episode:
+            selected_best = best_payload.get("checkpoint_role") == "best_selection_validation"
+            if selected_best:
+                selected_episode = int(best_payload.get("selected_episode", -1))
+                checkpoint_episode = int(best_payload.get("episode", -2))
+                if (
+                    best_payload.get("training_completed") is not True
+                    or selected_episode != checkpoint_episode
+                    or not 1 <= checkpoint_episode <= expected_episode
+                    or not isinstance(best_payload.get("selection_validation"), dict)
+                ):
+                    return _checkpoint_error(
+                        "COMPLETE_BEST_CHECKPOINT",
+                        "SELECTION_METADATA_INVALID",
+                        run_dir,
+                        checkpoint_episode=best_payload.get("episode"),
+                        selected_episode=best_payload.get("selected_episode"),
+                    )
+            elif best_payload.get("episode") != expected_episode:
                 return _checkpoint_error(
                     "COMPLETE_BEST_CHECKPOINT",
                     "EPISODE_MISMATCH",

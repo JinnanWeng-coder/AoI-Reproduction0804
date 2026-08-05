@@ -3,6 +3,10 @@ semantic_version: legacy_release_v1
 tau: 0.005
 global_actor_weight: 2.0
 global_update_mode: legacy_detach
+diagnostics: false
+selection_validation_seeds: [301, 302]
+selection_validation_episodes: 5
+selection_validation_warmup_episodes: 1
 map_width_m: 375.0
 map_height_m: 649.0
 rsu_position: [375.0, 649.5]

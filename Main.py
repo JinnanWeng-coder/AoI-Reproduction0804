@@ -18,6 +18,7 @@ def main(argv=None) -> int:
         print(f"output_root={config.output_root}")
         print(f"scope={args.scope}")
         print(f"eval_purpose={args.eval_purpose}")
+        print(f"eval_noise={args.eval_noise}")
         print(f"recover_empty_run={args.recover_empty_run}")
         print("validation_eval_seeds=201,202,203,204,205,206")
         print("final_test_eval_seeds=101,102,103,104,105,106")
@@ -42,7 +43,15 @@ def main(argv=None) -> int:
         if args.scope != expected_scope:
             raise SystemExit(f"--scope {args.scope} does not match --eval-purpose {args.eval_purpose}")
         eval_seeds = None if args.eval_seeds is None else [int(item) for item in args.eval_seeds.split(",") if item.strip()]
-        result = evaluate_from_checkpoint(config, args.resume, args.eval_episodes, eval_seeds, args.eval_purpose, scope=args.scope)
+        result = evaluate_from_checkpoint(
+            config,
+            args.resume,
+            args.eval_episodes,
+            eval_seeds,
+            args.eval_purpose,
+            scope=args.scope,
+            eval_noise=args.eval_noise,
+        )
     else:
         if args.scope != "train":
             raise SystemExit("training requires --scope train")

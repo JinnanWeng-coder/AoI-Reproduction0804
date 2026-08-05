@@ -62,13 +62,17 @@ python analysis/build_paper_figures.py study_manifest.json --figure 3
 
 Smoke output is marked `is_formal_result=false`. Existing run and eval
 directories are rejected; only an explicit `--resume` can continue an
-incomplete run. Evaluation accepts only a completed, final-episode
-`checkpoints/latest.pt` or `best.pt` bound to `COMPLETE.json`. `latest.pt`
+incomplete run. Evaluation accepts only a completed `latest.pt` or a
+selection-validation `best.pt` bound to `COMPLETE.json`; `latest.pt` is the
+final episode, while `best.pt` may intentionally come from an earlier
+checkpoint. `latest.pt`
 contains networks, optimizers, replay, environment,
 metrics, and Python/NumPy/PyTorch RNG state. `train_metrics.npz` keeps separate
 task1/task2 arrays, `local_total_episode_mean`, `global_episode_sum`,
 `global_episode_mean`, and `immediate_reward_proxy`. The latter is an immediate
 reward aggregation for plotting, not a differentiable actor objective.
+Generated metric tensors are stored once as compressed NPZ rather than also
+duplicated as MAT files.
 
 Evaluation uses one `reset_world(eval_seed)` per held-out seed, five sequential
 warm-up episodes by default, then sequential scored episodes. `validation`

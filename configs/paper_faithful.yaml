@@ -3,6 +3,10 @@ semantic_version: paper_faithful_v4
 tau: 0.0005
 global_actor_weight: 1.0
 global_update_mode: synchronous_joint
+diagnostics: false
+selection_validation_seeds: [301, 302]
+selection_validation_episodes: 5
+selection_validation_warmup_episodes: 1
 map_width_m: 750.0
 map_height_m: 1299.0
 rsu_position: [375.0, 649.5]

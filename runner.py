@@ -42,6 +42,7 @@ EVAL_PURPOSE_SEEDS = {
 }
 EVAL_STATISTICS_SCHEMA_VERSION = "eval_seed_cluster_v1"
 SCOPE_FOR_PURPOSE = {"validation": "validation", "final_test": "final_release"}
+BEST_SELECTION_CRITERION = "maximize(min_agent_endpoint_cam - max_agent_mean_aoi_ms / initial_aoi_ms)"
 FORMAL_PROVENANCE_KEYS = (
     "reproduction_git_commit",
     "reproduction_git_branch",
@@ -106,7 +107,16 @@ def _make_system(config):
     agents = [Agent(config, index) for index in range(config.number_agents)]
     learner = Global_Critic(config, agents)
     replay = ReplayBuffer(config.replay_capacity, config.state_dim, config.action_dim, config.number_agents)
-    metrics = MetricStore(config.number_agents, config.steps_per_episode, config.global_actor_weight)
+    metrics = MetricStore(
+        config.number_agents,
+        config.steps_per_episode,
+        config.global_actor_weight,
+        n_rb=config.n_rb,
+        n_modes=config.n_modes,
+        power_min_dbm=config.power_min_dbm,
+        power_max_dbm=config.power_max_dbm,
+        diagnostics=config.diagnostics,
+    )
     return environment, agents, learner, replay, metrics, device
 
 
@@ -307,7 +317,7 @@ def _config_identity_from_dict(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _validate_empty_run_for_reinitialization(run_dir: Path, config: ExperimentConfig) -> Dict[str, Any]:
-    """Verify a formal run published before its first checkpoint.
+    """Verify a formal or explicitly diagnostic run before its first checkpoint.
 
     This function is read-only.  It accepts only the exact artifacts produced
     by the atomic initialization path and never removes or replaces anything.
@@ -321,12 +331,15 @@ def _validate_empty_run_for_reinitialization(run_dir: Path, config: ExperimentCo
             run=str(run_dir),
             expected_run=str(expected_run_dir),
         )
-    if not config.is_formal_result or config.profile != "paper_faithful":
-        raise EmptyRunRecoveryError("NOT_FORMAL", "empty-run recovery is restricted to formal paper runs")
-    try:
-        _require_formal_scientific_contract(config, "empty-run recovery")
-    except RuntimeError as exc:
-        raise EmptyRunRecoveryError("SCIENTIFIC_CONTRACT_MISMATCH", str(exc)) from exc
+    formal_run = bool(config.is_formal_result and config.profile == "paper_faithful")
+    diagnostic_run = bool(config.diagnostics and not config.smoke)
+    if not formal_run and not diagnostic_run:
+        raise EmptyRunRecoveryError("NOT_FORMAL", "empty-run recovery requires a formal paper run or diagnostics=true")
+    if formal_run:
+        try:
+            _require_formal_scientific_contract(config, "empty-run recovery")
+        except RuntimeError as exc:
+            raise EmptyRunRecoveryError("SCIENTIFIC_CONTRACT_MISMATCH", str(exc)) from exc
     if not run_dir.is_dir() or _is_link_or_reparse(run_dir):
         raise EmptyRunRecoveryError("DIRECTORY_INVALID", "empty run must be a real directory")
 
@@ -404,8 +417,9 @@ def _validate_empty_run_for_reinitialization(run_dir: Path, config: ExperimentCo
         "config_hash": config.canonical_hash(),
         "scenario": config.scenario.id,
         "seed": int(config.seed),
-        "is_formal_result": True,
-        "smoke": False,
+        "is_formal_result": bool(config.is_formal_result),
+        "smoke": bool(config.smoke),
+        "diagnostics_enabled": bool(config.diagnostics),
         "mobility_revision": config.mobility_revision,
         "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
     }
@@ -458,6 +472,14 @@ def _run_provenance(config: ExperimentConfig, git: Dict[str, Any]) -> Dict[str, 
         "effective_center_spacing_m": float(config.effective_center_spacing_m),
         "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
         "statistics_schema_version": config.statistics_schema_version,
+        "diagnostics_enabled": bool(config.diagnostics),
+        "checkpoint_selection": {
+            "criterion": BEST_SELECTION_CRITERION,
+            "seeds": [int(seed) for seed in config.selection_validation_seeds],
+            "scored_episodes": int(config.selection_validation_episodes),
+            "warmup_episodes": int(config.selection_validation_warmup_episodes),
+            "disjoint_from_validation_and_final_test": True,
+        },
     }
     provenance.update(git)
     return provenance
@@ -640,15 +662,144 @@ def _load_checkpoint(path: Path, config, agents, learner, replay, environment, m
     return payload
 
 
-def _record_step(info: Dict[str, Any]) -> Dict[str, Any]:
+def _record_step(info: Dict[str, Any], normalized_actions: Optional[np.ndarray] = None) -> Dict[str, Any]:
     # String metadata belongs in config/provenance, not in numeric NPZ
     # tensors.  The raw per-RB arrays remain available for audit/smoke while
     # this filter prevents accidental object/string arrays.
-    return {
+    record = {
         key: np.asarray(value).copy()
         for key, value in info.items()
         if key not in {"actions_decoded", "global_reward_normalization"}
     }
+    if normalized_actions is not None:
+        record["action_post_clip_normalized"] = np.asarray(normalized_actions, dtype=np.float32).copy()
+    return record
+
+
+def _selection_validation(config: ExperimentConfig, agents) -> Dict[str, Any]:
+    """Evaluate the live policy on a fixed split without perturbing training state."""
+    caller_rng = capture_rng_state()
+    training_modes = [agent.actor.training for agent in agents]
+    try:
+        environment = _make_environment(config)
+        for agent in agents:
+            agent.actor.eval()
+        seed_aoi = []
+        seed_cam = []
+        for seed in config.selection_validation_seeds:
+            environment.reset_world(int(seed))
+            for episode in range(int(config.selection_validation_warmup_episodes)):
+                observations = environment.start_episode(episode)
+                for _step in range(config.steps_per_episode):
+                    actions = np.asarray(
+                        [agent.choose_action(observations[index], explore=False, noise_std=0.0) for index, agent in enumerate(agents)],
+                        dtype=np.float32,
+                    )
+                    observations, _rg, _t1, _t2, _done, _info = environment.step(actions)
+            episode_aoi = []
+            episode_cam = []
+            for scored_episode in range(int(config.selection_validation_episodes)):
+                episode_index = int(config.selection_validation_warmup_episodes) + scored_episode
+                observations = environment.start_episode(episode_index)
+                slot_aoi = []
+                endpoint_cam = None
+                for _step in range(config.steps_per_episode):
+                    actions = np.asarray(
+                        [agent.choose_action(observations[index], explore=False, noise_std=0.0) for index, agent in enumerate(agents)],
+                        dtype=np.float32,
+                    )
+                    observations, _rg, _t1, _t2, _done, info = environment.step(actions)
+                    slot_aoi.append(np.asarray(info["aoi_ms"], dtype=np.float64))
+                    endpoint_cam = np.asarray(info["success"], dtype=np.float64)
+                episode_aoi.append(np.mean(np.stack(slot_aoi), axis=0))
+                episode_cam.append(endpoint_cam)
+            seed_aoi.append(np.mean(np.stack(episode_aoi), axis=0))
+            seed_cam.append(np.mean(np.stack(episode_cam), axis=0))
+        per_agent_aoi = np.mean(np.stack(seed_aoi), axis=0)
+        per_agent_cam = np.mean(np.stack(seed_cam), axis=0)
+        worst_aoi = float(np.max(per_agent_aoi))
+        worst_cam = float(np.min(per_agent_cam))
+        aoi_scale = max(float(config.initial_aoi_ms), 1.0)
+        score = float(worst_cam - worst_aoi / aoi_scale)
+        return {
+            "criterion": BEST_SELECTION_CRITERION,
+            "seeds": [int(seed) for seed in config.selection_validation_seeds],
+            "scored_episodes": int(config.selection_validation_episodes),
+            "warmup_episodes": int(config.selection_validation_warmup_episodes),
+            "mean_aoi_ms_per_agent": per_agent_aoi.tolist(),
+            "endpoint_cam_per_agent": per_agent_cam.tolist(),
+            "mean_aoi_ms": float(np.mean(per_agent_aoi)),
+            "endpoint_cam": float(np.mean(per_agent_cam)),
+            "worst_agent_mean_aoi_ms": worst_aoi,
+            "worst_agent_endpoint_cam": worst_cam,
+            "score": score,
+        }
+    finally:
+        for agent, was_training in zip(agents, training_modes):
+            agent.actor.train(was_training)
+        restore_rng_state(caller_rng)
+
+
+def _save_actor_snapshot(run_dir: Path, config: ExperimentConfig, agents, episode: int, selection: Dict[str, Any]) -> Path:
+    """Keep a lightweight policy snapshot; latest.pt remains the resumable checkpoint."""
+    path = run_dir / "checkpoints" / "periodic" / f"episode_{int(episode):06d}_actor.pt"
+    atomic_torch_save({
+        "snapshot_schema_version": "actor_snapshot_v1",
+        "checkpoint_role": "periodic_actor_snapshot_not_resumable",
+        "semantic_version": config.semantic_version,
+        "config_hash": config.canonical_hash(),
+        "episode": int(episode),
+        "actors": [agent.actor.state_dict() for agent in agents],
+        "selection_validation": selection,
+    }, path)
+    return path
+
+
+def _selection_best_payload(latest_payload: Dict[str, Any], selection_state: Dict[str, Any], training_completed: bool) -> Dict[str, Any]:
+    selected_episode = int(selection_state.get("best_episode") or -1)
+    selection = selection_state.get("best_metrics")
+    if selected_episode < 1 or not isinstance(selection, dict) or int(selection.get("episode", -1)) != selected_episode:
+        raise RuntimeError("selection_state cannot produce a valid best checkpoint")
+    payload = dict(latest_payload)
+    payload.update({
+        "checkpoint_role": "best_selection_validation",
+        "selected_episode": selected_episode,
+        "selection_validation": selection,
+        "selection_state": selection_state,
+        "training_completed": bool(training_completed),
+    })
+    return payload
+
+
+def _repair_selection_best_after_resume(run_dir: Path, latest_payload: Dict[str, Any], selection_state: Dict[str, Any]) -> None:
+    """Repair an interruption between atomic latest.pt and best.pt writes."""
+    selected_episode = selection_state.get("best_episode")
+    if selected_episode is None:
+        return
+    selected_episode = int(selected_episode)
+    best_path = run_dir / "checkpoints" / "best.pt"
+    consistent = False
+    if best_path.is_file():
+        try:
+            existing = torch.load(best_path, map_location="cpu", weights_only=False)
+            consistent = (
+                existing.get("checkpoint_role") == "best_selection_validation"
+                and int(existing.get("selected_episode", -1)) == selected_episode
+                and int(existing.get("episode", -2)) == selected_episode
+            )
+        except Exception:
+            consistent = False
+    if consistent:
+        return
+    latest_episode = int(latest_payload.get("episode", -1))
+    if selected_episode != latest_episode:
+        raise RuntimeError(
+            "latest.pt selection_state disagrees with best.pt and cannot be repaired from the resumed episode"
+        )
+    atomic_torch_save(
+        _selection_best_payload(latest_payload, selection_state, training_completed=False),
+        best_path,
+    )
 
 
 def train(
@@ -660,11 +811,23 @@ def train(
     run_dir, is_resume = _prepare_run(config, resume, recover_empty_run=recover_empty_run)
     environment, agents, learner, replay, metrics, device = _make_system(config)
     start_episode = 0
+    selection_state: Dict[str, Any] = {
+        "criterion": BEST_SELECTION_CRITERION,
+        "seeds": [int(seed) for seed in config.selection_validation_seeds],
+        "scored_episodes": int(config.selection_validation_episodes),
+        "warmup_episodes": int(config.selection_validation_warmup_episodes),
+        "best_score": None,
+        "best_episode": None,
+        "best_metrics": None,
+    }
     if is_resume:
         payload = _load_checkpoint(Path(resume).expanduser().resolve(), config, agents, learner, replay, environment, metrics)
         start_episode = int(payload["episode"])
+        if isinstance(payload.get("selection_state"), dict):
+            selection_state = dict(payload["selection_state"])
         if payload.get("completed"):
             raise RuntimeError("refusing to resume a completed run")
+        _repair_selection_best_after_resume(run_dir, payload, selection_state)
     elif hasattr(environment, "reset_world") and not getattr(environment, "_world_initialized", False):
         environment.reset_world(config.seed)
 
@@ -678,22 +841,38 @@ def train(
         task2_steps: List[np.ndarray] = []
         global_steps: List[float] = []
         step_records: List[Dict[str, Any]] = []
+        learning_records: List[Dict[str, Any]] = []
         for _step in range(config.steps_per_episode):
             actions = np.asarray([agent.choose_action(observations[index], explore=True) for index, agent in enumerate(agents)], dtype=np.float32)
             next_observations, reward_global, reward_task1, reward_task2, terminated, info = environment.step(actions)
             replay.store_transition(observations.reshape(-1), actions.reshape(-1), reward_global, reward_task1, reward_task2, next_observations.reshape(-1), terminated)
             if replay.size >= config.batch_size:
                 diagnostics = learner.learn(replay.sample_buffer(config.batch_size))
-                metrics.append_learning(diagnostics)
+                learning_records.append(diagnostics)
             task1_steps.append(np.asarray(reward_task1, dtype=np.float32))
             task2_steps.append(np.asarray(reward_task2, dtype=np.float32))
             global_steps.append(float(reward_global))
-            step_records.append(_record_step(info))
+            step_records.append(_record_step(info, actions))
             observations = next_observations
         metrics.append_episode(step_records, task1_steps, task2_steps, global_steps)
+        metrics.append_learning_episode(learning_records)
         if ((episode + 1) % config.checkpoint_every == 0) or episode == stop_episode - 1:
+            selection = _selection_validation(config, agents)
+            selection["episode"] = int(episode + 1)
+            _save_actor_snapshot(run_dir, config, agents, episode + 1, selection)
+            is_better = selection_state.get("best_score") is None or float(selection["score"]) > float(selection_state["best_score"])
+            if is_better:
+                selection_state["best_score"] = float(selection["score"])
+                selection_state["best_episode"] = int(episode + 1)
+                selection_state["best_metrics"] = selection
             payload = build_payload(config, agents, learner, replay, environment, metrics, episode + 1, completed=False)
+            payload.update({"checkpoint_role": "latest_resumable", "selection_state": selection_state})
             atomic_torch_save(payload, run_dir / "checkpoints" / "latest.pt")
+            if is_better:
+                atomic_torch_save(
+                    _selection_best_payload(payload, selection_state, training_completed=False),
+                    run_dir / "checkpoints" / "best.pt",
+                )
 
     if stop_episode < config.episodes:
         shapes = metrics.save(run_dir)
@@ -701,8 +880,21 @@ def train(
 
     shapes = metrics.save(run_dir)
     final_payload = build_payload(config, agents, learner, replay, environment, metrics, config.episodes, completed=True)
-    atomic_torch_save(final_payload, run_dir / "checkpoints" / "best.pt")
+    final_payload.update({"checkpoint_role": "latest_final", "selection_state": selection_state, "training_completed": True})
     atomic_torch_save(final_payload, run_dir / "checkpoints" / "latest.pt")
+    best_path = run_dir / "checkpoints" / "best.pt"
+    if int(selection_state.get("best_episode") or -1) == int(config.episodes):
+        best_payload = _selection_best_payload(final_payload, selection_state, training_completed=True)
+    else:
+        best_payload = torch.load(best_path, map_location="cpu", weights_only=False)
+        best_payload.update({
+            "completed": True,
+            "training_completed": True,
+            "checkpoint_role": "best_selection_validation",
+            "selected_episode": int(selection_state["best_episode"]),
+            "selection_state": selection_state,
+        })
+    atomic_torch_save(best_payload, best_path)
     final_checkpoint_hashes = {
         name: _sha256_file(run_dir / "checkpoints" / name)
         for name in ("latest.pt", "best.pt")
@@ -743,6 +935,7 @@ def train(
         "checkpoint_completed": True,
         "checkpoint_sha256": final_checkpoint_hashes,
         "metrics_shapes": shapes,
+        "checkpoint_selection": selection_state,
         "audit": audit,
     }
     _write_json(run_dir / "COMPLETE.json", complete)
@@ -797,8 +990,23 @@ def _validate_formal_eval_preconditions(run_dir: Path, checkpoint_path: Path, pa
         raise RuntimeError("resolved evaluation config does not match the training run")
     if payload.get("completed") is not True:
         raise RuntimeError("evaluation requires a checkpoint with completed=true")
-    if int(payload.get("episode", -1)) != int(run_config.episodes):
-        raise RuntimeError("evaluation checkpoint episode must equal config.episodes")
+    selected_best = checkpoint_path.name == "best.pt" and payload.get("checkpoint_role") == "best_selection_validation"
+    if selected_best:
+        selection = payload.get("selection_validation")
+        if not isinstance(selection, dict):
+            raise RuntimeError("selected best checkpoint is missing selection validation metadata")
+        if payload.get("training_completed") is not True:
+            raise RuntimeError("selected best checkpoint is not bound to a completed training run")
+        if int(payload.get("selected_episode", -1)) != int(payload.get("episode", -2)):
+            raise RuntimeError("selected best checkpoint episode metadata is inconsistent")
+        if selection.get("criterion") != BEST_SELECTION_CRITERION:
+            raise RuntimeError("selected best checkpoint criterion mismatch")
+        if selection.get("seeds") != [int(seed) for seed in run_config.selection_validation_seeds]:
+            raise RuntimeError("selected best checkpoint selection split mismatch")
+        if int(payload.get("episode", -1)) < 1 or int(payload.get("episode", -1)) > int(run_config.episodes):
+            raise RuntimeError("selected best checkpoint episode is outside training")
+    elif int(payload.get("episode", -1)) != int(run_config.episodes):
+        raise RuntimeError("evaluation latest checkpoint episode must equal config.episodes")
     if payload.get("semantic_version") != run_config.semantic_version:
         raise RuntimeError("checkpoint semantic_version mismatch")
     if payload.get("mobility_revision") != run_config.mobility_revision:
@@ -837,6 +1045,7 @@ def evaluate_from_checkpoint(
     eval_seeds: Optional[List[int]] = None,
     eval_purpose: Optional[str] = None,
     scope: Optional[str] = None,
+    eval_noise: float = 0.0,
 ) -> Dict[str, Any]:
     if eval_purpose not in EVAL_PURPOSE_SEEDS:
         raise ValueError("eval_purpose must be explicitly set to validation or final_test")
@@ -871,17 +1080,20 @@ def evaluate_from_checkpoint(
         raise ValueError(f"formal {eval_purpose} evaluation requires seeds {EVAL_PURPOSE_SEEDS[eval_purpose]}")
     if int(eval_episodes) < 1:
         raise ValueError("eval_episodes must be positive")
+    eval_noise = float(eval_noise)
+    if not np.isfinite(eval_noise) or eval_noise < 0.0 or eval_noise > 1.0:
+        raise ValueError("eval_noise must be finite and in [0, 1]")
     warmup_episodes = int(config.eval_warmup_episodes)
     if config.is_formal_result:
         if warmup_episodes != 5 or int(eval_episodes) != 100:
             raise ValueError("formal evaluation requires warmup=5 and scored episodes=100")
-    eval_noise = 0.0
     eval_id = _eval_id(checkpoint_hash, eval_purpose, config.eval_protocol, warmup_episodes, eval_seeds, eval_episodes, eval_noise)
     eval_dir = run_dir / "eval" / eval_id
     if eval_dir.exists():
         raise FileExistsError(f"Refusing to overwrite existing eval directory: {eval_dir}")
-    marker_path = run_dir / ("VALIDATION_READY.json" if scope == "validation" else "FINAL_RELEASE.json")
-    if marker_path.exists():
+    diagnostic_noise_eval = eval_noise > 0.0
+    marker_path = None if diagnostic_noise_eval else run_dir / ("VALIDATION_READY.json" if scope == "validation" else "FINAL_RELEASE.json")
+    if marker_path is not None and marker_path.exists():
         raise FileExistsError(f"Refusing to overwrite lifecycle marker: {marker_path}")
     _validate_formal_eval_preconditions(run_dir, checkpoint_path, checkpoint_preview, config)
     environment, agents, learner, replay, metrics, device = _make_system(runtime_config)
@@ -898,6 +1110,7 @@ def evaluate_from_checkpoint(
     raw_power = []
     raw_rb = []
     raw_mode = []
+    raw_action = []
     raw_v2v_rate_all = []
     raw_selected_interference = []
     raw_interference_linear = []
@@ -917,6 +1130,7 @@ def evaluate_from_checkpoint(
             seed_power = []
             seed_rb = []
             seed_mode = []
+            seed_action = []
             seed_v2v_rate_all = []
             seed_selected_interference = []
             seed_interference_linear = []
@@ -930,10 +1144,11 @@ def evaluate_from_checkpoint(
             # then advance the same world sequentially, preserving AoI,
             # previous interference, mobility, and slow fading history.
             environment.reset_world(seed)
+            action_noise_rng = np.random.default_rng(np.random.SeedSequence([int(config.seed), int(seed), 0xA01]))
             for warmup_index in range(warmup_episodes):
                 observations = environment.start_episode(warmup_index)
                 for _step in range(config.steps_per_episode):
-                    actions = np.asarray([agent.choose_action(observations[index], explore=False) for index, agent in enumerate(agents)], dtype=np.float32)
+                    actions = np.asarray([agent.choose_action(observations[index], explore=False, noise_std=eval_noise, rng=action_noise_rng) for index, agent in enumerate(agents)], dtype=np.float32)
                     observations, _rg, _t1, _t2, _done, _info = environment.step(actions)
 
             for episode in range(int(eval_episodes)):
@@ -948,6 +1163,7 @@ def evaluate_from_checkpoint(
                 episode_power = []
                 episode_rb = []
                 episode_mode = []
+                episode_action = []
                 episode_v2v_rate_all = []
                 episode_selected_interference = []
                 episode_interference_linear = []
@@ -957,8 +1173,9 @@ def evaluate_from_checkpoint(
                 episode_I_v2v_linear = []
                 episode_I_mode_db = []
                 for _step in range(config.steps_per_episode):
-                    actions = np.asarray([agent.choose_action(observations[index], explore=False) for index, agent in enumerate(agents)], dtype=np.float32)
+                    actions = np.asarray([agent.choose_action(observations[index], explore=False, noise_std=eval_noise, rng=action_noise_rng) for index, agent in enumerate(agents)], dtype=np.float32)
                     observations, _rg, _t1, _t2, _done, info = environment.step(actions)
+                    episode_action.append(actions.copy())
                     episode_aoi.append(info["aoi_ms"])
                     episode_success.append(info["success"])
                     episode_demand.append(info["remaining_demand"])
@@ -985,6 +1202,7 @@ def evaluate_from_checkpoint(
                 seed_power.append(episode_power)
                 seed_rb.append(episode_rb)
                 seed_mode.append(episode_mode)
+                seed_action.append(episode_action)
                 seed_v2v_rate_all.append(episode_v2v_rate_all)
                 seed_selected_interference.append(episode_selected_interference)
                 seed_interference_linear.append(episode_interference_linear)
@@ -1002,6 +1220,7 @@ def evaluate_from_checkpoint(
             raw_power.append(seed_power)
             raw_rb.append(seed_rb)
             raw_mode.append(seed_mode)
+            raw_action.append(seed_action)
             raw_v2v_rate_all.append(seed_v2v_rate_all)
             raw_selected_interference.append(seed_selected_interference)
             raw_interference_linear.append(seed_interference_linear)
@@ -1025,6 +1244,7 @@ def evaluate_from_checkpoint(
         "power_dbm": np.asarray(raw_power, dtype=np.float32),
         "rb": np.asarray(raw_rb, dtype=np.int64),
         "mode": np.asarray(raw_mode, dtype=np.int64),
+        "action_post_clip_normalized": np.asarray(raw_action, dtype=np.float32),
         "v2v_rate_all": np.asarray(raw_v2v_rate_all, dtype=np.float32),
         "selected_interference_db": np.asarray(raw_selected_interference, dtype=np.float32),
         "interference_linear": np.asarray(raw_interference_linear, dtype=np.float32),
@@ -1035,12 +1255,6 @@ def evaluate_from_checkpoint(
         "I_mode_db": np.asarray(raw_I_mode_db, dtype=np.float32),
     }
     np.savez_compressed(eval_dir / "metrics.npz", **arrays)
-    try:
-        import scipy.io
-
-        scipy.io.savemat(eval_dir / "metrics.mat", arrays)
-    except ImportError:
-        pass
     # Episodes are repeated frames within one held-out world, not independent
     # inferential units.  Keep their raw values and report only descriptive
     # within-seed SD.  Study-level CI is computed later across training runs.
@@ -1050,16 +1264,32 @@ def evaluate_from_checkpoint(
     per_seed_success_agent = endpoint_episode_seed_agent.mean(axis=1)
     per_seed_aoi = per_seed_aoi_agent.mean(axis=1)
     per_seed_success = per_seed_success_agent.mean(axis=1)
+    worst_agent_aoi_per_seed = per_seed_aoi_agent.max(axis=1)
+    worst_agent_success_per_seed = per_seed_success_agent.min(axis=1)
+    aggregate_aoi_agent = per_seed_aoi_agent.mean(axis=0)
+    aggregate_success_agent = per_seed_success_agent.mean(axis=0)
+    mode = arrays["mode"]
+    rb = arrays["rb"]
+    power = arrays["power_dbm"]
+    action = arrays["action_post_clip_normalized"]
+    mode_fraction_seed_agent = np.stack([(mode == value).mean(axis=(1, 2)) for value in range(config.n_modes)], axis=-1)
+    rb_fraction_seed_agent = np.stack([(rb == value).mean(axis=(1, 2)) for value in range(config.n_rb)], axis=-1)
+    mode_switch_seed_agent = (mode[:, :, 1:, :] != mode[:, :, :-1, :]).mean(axis=(1, 2)) if config.steps_per_episode > 1 else np.zeros((len(eval_seeds), config.number_agents))
+    rb_switch_seed_agent = (rb[:, :, 1:, :] != rb[:, :, :-1, :]).mean(axis=(1, 2)) if config.steps_per_episode > 1 else np.zeros((len(eval_seeds), config.number_agents))
+    power_tolerance = max((config.power_max_dbm - config.power_min_dbm) * 0.01, 1e-5)
+    power_min_seed_agent = (power <= config.power_min_dbm + power_tolerance).mean(axis=(1, 2))
+    power_max_seed_agent = (power >= config.power_max_dbm - power_tolerance).mean(axis=(1, 2))
+    action_saturation_seed_agent_dim = (np.abs(action) >= 0.95).mean(axis=(1, 2))
     sd_aoi = aoi_episode_seed_agent.mean(axis=2).std(axis=1, ddof=1) if int(eval_episodes) > 1 else np.zeros(len(eval_seeds))
     sd_success = endpoint_episode_seed_agent.mean(axis=2).std(axis=1, ddof=1) if int(eval_episodes) > 1 else np.zeros(len(eval_seeds))
     checkpoint_reference = os.path.relpath(checkpoint_path, run_dir).replace(os.sep, "/")
-    formal_eval = bool(config.is_formal_result and eval_purpose == "final_test")
+    formal_eval = bool(config.is_formal_result and eval_purpose == "final_test" and not diagnostic_noise_eval)
     eval_git = _git_metadata()
     summary = {
         "eval_id": eval_id,
         "eval_purpose": eval_purpose,
         "scope": scope,
-        "release_status": "validation_ready" if scope == "validation" else ("final_release" if formal_eval else "evaluation_complete"),
+        "release_status": "diagnostic_evaluation" if diagnostic_noise_eval else ("validation_ready" if scope == "validation" else ("final_release" if formal_eval else "evaluation_complete")),
         "statistics_schema_version": EVAL_STATISTICS_SCHEMA_VERSION,
         "eval_seeds": [int(seed) for seed in eval_seeds],
         "eval_episodes": int(eval_episodes),
@@ -1104,6 +1334,7 @@ def evaluate_from_checkpoint(
             "aoi_ms": ["eval_seed", "scored_episode", "slot", "agent"],
             "success": ["eval_seed", "scored_episode", "slot", "agent"],
             "remaining_demand": ["eval_seed", "scored_episode", "slot", "agent"],
+            "action_post_clip_normalized": ["eval_seed", "scored_episode", "slot", "agent", "action_dim"],
             "interference_db": ["eval_seed", "scored_episode", "slot", "agent", "rb"],
             "v2v_rate_all": ["eval_seed", "scored_episode", "slot", "agent", "follower"],
             "v2v_interference_linear": ["eval_seed", "scored_episode", "slot", "agent", "follower", "rb"],
@@ -1123,6 +1354,25 @@ def evaluate_from_checkpoint(
         "mean_AoI_ms": float(per_seed_aoi.mean()),
         "CAM_success_probability": float(per_seed_success.mean()),
         "endpoint_success_probability_per_seed": per_seed_success.tolist(),
+        "worst_agent_mean_AoI_ms_per_seed": worst_agent_aoi_per_seed.tolist(),
+        "worst_agent_CAM_success_probability_per_seed": worst_agent_success_per_seed.tolist(),
+        "worst_agent_mean_AoI_ms": float(aggregate_aoi_agent.max()),
+        "worst_agent_CAM_success_probability": float(aggregate_success_agent.min()),
+        "action_diagnostics": {
+            "mode_fraction_per_seed_agent": mode_fraction_seed_agent.tolist(),
+            "rb_fraction_per_seed_agent": rb_fraction_seed_agent.tolist(),
+            "mode_entropy_normalized_per_seed_agent": MetricStore._normalized_entropy(mode_fraction_seed_agent).tolist(),
+            "rb_entropy_normalized_per_seed_agent": MetricStore._normalized_entropy(rb_fraction_seed_agent).tolist(),
+            "mode_switch_rate_per_seed_agent": mode_switch_seed_agent.tolist(),
+            "rb_switch_rate_per_seed_agent": rb_switch_seed_agent.tolist(),
+            "action_post_clip_abs_ge_0p95_fraction_per_seed_agent_dim": action_saturation_seed_agent_dim.tolist(),
+            "power_action_post_clip_near_min_fraction_per_seed_agent": (action[..., 2] <= -0.95).mean(axis=(1, 2)).tolist(),
+            "power_action_post_clip_near_max_fraction_per_seed_agent": (action[..., 2] >= 0.95).mean(axis=(1, 2)).tolist(),
+            "power_post_map_near_min_fraction_per_seed_agent": power_min_seed_agent.tolist(),
+            "power_post_map_near_max_fraction_per_seed_agent": power_max_seed_agent.tolist(),
+            "post_clip_saturation_threshold": 0.95,
+            "post_map_near_bound_fraction_of_power_range": 0.01,
+        },
         "training_seed_is_inferential_unit": True,
         "is_frozen_eval": True,
         "status": "complete",
@@ -1141,6 +1391,7 @@ def evaluate_from_checkpoint(
         "scenario": config.scenario.id,
         "training_seed": int(config.seed),
         "eval_purpose": eval_purpose,
+        "eval_noise": eval_noise,
         "statistics_schema_version": EVAL_STATISTICS_SCHEMA_VERSION,
         "mobility_revision": config.mobility_revision,
         "effective_center_spacing_m": float(config.effective_center_spacing_m),
@@ -1163,23 +1414,24 @@ def evaluate_from_checkpoint(
         "cuda_driver": eval_git.get("cuda_driver"),
         "gpu_names": eval_git.get("gpu_names", []),
         "scope": scope,
-        "release_status": "validation_ready" if scope == "validation" else ("final_release" if formal_eval else "evaluation_complete"),
+        "release_status": "diagnostic_evaluation" if diagnostic_noise_eval else ("validation_ready" if scope == "validation" else ("final_release" if formal_eval else "evaluation_complete")),
     }
     _write_json(eval_dir / "provenance.json", eval_provenance)
     _write_json(eval_dir / "summary.json", summary)
     _write_json(eval_dir / "EVAL_COMPLETE.json", summary)
-    _write_json(marker_path, {
-        "status": "validation_ready" if scope == "validation" else "final_release",
-        "scope": scope,
-        "eval_purpose": eval_purpose,
-        "eval_id": eval_id,
-        "checkpoint_sha256": checkpoint_hash,
-        "checkpoint_name": checkpoint_path.name,
-        "checkpoint_episode": int(payload.get("episode", -1)),
-        "checkpoint_completed": bool(payload.get("completed", False)),
-        "config_hash": config.canonical_hash(),
-        "semantic_version": config.semantic_version,
-        "mobility_revision": config.mobility_revision,
-        "is_formal_result": formal_eval,
-    })
+    if marker_path is not None:
+        _write_json(marker_path, {
+            "status": "validation_ready" if scope == "validation" else "final_release",
+            "scope": scope,
+            "eval_purpose": eval_purpose,
+            "eval_id": eval_id,
+            "checkpoint_sha256": checkpoint_hash,
+            "checkpoint_name": checkpoint_path.name,
+            "checkpoint_episode": int(payload.get("episode", -1)),
+            "checkpoint_completed": bool(payload.get("completed", False)),
+            "config_hash": config.canonical_hash(),
+            "semantic_version": config.semantic_version,
+            "mobility_revision": config.mobility_revision,
+            "is_formal_result": formal_eval,
+        })
     return {"eval_dir": str(eval_dir), **summary}

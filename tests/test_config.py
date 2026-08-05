@@ -39,3 +39,28 @@ def test_safe_run_path_rejects_escape():
 def test_unimplemented_sequential_actor_mode_is_rejected():
     with pytest.raises(ValueError, match="unsupported global_update_mode"):
         resolve_config("paper_faithful", "p05_n04_g25", global_update_mode="sequential_agent")
+
+
+def test_detached_actor_is_explicit_nonformal_arm_with_disjoint_selection_split():
+    current = resolve_config("paper_faithful", "p05_n04_g25")
+    detached = resolve_config("paper_faithful", "p05_n04_g25", global_update_mode="detached_actor")
+    assert current.global_update_mode == "synchronous_joint"
+    assert current.diagnostics is False
+    assert detached.global_update_mode == "detached_actor"
+    assert detached.is_formal_result is False
+    assert set(current.selection_validation_seeds).isdisjoint(range(101, 207))
+
+
+def test_diagnostics_and_eval_noise_cli_are_default_off():
+    from config import build_parser, config_from_args
+
+    parser = build_parser()
+    args = parser.parse_args([])
+    config = config_from_args(args)
+    assert config.diagnostics is False
+    assert args.eval_noise == 0.0
+    args = parser.parse_args(["--global-actor-mode", "detached_actor", "--diagnostics", "--eval-noise", "0.3"])
+    config = config_from_args(args)
+    assert config.global_update_mode == "detached_actor"
+    assert config.diagnostics is True
+    assert args.eval_noise == 0.3

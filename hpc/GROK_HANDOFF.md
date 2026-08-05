@@ -17,6 +17,7 @@ Authoritative files:
 - hpc/setup_aoi_cuda.sh
 - hpc/aoi_pilot_1gpu.sbatch
 - hpc/aoi_matrix_8gpu.sbatch
+- hpc/aoi_matrix_array.sbatch
 - hpc/aoi_audit_cpu.sbatch
 - REMOTE_RUNBOOK.md
 - ENVIRONMENT_INSTALL.md
@@ -53,10 +54,13 @@ Execute these gates in order:
 4. Create the external `handoff/PILOT_APPROVED` marker only if the pilot is
    scientifically and operationally acceptable. Otherwise diagnose and report
    the evidence; do not delete or overwrite the run.
-5. Submit the 8-GPU matrix with `AOI_STAGE=train`. The code is single-GPU per
-   experiment cell: the script launches eight exclusive one-GPU Slurm steps,
-   six non-overlapping cells per shard. Do not attempt DDP/DataParallel or give
-   all eight GPUs to one cell.
+5. Submit exactly one matrix driver with `AOI_STAGE=train`. Prefer the 8-GPU
+   full-node driver when all eight L20s are available. If a full-node allocation
+   is impractical, use `hpc/aoi_matrix_array.sbatch`; each of its 48 array tasks
+   requests four CPUs and one GPU, and the submission-time `%N` cap controls
+   maximum concurrency. Never run the full-node and array drivers for the same
+   stage at the same time. Do not attempt DDP/DataParallel or give multiple GPUs
+   to one experiment cell.
 6. Monitor all shard logs and reports. After PREEMPTED/TIMEOUT/NODE_FAIL, it is
    safe to resubmit the exact command because recovery is checkpoint-bound. For
    Python errors, provenance mismatches, artifact conflicts, OOM or NaN, stop
@@ -77,6 +81,10 @@ Hard constraints:
 - Never delete, rename, reset or overwrite a formal run directory.
 - Never change episodes=500, steps=100, network sizes, batch size, replay,
   evaluation seeds, checkpoint cadence, device identity or paper profile.
+- Never deploy or commit a new matrix driver midway through a formal lifecycle;
+  the Git commit and tracked-tree digest must continue to match every existing
+  checkpoint. A newly committed array driver requires a fresh pilot and fresh
+  formal result root.
 - Never write result artifacts into the Git checkout.
 - Never place user-managed workflow files outside `/eeedata/sgxjw2`.
 - Never claim the entire paper is reproduced: this repository covers Algorithm 2 only,

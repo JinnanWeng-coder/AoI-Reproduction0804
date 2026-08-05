@@ -152,10 +152,10 @@ class LegacyEnviron:
             "v2i_rate": np.asarray(c_rate).copy(),
             "v2v_rate": np.asarray(v_rate).copy(),
             "interference_db": np.asarray(self._env.Interference_all).copy(),
-            # The public source exposes one aggregate success rate. Keep that
-            # scalar under success_rate and broadcast it for the common raw
-            # per-platoon metric schema used by the result auditor.
-            "success": np.full(self.config.number_agents, float(success)),
+            # The public source returns only the aggregate success rate, but
+            # its post-step active-link state preserves the exact per-platoon
+            # completion indicator needed by worst-agent diagnostics.
+            "success": (~np.asarray(self._env.active_links, dtype=bool)).astype(np.float32),
             "success_rate": np.asarray(success),
         }
         return self.get_observations(), float(global_reward), np.asarray(t1), np.asarray(t2), terminated, info

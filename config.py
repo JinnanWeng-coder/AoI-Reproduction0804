@@ -79,6 +79,10 @@ COMMON_DEFAULTS: Dict[str, Any] = {
     "include_remaining_time": True,
     "current_interference_reward": True,
     "global_update_mode": "synchronous_joint",
+    "diagnostics": False,
+    "selection_validation_seeds": [301, 302],
+    "selection_validation_episodes": 5,
+    "selection_validation_warmup_episodes": 1,
     "initial_aoi_ms": 100.0,
     "eval_protocol": "sequential_warm",
     "eval_warmup_episodes": 5,
@@ -180,6 +184,10 @@ class ExperimentConfig:
     include_remaining_time: bool = True
     current_interference_reward: bool = True
     global_update_mode: str = "synchronous_joint"
+    diagnostics: bool = False
+    selection_validation_seeds: List[int] = field(default_factory=lambda: [301, 302])
+    selection_validation_episodes: int = 5
+    selection_validation_warmup_episodes: int = 1
     initial_aoi_ms: float = 100.0
     eval_protocol: str = "sequential_warm"
     eval_warmup_episodes: int = 5
@@ -359,8 +367,16 @@ def validate_config(config: ExperimentConfig) -> None:
         raise ValueError("invalid power interval")
     if config.profile == "paper_faithful" and config.global_actor_weight != 1.0:
         raise ValueError("paper_faithful default global_actor_weight must remain 1.0")
-    if config.global_update_mode not in {"legacy_detach", "synchronous_joint"}:
+    if config.global_update_mode not in {"legacy_detach", "detached_actor", "synchronous_joint"}:
         raise ValueError("unsupported global_update_mode")
+    if config.profile == "legacy_release" and config.global_update_mode != "legacy_detach":
+        raise ValueError("legacy_release requires global_update_mode=legacy_detach")
+    if not config.selection_validation_seeds or len(set(config.selection_validation_seeds)) != len(config.selection_validation_seeds):
+        raise ValueError("selection_validation_seeds must be non-empty and unique")
+    if set(int(seed) for seed in config.selection_validation_seeds) & set(range(101, 207)):
+        raise ValueError("selection_validation_seeds must be disjoint from validation/final-test seeds 101..206")
+    if config.selection_validation_episodes < 1 or config.selection_validation_warmup_episodes < 0:
+        raise ValueError("selection validation episode counts are invalid")
     expected_version = PAPER_SEMANTIC_VERSION if config.profile == "paper_faithful" else LEGACY_SEMANTIC_VERSION
     if config.semantic_version != expected_version:
         raise ValueError(f"{config.profile} requires semantic_version={expected_version}")
@@ -431,6 +447,9 @@ _FORMAL_PAPER_VALUES: Dict[str, Any] = {
     "include_remaining_time": True,
     "current_interference_reward": True,
     "global_update_mode": "synchronous_joint",
+    "selection_validation_seeds": [301, 302],
+    "selection_validation_episodes": 5,
+    "selection_validation_warmup_episodes": 1,
     "initial_aoi_ms": 100.0,
     "eval_protocol": "sequential_warm",
     "eval_warmup_episodes": 5,
@@ -567,6 +586,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", default=None)
     parser.add_argument("--checkpoint-every", type=_positive_int, default=None)
     parser.add_argument(
+        "--global-actor-mode",
+        choices=("synchronous_joint", "detached_actor", "legacy_detach"),
+        default=None,
+        help="actor contribution of the global critic; legacy_detach is reserved for --profile legacy_release",
+    )
+    parser.add_argument("--diagnostics", action="store_true", help="record episode-aggregated actor-gradient diagnostics")
+    parser.add_argument("--eval-noise", type=float, default=0.0, help="Gaussian action noise used only by --eval-only")
+    parser.add_argument(
         "--recover-empty-run",
         action="store_true",
         help="reuse only a provenance-verified formal run initialized before its first checkpoint",
@@ -588,6 +615,8 @@ def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         "episodes": args.episodes,
         "steps_per_episode": args.steps_per_episode,
         "checkpoint_every": args.checkpoint_every,
+        "global_update_mode": args.global_actor_mode,
+        "diagnostics": bool(args.diagnostics),
         "power_min_dbm": args.power_min_dbm,
         "power_max_dbm": args.power_max_dbm,
     }
