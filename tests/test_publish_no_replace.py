@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -31,6 +32,9 @@ def _write_complete_staging(parent: Path, name: str = ".run.init-staging") -> Pa
 
 
 def _force_renameat2_errno(monkeypatch, code: int):
+    if not sys.platform.startswith("linux"):
+        pytest.skip("renameat2(RENAME_NOREPLACE) tests require Linux")
+
     def _boom(staging: Path, run_dir: Path) -> None:
         raise OSError(code, os.strerror(code), str(run_dir))
 
@@ -187,7 +191,12 @@ def test_interrupted_after_mkdir_reservation_hard_rejects_recovery(monkeypatch, 
     assert list(run_dir.iterdir()) == []
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="real NFS probe requires Linux")
 def test_real_nfs_mkdir_reservation_replace_under_eeedata():
+    storage_root = Path("/eeedata/sgxjw2")
+    if not storage_root.is_dir() or not os.access(storage_root, os.W_OK):
+        pytest.skip("/eeedata/sgxjw2 is not an available writable HPC storage root")
+
     base = Path("/eeedata/sgxjw2/tmp/pytest_nfs_publish_probe")
     base.mkdir(parents=True, exist_ok=True)
     case = base / f"case_{os.getpid()}"
