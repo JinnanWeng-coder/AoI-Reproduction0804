@@ -165,6 +165,65 @@ def test_hpc_readme_documents_tau005_confirmation_submission():
         assert token in readme
 
 
+def test_gap_trend_array_adds_only_two_missing_gap_anchors():
+    script = _read("aoi_gap_trend_array.sbatch")
+    for token in (
+        "#SBATCH --array=0-11%8",
+        "task_count=12",
+        "task_count=24",
+        "scenarios=(p05_n04_g05 p05_n04_g35)",
+        "seeds=(2 3 4 5 6 7)",
+        "checkpoint_names=(best.pt latest.pt)",
+        'TAU="0.005"',
+        'SLOW_INTERVAL="1"',
+        'TRAIN_NOISE="0.3"',
+        'EVAL_NOISE="0.3"',
+        "--profile paper_faithful",
+        "--episodes 500",
+        '--tau "$TAU"',
+        '--slow-update-every-episodes "$SLOW_INTERVAL"',
+        "--global-actor-mode synchronous_joint",
+        "--diagnostics",
+        "--diagnostic-eval",
+        "--eval-episodes 100",
+        "--eval-seeds",
+        '--eval-noise "$EVAL_NOISE"',
+        "AoI-Reproduction-diagnostics/gap-trend-v1",
+    ):
+        assert token in script
+    for forbidden in (
+        "p05_n04_g25",
+        "legacy_release",
+        "detached_actor",
+        "final_test",
+        "noise-decay",
+        "600",
+        "PILOT_APPROVED",
+        "TRAIN_APPROVED",
+    ):
+        assert forbidden not in script
+
+
+def test_hpc_readme_documents_gap_trend_dependency_and_reused_anchor():
+    readme = _read("README_HPC.md")
+    for token in (
+        "Tau 0.005 gap-trend pilot",
+        "aoi_gap_trend_array.sbatch",
+        "p05_n04_g05",
+        "p05_n04_g35",
+        "tau005-confirm-v1",
+        "--array=0-11%8",
+        "--array=0-23%8",
+        'dependency=afterok:',
+        "best.pt",
+        "latest.pt",
+        "noise 0.3",
+        "binary endpoint CAM",
+        "payload completion",
+    ):
+        assert token in readme
+
+
 def test_pilot_preserves_exact_formal_identity_and_validation_split():
     script = _read("aoi_pilot_1gpu.sbatch")
     for token in (

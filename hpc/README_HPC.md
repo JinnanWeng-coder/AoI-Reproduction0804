@@ -274,3 +274,36 @@ tau005_eval_job=$(sbatch --parsable \
 This is a diagnostic confirmation, not the formal matrix. Do not run
 `final_test`, add another experiment variable, or treat a partial result as a
 paper-wide reproduction.
+
+## Tau 0.005 gap-trend pilot
+
+`aoi_gap_trend_array.sbatch` is the smallest follow-up that tests the Fig. 5
+intra-platoon-gap direction without rerunning the completed 25 m anchor. It
+adds only `p05_n04_g05` and `p05_n04_g35`; the six `p05_n04_g25` runs and their
+noise-0.3 evaluations are reused from `tau005-confirm-v1` during analysis.
+
+Both new scenarios keep `paper_faithful`, `tau=0.005`, synchronous global
+actor updates, `slow_update_every_episodes=1`, 500 episodes, fixed training
+noise 0.3 and seeds 2..7. The training stage therefore has 12 tasks. The
+dependent 24-task validation stage evaluates `best.pt` and `latest.pt` only at
+noise 0.3 on held-out seeds 201..206 with 100 scored episodes and the existing
+warm-up protocol. It deliberately does not repeat the noise-zero robustness
+test.
+
+```bash
+mkdir -p /eeedata/sgxjw2/AoI-Reproduction-diagnostics/gap-trend-v1/slurm_logs
+
+gap_train_job=$(sbatch --parsable --array=0-11%8 \
+  --export=ALL,AOI_STAGE=train hpc/aoi_gap_trend_array.sbatch)
+
+gap_eval_job=$(sbatch --parsable \
+  --dependency=afterok:"$gap_train_job" --array=0-23%8 \
+  --export=ALL,AOI_STAGE=eval hpc/aoi_gap_trend_array.sbatch)
+```
+
+After both stages complete, combine the new 5 m and 35 m artifacts with the
+existing 25 m anchor. Report final-100 training and held-out evaluation values
+for AoI, strict binary endpoint CAM and continuous endpoint payload completion;
+the continuous audit metric must not replace or relabel the released binary
+CAM metric. This pilot is not the formal matrix, does not run `final_test`, and
+does not establish the paper-wide comparison against other algorithms.
