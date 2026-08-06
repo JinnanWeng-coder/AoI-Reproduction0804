@@ -224,6 +224,57 @@ def test_hpc_readme_documents_gap_trend_dependency_and_reused_anchor():
         assert token in readme
 
 
+def test_gap15_fill_array_is_six_training_cells_only():
+    script = _read("aoi_gap15_fill_array.sbatch")
+    for token in (
+        "#SBATCH --array=0-5%6",
+        "seeds=(2 3 4 5 6 7)",
+        'SCENARIO="p05_n04_g15"',
+        'TAU="0.005"',
+        'SLOW_INTERVAL="1"',
+        'TRAIN_NOISE="0.3"',
+        "--profile paper_faithful",
+        "--episodes 500",
+        '--tau "$TAU"',
+        '--slow-update-every-episodes "$SLOW_INTERVAL"',
+        "--global-actor-mode synchronous_joint",
+        "--diagnostics",
+        "--scope train",
+        "primary_metric_window=last100",
+        "AoI-Reproduction-diagnostics/gap15-fill-v1",
+    ):
+        assert token in script
+    for forbidden in (
+        "AOI_STAGE",
+        "--eval-only",
+        "--eval-purpose",
+        "--eval-seeds",
+        "--eval-noise",
+        "p05_n04_g05",
+        "p05_n04_g25",
+        "p05_n04_g35",
+        "final_test",
+        "PILOT_APPROVED",
+        "TRAIN_APPROVED",
+    ):
+        assert forbidden not in script
+
+
+def test_hpc_readme_documents_gap15_as_train_last100_only():
+    readme = _read("README_HPC.md")
+    for token in (
+        "Gap 15 source-protocol fill",
+        "aoi_gap15_fill_array.sbatch",
+        "p05_n04_g15",
+        "--array=0-5%6",
+        "final 100 training episodes",
+        "held-out eval array",
+        "strict binary endpoint CAM",
+        "continuous endpoint payload completion",
+    ):
+        assert token in readme
+
+
 def test_pilot_preserves_exact_formal_identity_and_validation_split():
     script = _read("aoi_pilot_1gpu.sbatch")
     for token in (

@@ -307,3 +307,25 @@ for AoI, strict binary endpoint CAM and continuous endpoint payload completion;
 the continuous audit metric must not replace or relabel the released binary
 CAM metric. This pilot is not the formal matrix, does not run `final_test`, and
 does not establish the paper-wide comparison against other algorithms.
+
+## Gap 15 source-protocol fill
+
+`aoi_gap15_fill_array.sbatch` adds the one missing Fig. 5(a)/(b) gap point
+without changing the learner or rerunning the completed 5 m, 25 m, and 35 m
+cells. It trains only `p05_n04_g15` with seeds 2..7, `paper_faithful`,
+`tau=0.005`, synchronous global actor updates,
+`slow_update_every_episodes=1`, 500 episodes, and the released fixed training
+noise 0.3. The primary result is the final 100 training episodes; there is no
+held-out eval array and no best/latest checkpoint gate in this bounded run.
+
+```bash
+mkdir -p /eeedata/sgxjw2/AoI-Reproduction-diagnostics/gap15-fill-v1/slurm_logs
+
+gap15_train_job=$(sbatch --parsable --array=0-5%6 \
+  hpc/aoi_gap15_fill_array.sbatch)
+```
+
+After all six cells complete, combine their final-100 training summaries with
+the existing gap-trend evidence for 5 m, 25 m, and 35 m. Keep mean AoI, strict
+binary endpoint CAM, and continuous endpoint payload completion separate. This
+run does not submit validation, `formal matrix`, or `final_test` jobs.
