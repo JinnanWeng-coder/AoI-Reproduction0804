@@ -275,6 +275,66 @@ def test_hpc_readme_documents_gap15_as_train_last100_only():
         assert token in readme
 
 
+def test_gap_global_slow_array_is_exactly_24_plus_18_training_cells():
+    script = _read("aoi_gap_global_slow_42_array.sbatch")
+    for token in (
+        "#SBATCH --array=0-23%8",
+        'PHASE="${AOI_PHASE:-A}"',
+        "PHASE_A_CELL_COUNT=24",
+        "PHASE_B_CELL_COUNT=18",
+        "TOTAL_UNIQUE_TRAINING_CELLS=42",
+        "seeds=(8 9 10 11 12 13)",
+        "phase_a_scenarios=(p05_n04_g05 p05_n04_g15 p05_n04_g25 p05_n04_g35)",
+        "phase_b_arm_labels=(sync_slow20 detached_slow01 detached_slow20)",
+        "phase_b_slow_intervals=(20 1 20)",
+        "phase_b_global_modes=(synchronous_joint detached_actor detached_actor)",
+        'TAU="0.005"',
+        'TRAIN_NOISE="0.3"',
+        "--profile paper_faithful",
+        "--episodes 500",
+        '--tau "$TAU"',
+        '--slow-update-every-episodes "$slow_interval"',
+        '--global-actor-mode "$global_mode"',
+        "--diagnostics",
+        "--scope train",
+        "primary_metric_window=last100",
+        "secondary_metric_window=last50",
+        "AoI-Reproduction-diagnostics/gap-global-slow-42-v1",
+    ):
+        assert token in script
+    for forbidden in (
+        "--eval-only",
+        "--eval-purpose",
+        "--eval-seeds",
+        "--eval-noise",
+        "legacy_release",
+        "final_test",
+        "PILOT_APPROVED",
+        "TRAIN_APPROVED",
+    ):
+        assert forbidden not in script
+
+
+def test_hpc_readme_documents_gap_global_slow_42_cell_submission():
+    readme = _read("README_HPC.md")
+    for token in (
+        "Seeds 8--13 gap and gap-25 mechanism check (42 training cells)",
+        "aoi_gap_global_slow_42_array.sbatch",
+        "4 gaps x 6 seeds = 24",
+        "3 arms x 6 seeds = 18",
+        "24 + 18 = 42",
+        "--array=0-23%8",
+        "--array=0-17%8",
+        "AOI_PHASE=A",
+        "AOI_PHASE=B",
+        'dependency=afterok:',
+        "final 100 episodes",
+        "final 50",
+        "gap 25 only",
+    ):
+        assert token in readme
+
+
 def test_pilot_preserves_exact_formal_identity_and_validation_split():
     script = _read("aoi_pilot_1gpu.sbatch")
     for token in (

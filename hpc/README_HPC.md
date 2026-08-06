@@ -329,3 +329,41 @@ After all six cells complete, combine their final-100 training summaries with
 the existing gap-trend evidence for 5 m, 25 m, and 35 m. Keep mean AoI, strict
 binary endpoint CAM, and continuous endpoint payload completion separate. This
 run does not submit validation, `formal matrix`, or `final_test` jobs.
+
+## Seeds 8--13 gap and gap-25 mechanism check (42 training cells)
+
+`aoi_gap_global_slow_42_array.sbatch` extends the training-only evidence with
+seeds 8..13 while keeping `paper_faithful`, `tau=0.005`, 500 episodes, and the
+released fixed training noise 0.3. It has two non-overlapping phases under the
+isolated result root
+`/eeedata/sgxjw2/AoI-Reproduction-diagnostics/gap-global-slow-42-v1`:
+
+- Phase A is the paper-facing arm: four gaps (5, 15, 25, and 35 m),
+  synchronous global actor, and `slow_update_every_episodes=1`. It contains
+  `4 gaps x 6 seeds = 24` training cells.
+- Phase B is a mechanism check at the default 25 m anchor only. It adds the
+  other three members of the 2 x 2 global-mode/slow-update design:
+  synchronous/20, detached/1, and detached/20. The synchronous/1 baseline is
+  already present in Phase A, so Phase B contains `3 arms x 6 seeds = 18`
+  additional training cells.
+
+The union is therefore exactly `24 + 18 = 42` unique training cells. Submit
+Phase B after Phase A so that completion accounting and the shared gap-25
+baseline are easy to audit:
+
+```bash
+mkdir -p /eeedata/sgxjw2/AoI-Reproduction-diagnostics/gap-global-slow-42-v1/slurm_logs
+
+phase_a_job=$(sbatch --parsable --array=0-23%8 \
+  --export=ALL,AOI_PHASE=A hpc/aoi_gap_global_slow_42_array.sbatch)
+
+phase_b_job=$(sbatch --parsable --dependency=afterok:"$phase_a_job" \
+  --array=0-17%8 --export=ALL,AOI_PHASE=B \
+  hpc/aoi_gap_global_slow_42_array.sbatch)
+```
+
+This round is training-only. Use the final 100 episodes as the primary window
+and the final 50 as a sensitivity check; keep mean/worst-agent AoI, strict
+binary endpoint CAM, and continuous payload completion separate. Phase B can
+support conclusions about the mechanism at gap 25 only. Do not submit an eval
+array, the formal matrix, or `final_test`.
