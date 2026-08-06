@@ -246,3 +246,31 @@ tau_slow_eval_job=$(sbatch --parsable \
 Do not submit the formal matrix or `final_test` for this diagnostic. A repeated
 submission resumes incomplete training and skips already completed matching
 validation tasks.
+
+## Tau 0.005 six-seed confirmation
+
+`aoi_tau005_confirm_array.sbatch` is the bounded follow-up stability check. It
+keeps the `paper_faithful` environment, `p05_n04_g25`, synchronous global actor,
+500 episodes, fixed training noise 0.3 and `slow_update_every_episodes=1`. The
+only investigated setting is `tau=0.005`, trained with seeds 2..7 under the
+isolated result root
+`/eeedata/sgxjw2/AoI-Reproduction-diagnostics/tau005-confirm-v1`.
+
+The train stage has six tasks. The dependent 24-task eval stage runs
+`best.pt` and `latest.pt` at noise 0 and 0.3 on held-out validation seeds
+201..206, with 100 scored episodes and the existing warm-up protocol:
+
+```bash
+mkdir -p /eeedata/sgxjw2/AoI-Reproduction-diagnostics/tau005-confirm-v1/slurm_logs
+
+tau005_train_job=$(sbatch --parsable --array=0-5%6 \
+  --export=ALL,AOI_STAGE=train hpc/aoi_tau005_confirm_array.sbatch)
+
+tau005_eval_job=$(sbatch --parsable \
+  --dependency=afterok:"$tau005_train_job" --array=0-23%8 \
+  --export=ALL,AOI_STAGE=eval hpc/aoi_tau005_confirm_array.sbatch)
+```
+
+This is a diagnostic confirmation, not the formal matrix. Do not run
+`final_test`, add another experiment variable, or treat a partial result as a
+paper-wide reproduction.

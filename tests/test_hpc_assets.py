@@ -120,6 +120,51 @@ def test_hpc_readme_documents_tau_slow_dependency_and_two_checkpoints():
         assert token in readme
 
 
+def test_tau005_confirmation_array_is_exactly_six_train_and_twenty_four_eval_tasks():
+    script = _read("aoi_tau005_confirm_array.sbatch")
+    for token in (
+        "#SBATCH --array=0-5%6",
+        "task_count=6",
+        "task_count=24",
+        "seeds=(2 3 4 5 6 7)",
+        'TAU="0.005"',
+        'SLOW_INTERVAL="1"',
+        'SCENARIO="p05_n04_g25"',
+        "checkpoint_names=(best.pt latest.pt)",
+        "noises=(0 0.3)",
+        "--profile paper_faithful",
+        "--episodes 500",
+        '--tau "$TAU"',
+        '--slow-update-every-episodes "$SLOW_INTERVAL"',
+        "--global-actor-mode synchronous_joint",
+        "--diagnostics",
+        "--diagnostic-eval",
+        "--eval-episodes 100",
+        "--eval-seeds",
+        "--eval-noise",
+        "AoI-Reproduction-diagnostics/tau005-confirm-v1",
+    ):
+        assert token in script
+    for forbidden in ("legacy_release", "detached_actor", "final_test", "noise-decay", "600"):
+        assert forbidden not in script
+    assert "PILOT_APPROVED" not in script
+    assert "TRAIN_APPROVED" not in script
+
+
+def test_hpc_readme_documents_tau005_confirmation_submission():
+    readme = _read("README_HPC.md")
+    for token in (
+        "Tau 0.005 six-seed confirmation",
+        "aoi_tau005_confirm_array.sbatch",
+        "--array=0-5%6",
+        "--array=0-23%8",
+        'dependency=afterok:',
+        "fixed training noise 0.3",
+        "201..206",
+    ):
+        assert token in readme
+
+
 def test_pilot_preserves_exact_formal_identity_and_validation_split():
     script = _read("aoi_pilot_1gpu.sbatch")
     for token in (
