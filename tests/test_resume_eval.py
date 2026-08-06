@@ -10,6 +10,7 @@ import torch
 from config import resolve_config
 from checkpointing import capture_rng_state, restore_rng_state
 from Classes.Environment_Platoon import PaperEnviron
+from analysis.audit_results import audit_eval
 import runner as runner_module
 from runner import _load_checkpoint
 from runner import evaluate_from_checkpoint, train
@@ -349,3 +350,60 @@ def test_eval_noise_sweep_can_coexist_and_is_bounded(tmp_path):
         evaluate_from_checkpoint(
             config, str(checkpoint), eval_episodes=1, eval_seeds=[201], eval_purpose="validation", scope="validation", eval_noise=1.01
         )
+
+
+def test_diagnostic_noise_zero_evaluates_best_and_latest_without_release_marker(tmp_path):
+    config = _small_config(tmp_path / "diagnostic_checkpoints", "run")
+    config.diagnostics = True
+    result = train(config)
+    run_dir = Path(result["run_dir"])
+
+    best = evaluate_from_checkpoint(
+        config,
+        str(run_dir / "checkpoints" / "best.pt"),
+        eval_episodes=1,
+        eval_seeds=[201],
+        eval_purpose="validation",
+        scope="validation",
+        eval_noise=0.0,
+        diagnostic_eval=True,
+    )
+    latest = evaluate_from_checkpoint(
+        config,
+        str(run_dir / "checkpoints" / "latest.pt"),
+        eval_episodes=1,
+        eval_seeds=[201],
+        eval_purpose="validation",
+        scope="validation",
+        eval_noise=0.0,
+        diagnostic_eval=True,
+    )
+
+    assert best["release_status"] == latest["release_status"] == "diagnostic_evaluation"
+    assert best["diagnostic_evaluation"] is True
+    assert latest["diagnostic_evaluation"] is True
+    assert best["eval_dir"] != latest["eval_dir"]
+    assert not (run_dir / "VALIDATION_READY.json").exists()
+    assert audit_eval(Path(best["eval_dir"]))["ok"] is True
+    assert audit_eval(Path(latest["eval_dir"]))["ok"] is True
+
+
+def test_training_diagnostics_alone_keep_normal_validation_lifecycle(tmp_path):
+    config = _small_config(tmp_path / "instrumented_validation", "run")
+    config.diagnostics = True
+    result = train(config)
+    run_dir = Path(result["run_dir"])
+
+    evaluated = evaluate_from_checkpoint(
+        config,
+        str(run_dir / "checkpoints" / "best.pt"),
+        eval_episodes=1,
+        eval_seeds=[201],
+        eval_purpose="validation",
+        scope="validation",
+        eval_noise=0.0,
+    )
+
+    assert evaluated["release_status"] == "validation_ready"
+    assert evaluated["diagnostic_evaluation"] is False
+    assert (run_dir / "VALIDATION_READY.json").is_file()

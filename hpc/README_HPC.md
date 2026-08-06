@@ -212,3 +212,37 @@ Evaluation uses the selection-validation winner in `best.pt`. Resubmission skips
 completed training and evaluation cells and resumes incomplete training from
 `latest.pt`. This diagnostic is evidence for deciding the next code change; it
 is not a replacement for the formal matrix and never runs `final_test`.
+
+## Tau x slow-update recovery diagnostic
+
+`aoi_tau_slow_array.sbatch` runs the next small causal experiment entirely
+under the current `paper_faithful` environment and synchronous-global learner.
+It varies only `tau` (`0.0005`, `0.005`) and
+`slow_update_every_episodes` (`1`, `20`) for training seeds 3, 5 and 7 in the
+single `p05_n04_g25` scenario. The isolated result root is
+`/eeedata/sgxjw2/AoI-Reproduction-diagnostics/tau-slow-v1`.
+
+The 12-cell training array writes gradient/action diagnostics. The dependent
+48-task validation array evaluates both the selection winner (`best.pt`) and
+the episode-500 policy (`latest.pt`) at noise 0 and 0.3, using held-out seeds
+201..206. These full checkpoints contain the exact selected and episode-500
+actors, so no separate actor-snapshot evaluator or checkpoint download is
+needed. The eval array explicitly uses `--diagnostic-eval`, so its noise-zero
+evaluations do not create the single `VALIDATION_READY.json` lifecycle marker.
+This allows the two checkpoints to coexist without changing ordinary
+validation or training-instrumentation semantics.
+
+```bash
+mkdir -p /eeedata/sgxjw2/AoI-Reproduction-diagnostics/tau-slow-v1/slurm_logs
+
+tau_slow_train_job=$(sbatch --parsable --array=0-11%8 \
+  --export=ALL,AOI_STAGE=train hpc/aoi_tau_slow_array.sbatch)
+
+tau_slow_eval_job=$(sbatch --parsable \
+  --dependency=afterok:"$tau_slow_train_job" --array=0-47%8 \
+  --export=ALL,AOI_STAGE=eval hpc/aoi_tau_slow_array.sbatch)
+```
+
+Do not submit the formal matrix or `final_test` for this diagnostic. A repeated
+submission resumes incomplete training and skips already completed matching
+validation tasks.

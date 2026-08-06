@@ -602,7 +602,16 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
         expected_scope = "validation" if purpose == "validation" else "final_release"
         if summary.get("scope") != expected_scope:
             errors.append("eval_scope")
-        expected_release_status = "validation_ready" if purpose == "validation" else ("final_release" if summary.get("is_formal_result") else "evaluation_complete")
+        diagnostic_evaluation = summary.get("diagnostic_evaluation")
+        if diagnostic_evaluation is None:
+            # Backward compatibility for diagnostic noise sweeps written
+            # before the explicit diagnostic_evaluation field existed.
+            diagnostic_evaluation = float(summary.get("eval_noise", 0.0)) > 0.0
+        expected_release_status = (
+            "diagnostic_evaluation"
+            if diagnostic_evaluation
+            else ("validation_ready" if purpose == "validation" else ("final_release" if summary.get("is_formal_result") else "evaluation_complete"))
+        )
         if summary.get("release_status") != expected_release_status:
             errors.append("eval_release_status")
         if summary.get("statistics_schema_version") != "eval_seed_cluster_v1":
@@ -748,7 +757,7 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
                 errors.append(f"eval_config_resolve:{exc}")
         if provenance is not None:
             for key in (
-                "semantic_version", "config_hash", "eval_purpose", "eval_noise", "scope", "release_status",
+                "semantic_version", "config_hash", "eval_purpose", "eval_noise", "scope", "release_status", "diagnostic_evaluation",
                 "eval_id",
                 "training_device_config", "evaluation_device_requested", "evaluation_device_resolved",
                 "statistics_schema_version", "checkpoint_sha256", "checkpoint_schema_version",

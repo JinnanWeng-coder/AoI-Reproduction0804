@@ -59,8 +59,32 @@ def test_diagnostics_and_eval_noise_cli_are_default_off():
     config = config_from_args(args)
     assert config.diagnostics is False
     assert args.eval_noise == 0.0
-    args = parser.parse_args(["--global-actor-mode", "detached_actor", "--diagnostics", "--eval-noise", "0.3"])
+    assert args.diagnostic_eval is False
+    args = parser.parse_args([
+        "--global-actor-mode", "detached_actor",
+        "--diagnostics",
+        "--eval-noise", "0.3",
+        "--diagnostic-eval",
+        "--tau", "0.005",
+        "--slow-update-every-episodes", "20",
+    ])
     config = config_from_args(args)
     assert config.global_update_mode == "detached_actor"
     assert config.diagnostics is True
+    assert config.tau == pytest.approx(0.005)
+    assert config.slow_update_every_episodes == 20
     assert args.eval_noise == 0.3
+    assert args.diagnostic_eval is True
+
+
+@pytest.mark.parametrize("tau", [0.0, -0.001, 1.01, float("inf")])
+def test_invalid_tau_is_rejected(tau):
+    with pytest.raises(ValueError, match="tau"):
+        resolve_config("paper_faithful", "p05_n04_g25", tau=tau)
+
+
+def test_diagnostic_eval_flag_is_not_valid_for_training():
+    from Main import main
+
+    with pytest.raises(SystemExit, match="only valid with --eval-only"):
+        main(["--diagnostic-eval", "--dry-run"])

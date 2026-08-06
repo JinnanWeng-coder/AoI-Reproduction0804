@@ -1046,6 +1046,7 @@ def evaluate_from_checkpoint(
     eval_purpose: Optional[str] = None,
     scope: Optional[str] = None,
     eval_noise: float = 0.0,
+    diagnostic_eval: bool = False,
 ) -> Dict[str, Any]:
     if eval_purpose not in EVAL_PURPOSE_SEEDS:
         raise ValueError("eval_purpose must be explicitly set to validation or final_test")
@@ -1091,8 +1092,11 @@ def evaluate_from_checkpoint(
     eval_dir = run_dir / "eval" / eval_id
     if eval_dir.exists():
         raise FileExistsError(f"Refusing to overwrite existing eval directory: {eval_dir}")
-    diagnostic_noise_eval = eval_noise > 0.0
-    marker_path = None if diagnostic_noise_eval else run_dir / ("VALIDATION_READY.json" if scope == "validation" else "FINAL_RELEASE.json")
+    # Explicit diagnostic evaluations may compare more than one frozen
+    # checkpoint at noise=0 without contending for a release lifecycle marker.
+    # Training-time instrumentation alone does not change release semantics.
+    is_diagnostic_eval = bool(diagnostic_eval) or eval_noise > 0.0
+    marker_path = None if is_diagnostic_eval else run_dir / ("VALIDATION_READY.json" if scope == "validation" else "FINAL_RELEASE.json")
     if marker_path is not None and marker_path.exists():
         raise FileExistsError(f"Refusing to overwrite lifecycle marker: {marker_path}")
     _validate_formal_eval_preconditions(run_dir, checkpoint_path, checkpoint_preview, config)
@@ -1283,13 +1287,14 @@ def evaluate_from_checkpoint(
     sd_aoi = aoi_episode_seed_agent.mean(axis=2).std(axis=1, ddof=1) if int(eval_episodes) > 1 else np.zeros(len(eval_seeds))
     sd_success = endpoint_episode_seed_agent.mean(axis=2).std(axis=1, ddof=1) if int(eval_episodes) > 1 else np.zeros(len(eval_seeds))
     checkpoint_reference = os.path.relpath(checkpoint_path, run_dir).replace(os.sep, "/")
-    formal_eval = bool(config.is_formal_result and eval_purpose == "final_test" and not diagnostic_noise_eval)
+    formal_eval = bool(config.is_formal_result and eval_purpose == "final_test" and not is_diagnostic_eval)
     eval_git = _git_metadata()
     summary = {
         "eval_id": eval_id,
         "eval_purpose": eval_purpose,
         "scope": scope,
-        "release_status": "diagnostic_evaluation" if diagnostic_noise_eval else ("validation_ready" if scope == "validation" else ("final_release" if formal_eval else "evaluation_complete")),
+        "release_status": "diagnostic_evaluation" if is_diagnostic_eval else ("validation_ready" if scope == "validation" else ("final_release" if formal_eval else "evaluation_complete")),
+        "diagnostic_evaluation": is_diagnostic_eval,
         "statistics_schema_version": EVAL_STATISTICS_SCHEMA_VERSION,
         "eval_seeds": [int(seed) for seed in eval_seeds],
         "eval_episodes": int(eval_episodes),
@@ -1414,7 +1419,8 @@ def evaluate_from_checkpoint(
         "cuda_driver": eval_git.get("cuda_driver"),
         "gpu_names": eval_git.get("gpu_names", []),
         "scope": scope,
-        "release_status": "diagnostic_evaluation" if diagnostic_noise_eval else ("validation_ready" if scope == "validation" else ("final_release" if formal_eval else "evaluation_complete")),
+        "release_status": "diagnostic_evaluation" if is_diagnostic_eval else ("validation_ready" if scope == "validation" else ("final_release" if formal_eval else "evaluation_complete")),
+        "diagnostic_evaluation": is_diagnostic_eval,
     }
     _write_json(eval_dir / "provenance.json", eval_provenance)
     _write_json(eval_dir / "summary.json", summary)

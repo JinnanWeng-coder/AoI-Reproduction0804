@@ -79,6 +79,47 @@ def test_hpc_readme_keeps_diagnostic_and_formal_arrays_distinct():
         assert token in readme
 
 
+def test_tau_slow_array_is_the_bounded_two_by_two_recovery_experiment():
+    script = _read("aoi_tau_slow_array.sbatch")
+    for token in (
+        "#SBATCH --array=0-11%8",
+        "task_count=12",
+        "task_count=48",
+        "taus=(0.0005 0.005)",
+        "slow_intervals=(1 20)",
+        "seeds=(3 5 7)",
+        "checkpoint_names=(best.pt latest.pt)",
+        "noises=(0 0.3)",
+        '--profile paper_faithful',
+        '--global-actor-mode synchronous_joint',
+        '--tau "$tau"',
+        '--slow-update-every-episodes "$slow_interval"',
+        "--diagnostics",
+        "--diagnostic-eval",
+        "--eval-purpose validation",
+        "--eval-seeds",
+        "AoI-Reproduction-diagnostics/tau-slow-v1",
+    ):
+        assert token in script
+    assert "legacy_release" not in script
+    assert "detached_actor" not in script
+    assert "final_test" not in script
+
+
+def test_hpc_readme_documents_tau_slow_dependency_and_two_checkpoints():
+    readme = _read("README_HPC.md")
+    for token in (
+        "Tau x slow-update recovery diagnostic",
+        "--array=0-11%8",
+        "--array=0-47%8",
+        'dependency=afterok:',
+        "`best.pt`",
+        "`latest.pt`",
+        "201..206",
+    ):
+        assert token in readme
+
+
 def test_pilot_preserves_exact_formal_identity_and_validation_split():
     script = _read("aoi_pilot_1gpu.sbatch")
     for token in (

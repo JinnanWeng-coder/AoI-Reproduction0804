@@ -11,6 +11,8 @@ from config import build_parser, config_from_args, matrix_specs
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     config = config_from_args(args)
+    if args.diagnostic_eval and not args.eval_only:
+        raise SystemExit("--diagnostic-eval is only valid with --eval-only")
     if args.dry_run:
         print(json.dumps(config.to_dict(), indent=2, sort_keys=True))
         print(f"state_dim={config.state_dim} action_dim={config.action_dim}")
@@ -19,6 +21,7 @@ def main(argv=None) -> int:
         print(f"scope={args.scope}")
         print(f"eval_purpose={args.eval_purpose}")
         print(f"eval_noise={args.eval_noise}")
+        print(f"diagnostic_eval={args.diagnostic_eval}")
         print(f"recover_empty_run={args.recover_empty_run}")
         print("validation_eval_seeds=201,202,203,204,205,206")
         print("final_test_eval_seeds=101,102,103,104,105,106")
@@ -51,6 +54,7 @@ def main(argv=None) -> int:
             args.eval_purpose,
             scope=args.scope,
             eval_noise=args.eval_noise,
+            diagnostic_eval=args.diagnostic_eval,
         )
     else:
         if args.scope != "train":

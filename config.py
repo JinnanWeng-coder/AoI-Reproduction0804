@@ -361,6 +361,10 @@ def config_from_dict(data: Dict[str, Any]) -> ExperimentConfig:
 def validate_config(config: ExperimentConfig) -> None:
     if config.episodes < 1 or config.steps_per_episode < 1:
         raise ValueError("episodes and steps_per_episode must be positive")
+    if not math.isfinite(config.tau) or not 0.0 < config.tau <= 1.0:
+        raise ValueError("tau must be finite and in (0, 1]")
+    if config.slow_update_every_episodes < 1:
+        raise ValueError("slow_update_every_episodes must be positive")
     if config.n_rb < 1 or config.n_modes < 2:
         raise ValueError("n_rb and n_modes are invalid")
     if config.power_min_dbm < 0 or config.power_max_dbm <= config.power_min_dbm:
@@ -585,6 +589,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-purpose", choices=("validation", "final_test"), default=None)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--checkpoint-every", type=_positive_int, default=None)
+    parser.add_argument("--tau", type=float, default=None, help="target-network soft-update coefficient")
+    parser.add_argument(
+        "--slow-update-every-episodes",
+        type=_positive_int,
+        default=None,
+        help="episodes between mobility and large-scale channel updates",
+    )
     parser.add_argument(
         "--global-actor-mode",
         choices=("synchronous_joint", "detached_actor", "legacy_detach"),
@@ -593,6 +604,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--diagnostics", action="store_true", help="record episode-aggregated actor-gradient diagnostics")
     parser.add_argument("--eval-noise", type=float, default=0.0, help="Gaussian action noise used only by --eval-only")
+    parser.add_argument(
+        "--diagnostic-eval",
+        action="store_true",
+        help="write an eval-only artifact without claiming a validation/final-release lifecycle marker",
+    )
     parser.add_argument(
         "--recover-empty-run",
         action="store_true",
@@ -615,6 +631,8 @@ def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         "episodes": args.episodes,
         "steps_per_episode": args.steps_per_episode,
         "checkpoint_every": args.checkpoint_every,
+        "tau": args.tau,
+        "slow_update_every_episodes": args.slow_update_every_episodes,
         "global_update_mode": args.global_actor_mode,
         "diagnostics": bool(args.diagnostics),
         "power_min_dbm": args.power_min_dbm,
