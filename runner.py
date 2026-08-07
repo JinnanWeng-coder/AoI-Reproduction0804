@@ -116,6 +116,7 @@ def _make_system(config):
         power_min_dbm=config.power_min_dbm,
         power_max_dbm=config.power_max_dbm,
         diagnostics=config.diagnostics,
+        algorithm=config.algorithm,
     )
     return environment, agents, learner, replay, metrics, device
 
@@ -307,6 +308,7 @@ def _config_identity_from_dict(data: Dict[str, Any]) -> Dict[str, Any]:
     scenario = data.get("scenario")
     scenario_id = scenario.get("id") if isinstance(scenario, dict) else scenario
     return {
+        "algorithm": data.get("algorithm", "modified_maddpg_tdec"),
         "profile": data.get("profile"),
         "scenario": scenario_id,
         "seed": data.get("seed"),
@@ -455,6 +457,7 @@ def _run_provenance(config: ExperimentConfig, git: Dict[str, Any]) -> Dict[str, 
         "cuda_device_count": int(torch.cuda.device_count()),
         "cuda_version": torch.version.cuda,
         "source_manifest_sha256": _source_manifest_digest(),
+        "algorithm": config.algorithm,
         "profile": config.profile,
         "semantic_version": config.semantic_version,
         "config_hash": config.canonical_hash(),
@@ -607,6 +610,12 @@ def _load_checkpoint(path: Path, config, agents, learner, replay, environment, m
     # load_state_dict calls below copy their tensors to the live parameter
     # device, while CPU-only RNG state remains valid for torch.set_rng_state.
     payload = torch.load(path, map_location="cpu", weights_only=False)
+    raw_checkpoint_config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+    checkpoint_algorithm = payload.get("algorithm", raw_checkpoint_config.get("algorithm", "modified_maddpg_tdec"))
+    if checkpoint_algorithm != config.algorithm:
+        raise ValueError(
+            f"checkpoint algorithm mismatch: checkpoint={checkpoint_algorithm!r}, resolved={config.algorithm!r}"
+        )
     checkpoint_semantic_version = payload.get("semantic_version")
     checkpoint_version = int(payload.get("checkpoint_version", 0))
     legacy_compat = False
@@ -909,6 +918,7 @@ def train(
         "status": "complete",
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "is_formal_result": bool(config.is_formal_result),
+        "algorithm": config.algorithm,
         "profile": config.profile,
         "semantic_version": config.semantic_version,
         "mobility_revision": config.mobility_revision,
@@ -1290,6 +1300,7 @@ def evaluate_from_checkpoint(
     formal_eval = bool(config.is_formal_result and eval_purpose == "final_test" and not is_diagnostic_eval)
     eval_git = _git_metadata()
     summary = {
+        "algorithm": config.algorithm,
         "eval_id": eval_id,
         "eval_purpose": eval_purpose,
         "scope": scope,
@@ -1385,6 +1396,7 @@ def evaluate_from_checkpoint(
     }
     eval_provenance = {
         **eval_git,
+        "algorithm": config.algorithm,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "eval_id": eval_id,
         "profile": config.profile,
@@ -1427,6 +1439,7 @@ def evaluate_from_checkpoint(
     _write_json(eval_dir / "EVAL_COMPLETE.json", summary)
     if marker_path is not None:
         _write_json(marker_path, {
+            "algorithm": config.algorithm,
             "status": "validation_ready" if scope == "validation" else "final_release",
             "scope": scope,
             "eval_purpose": eval_purpose,

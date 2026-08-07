@@ -83,6 +83,7 @@ def _source_manifest_digest() -> Optional[str]:
 
 def build_payload(config, agents, learner, replay, environment, metrics, episode: int, completed: bool = False) -> Dict[str, Any]:
     payload = {
+        "algorithm": config.algorithm,
         "checkpoint_version": 4,
         "checkpoint_schema_version": "checkpoint_v4",
         "semantic_version": config.semantic_version,

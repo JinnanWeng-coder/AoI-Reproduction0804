@@ -397,3 +397,38 @@ leave-one-seed-out sensitivity, and collapsed-run counts. Keep strict binary
 endpoint CAM and continuous payload completion separate. Do not select a
 favorable seed subset, submit an eval array, run the formal matrix, or run
 `final_test`.
+
+## Modified MADDPG Algorithm 1 default confirmation
+
+`aoi_modified_maddpg_default_array.sbatch` runs the first controlled
+Algorithm 1 comparison. The environment and synchronized global actor update
+remain the same as the repaired TDec implementation; only the two task critics
+are replaced by one holistic local critic trained on `reward_task1 +
+reward_task2`. The fixed configuration is `P=5`, `N=4`, gap 25 m,
+`tau=0.005`, `slow_update_every_episodes=1`, 500 episodes, fixed training
+noise 0.3, and seeds 8..13.
+
+The six training cells are stored under
+`/eeedata/sgxjw2/AoI-Reproduction-diagnostics/Modified_MADDPG_results/default/P5_N4_gap25`:
+
+```bash
+result_root=/eeedata/sgxjw2/AoI-Reproduction-diagnostics/Modified_MADDPG_results/default/P5_N4_gap25
+mkdir -p "$result_root/slurm_logs"
+
+modified_job=$(sbatch --parsable --array=0-5%6 \
+  hpc/aoi_modified_maddpg_default_array.sbatch)
+```
+
+After all six tasks finish, run the bounded training-only summarizer:
+
+```bash
+python analysis/summarize_modified_maddpg_default.py \
+  --result-root "$result_root"
+```
+
+Use the final 100 training episodes as primary and the final 50 as a
+sensitivity window. Keep strict binary endpoint CAM and continuous payload
+completion separate. There is no eval array, formal matrix, or `final_test` in
+this round. Future gap and platoon-size experiments belong in sibling
+subdirectories `gap-extension/` and `platoon-size-extension/` under
+`Modified_MADDPG_results/`.

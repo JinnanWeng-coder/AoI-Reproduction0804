@@ -2,8 +2,10 @@
 
 The leading `1-` is part of the research-task directory name. `TDec` denotes
 the task-decomposition branch corresponding to paper Algorithm 2. This
-directory is the Modified MADDPG with TDec reproduction target; it does not
-implement a separate "Algorithm 1 training orchestration".
+directory remains the Modified MADDPG with TDec reproduction target and keeps
+that mode as its default. It also provides an explicit `modified_maddpg` mode
+for the controlled paper Algorithm 1 comparison, reusing the same repaired
+environment and synchronized global actor implementation.
 
 This directory is the reproducible implementation workspace. The original
 source is preserved under `legacy_reference/` and its provenance is recorded
@@ -38,6 +40,7 @@ torch `2.11.0+cu126`, one available CUDA device).
 
 ```text
 python Main.py --profile paper_faithful --scenario p05_n04_g25 --dry-run
+python Main.py --algorithm modified_maddpg --profile paper_faithful --scenario p05_n04_g25 --dry-run
 python Main.py --profile paper_faithful --dry-run --matrix
 ```
 
@@ -125,6 +128,16 @@ adapter also exposes unified `rb`, `mode`, and `power_dbm` info fields.
 current-interference reward, correlated urban-grid mobility, and one
 synchronized joint actor update with `global_actor_weight=1.0`.
 
+## Algorithm modes
+
+`modified_maddpg_tdec` is the backward-compatible default and uses two local
+task critics per agent. `modified_maddpg` implements paper Algorithm 1 with one
+holistic local critic per agent. The environment still records the two reward
+components for audit, but Algorithm 1 trains its sole local critic only on
+their exact sum. Algorithm identity is bound into new provenance and
+checkpoints, and cross-algorithm checkpoint loading is rejected. The first
+six-seed training-only job is `hpc/aoi_modified_maddpg_default_array.sbatch`.
+
 Fig.4 requires declared baseline artifacts. If they are missing, the figure
 command exits nonzero and writes `INCOMPLETE_BASELINES.json`; this prevents
 silently presenting the current Algorithm2/TDec curve as a complete comparison.
@@ -154,7 +167,7 @@ Modified_MADDPG_with_TDec, Modified_MADDPG, MADDPG_FDec, and DDPG for every
 scenario and training seed 2..7. The three baselines are not implemented in
 this round.
 
-This repository is ready for a staged remote Algorithm 2 validation pilot and,
-after that pilot is reviewed, the Algorithm 2 48-run validation grid. It is not
-yet a complete reproduction of the paper's cross-algorithm conclusions: the
-three comparison algorithms and their formal artifacts remain future work.
+This repository contains the repaired Algorithm 2 implementation and the
+bounded Algorithm 1 mode needed for their controlled comparison. The fully
+decentralized MADDPG and DDPG comparison implementations and their formal
+artifacts remain future work.

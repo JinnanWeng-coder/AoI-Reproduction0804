@@ -22,6 +22,8 @@ PAPER_MOBILITY_REVISION = "lane_graph_exit_safe_v1"
 LEGACY_SEMANTIC_VERSION = "legacy_release_v1"
 LEGACY_MOBILITY_REVISION = "legacy_source_v1"
 CHECKPOINT_SCHEMA_VERSION = "checkpoint_v4"
+DEFAULT_ALGORITHM = "modified_maddpg_tdec"
+SUPPORTED_ALGORITHMS = (DEFAULT_ALGORITHM, "modified_maddpg")
 
 
 DEFAULT_SCENARIOS: Dict[str, Dict[str, Any]] = {
@@ -37,6 +39,7 @@ DEFAULT_SCENARIOS: Dict[str, Dict[str, Any]] = {
 
 
 COMMON_DEFAULTS: Dict[str, Any] = {
+    "algorithm": DEFAULT_ALGORITHM,
     "semantic_version": PAPER_SEMANTIC_VERSION,
     "episodes": 500,
     "steps_per_episode": 100,
@@ -141,6 +144,7 @@ class ScenarioConfig:
 class ExperimentConfig:
     profile: str
     scenario: ScenarioConfig
+    algorithm: str = DEFAULT_ALGORITHM
     semantic_version: str = PAPER_SEMANTIC_VERSION
     seed: int = 2
     episodes: int = 500
@@ -236,6 +240,11 @@ class ExperimentConfig:
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
+        # The original checkpoint_v4 files predate the explicit algorithm
+        # field and are unambiguously TDec.  Omitting that default preserves
+        # their canonical hashes, while Algorithm 1 is always explicit.
+        if self.algorithm == DEFAULT_ALGORITHM:
+            data.pop("algorithm", None)
         data["scenario"] = asdict(self.scenario)
         data["derived"] = {
             "number_agents": self.number_agents,
@@ -359,6 +368,10 @@ def config_from_dict(data: Dict[str, Any]) -> ExperimentConfig:
 
 
 def validate_config(config: ExperimentConfig) -> None:
+    if config.algorithm not in SUPPORTED_ALGORITHMS:
+        raise ValueError(f"unsupported algorithm: {config.algorithm}")
+    if config.algorithm == "modified_maddpg" and config.profile != "paper_faithful":
+        raise ValueError("modified_maddpg is implemented only for the repaired paper_faithful profile")
     if config.episodes < 1 or config.steps_per_episode < 1:
         raise ValueError("episodes and steps_per_episode must be positive")
     if not math.isfinite(config.tau) or not 0.0 < config.tau <= 1.0:
@@ -413,6 +426,7 @@ def validate_config(config: ExperimentConfig) -> None:
 # run_name, checkpoint_every, and the resolved CUDA device do not change the
 # scientific experiment.  Every scientific or statistical choice does.
 _FORMAL_PAPER_VALUES: Dict[str, Any] = {
+    "algorithm": DEFAULT_ALGORITHM,
     "episodes": 500,
     "steps_per_episode": 100,
     "slot_ms": 1.0,
@@ -573,7 +587,8 @@ def _positive_int(value: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Modified MADDPG with task decomposition reproduction runner")
+    parser = argparse.ArgumentParser(description="Modified MADDPG Algorithm 1/2 reproduction runner")
+    parser.add_argument("--algorithm", choices=SUPPORTED_ALGORITHMS, default=DEFAULT_ALGORITHM)
     parser.add_argument("--profile", choices=sorted(PROFILE_OVERRIDES), default="paper_faithful")
     parser.add_argument("--scenario", default="p05_n04_g25")
     parser.add_argument("--seed", type=int, default=2)
@@ -624,6 +639,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     overrides: Dict[str, Any] = {
+        "algorithm": args.algorithm,
         "seed": args.seed,
         "device": args.device,
         "run_name": args.run_name,
@@ -647,5 +663,6 @@ def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         config.output_root = "scratch"
         config.is_formal_result = False
     if not config.run_name:
-        config.run_name = f"{config.profile}_{config.scenario.id}_seed{config.seed:02d}"
+        prefix = config.profile if config.algorithm == DEFAULT_ALGORITHM else f"{config.algorithm}_{config.profile}"
+        config.run_name = f"{prefix}_{config.scenario.id}_seed{config.seed:02d}"
     return config

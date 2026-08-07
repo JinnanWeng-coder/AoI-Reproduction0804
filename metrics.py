@@ -24,6 +24,12 @@ class MetricStore:
         "global_vs_task2_cosine",
         "task1_vs_task2_cosine",
     )
+    MODIFIED_MADDPG_GRADIENT_FIELDS = (
+        "local_grad_l2",
+        "global_grad_l2",
+        "global_to_local_ratio",
+        "global_vs_local_cosine",
+    )
 
     def __init__(
         self,
@@ -35,6 +41,7 @@ class MetricStore:
         power_min_dbm: float = 1.0,
         power_max_dbm: float = 30.0,
         diagnostics: bool = False,
+        algorithm: str = "modified_maddpg_tdec",
     ):
         self.number_agents = int(number_agents)
         self.steps_per_episode = int(steps_per_episode)
@@ -44,6 +51,12 @@ class MetricStore:
         self.power_min_dbm = float(power_min_dbm)
         self.power_max_dbm = float(power_max_dbm)
         self.diagnostics = bool(diagnostics)
+        self.algorithm = str(algorithm)
+        self.gradient_fields = (
+            self.MODIFIED_MADDPG_GRADIENT_FIELDS
+            if self.algorithm == "modified_maddpg"
+            else self.GRADIENT_FIELDS
+        )
         self.episodes: List[Dict[str, Any]] = []
         self.learning: List[Dict[str, Any]] = []
         self.gradient_episodes: List[Dict[str, Any]] = []
@@ -104,7 +117,7 @@ class MetricStore:
             "finite_fraction": 1.0,
             "all_finite": True,
         }
-        for field in self.GRADIENT_FIELDS:
+        for field in self.gradient_fields:
             values = [np.asarray(record[field], dtype=np.float64) for record in gradient_records]
             if values:
                 stacked = np.stack(values)
@@ -130,6 +143,7 @@ class MetricStore:
             "power_min_dbm": self.power_min_dbm,
             "power_max_dbm": self.power_max_dbm,
             "diagnostics": self.diagnostics,
+            "algorithm": self.algorithm,
             "gradient_episodes": self.gradient_episodes,
         }
 
@@ -142,6 +156,12 @@ class MetricStore:
         self.power_min_dbm = float(state.get("power_min_dbm", self.power_min_dbm))
         self.power_max_dbm = float(state.get("power_max_dbm", self.power_max_dbm))
         self.diagnostics = bool(state.get("diagnostics", self.diagnostics))
+        checkpoint_algorithm = str(state.get("algorithm", "modified_maddpg_tdec"))
+        if checkpoint_algorithm != self.algorithm:
+            raise ValueError(
+                f"metric checkpoint algorithm mismatch: checkpoint={checkpoint_algorithm!r}, "
+                f"resolved={self.algorithm!r}"
+            )
         self.gradient_episodes = list(state.get("gradient_episodes", []))
 
     def arrays(self) -> Dict[str, np.ndarray]:
@@ -256,13 +276,15 @@ class MetricStore:
                 "finite_fraction": np.asarray([item["finite_fraction"] for item in self.gradient_episodes], dtype=np.float32),
                 "all_finite": np.asarray([item["all_finite"] for item in self.gradient_episodes], dtype=np.bool_),
             }
-            for field in self.GRADIENT_FIELDS:
+            for field in self.gradient_fields:
                 for statistic in ("mean", "p50", "max"):
                     key = f"{field}_{statistic}"
                     gradient_arrays[key] = np.stack([np.asarray(item[key], dtype=np.float32) for item in self.gradient_episodes])
             np.savez_compressed(diagnostic_dir / "actor_gradient_episode.npz", **gradient_arrays)
             (diagnostic_dir / "actor_gradient_schema.json").write_text(json.dumps({
                 "schema_version": "actor_gradient_episode_v1",
+                "algorithm": self.algorithm,
+                "fields": list(self.gradient_fields),
                 "axes": {"gradient_fields": ["episode", "agent"]},
                 "statistics": ["mean", "p50", "max"],
                 "global_gradient_semantics": "counterfactual gradient of the weighted live-action global objective; the run config states whether it contributes to the actor update",

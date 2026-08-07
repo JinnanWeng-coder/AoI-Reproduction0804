@@ -15,6 +15,7 @@ def main(argv=None) -> int:
         raise SystemExit("--diagnostic-eval is only valid with --eval-only")
     if args.dry_run:
         print(json.dumps(config.to_dict(), indent=2, sort_keys=True))
+        print(f"algorithm={config.algorithm}")
         print(f"state_dim={config.state_dim} action_dim={config.action_dim}")
         print(f"run_name={config.run_name}")
         print(f"output_root={config.output_root}")

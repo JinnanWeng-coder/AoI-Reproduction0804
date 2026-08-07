@@ -392,6 +392,62 @@ def test_hpc_readme_documents_platoon_size_trend_and_reused_baseline():
         assert token in readme
 
 
+def test_modified_maddpg_default_array_is_exactly_six_algorithm1_training_cells():
+    script = _read("aoi_modified_maddpg_default_array.sbatch")
+    for token in (
+        "#SBATCH --array=0-5%6",
+        "TASK_COUNT=6",
+        "seeds=(8 9 10 11 12 13)",
+        'ALGORITHM="modified_maddpg"',
+        'SCENARIO="p05_n04_g25"',
+        'TAU="0.005"',
+        'SLOW_INTERVAL="1"',
+        'GLOBAL_MODE="synchronous_joint"',
+        'TRAIN_NOISE="0.3"',
+        "Modified_MADDPG_results/default/P5_N4_gap25",
+        '--algorithm "$ALGORITHM"',
+        "--profile paper_faithful",
+        "--episodes 500",
+        '--tau "$TAU"',
+        '--slow-update-every-episodes "$SLOW_INTERVAL"',
+        '--global-actor-mode "$GLOBAL_MODE"',
+        "--diagnostics",
+        "--scope train",
+        "primary_metric_window=last100",
+        "secondary_metric_window=last50",
+    ):
+        assert token in script
+    for forbidden in (
+        "--eval-only",
+        "--eval-purpose",
+        "--eval-seeds",
+        "--eval-noise",
+        "detached_actor",
+        "legacy_release",
+        "final_test",
+        "PILOT_APPROVED",
+        "TRAIN_APPROVED",
+    ):
+        assert forbidden not in script
+
+
+def test_hpc_readme_documents_modified_maddpg_default_and_future_subdirectories():
+    readme = _read("README_HPC.md")
+    for token in (
+        "Modified MADDPG Algorithm 1 default confirmation",
+        "aoi_modified_maddpg_default_array.sbatch",
+        "Modified_MADDPG_results/default/P5_N4_gap25",
+        "seeds 8..13",
+        "final 100 training episodes",
+        "final 50",
+        "summarize_modified_maddpg_default.py",
+        "gap-extension/",
+        "platoon-size-extension/",
+        "no eval array",
+    ):
+        assert token in readme
+
+
 def test_pilot_preserves_exact_formal_identity_and_validation_split():
     script = _read("aoi_pilot_1gpu.sbatch")
     for token in (
