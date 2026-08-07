@@ -335,6 +335,63 @@ def test_hpc_readme_documents_gap_global_slow_42_cell_submission():
         assert token in readme
 
 
+def test_platoon_size_trend_array_adds_exactly_eighteen_training_cells():
+    script = _read("aoi_platoon_size_trend_array.sbatch")
+    for token in (
+        "#SBATCH --array=0-17%8",
+        "TASK_COUNT=18",
+        "scenarios=(p05_n06_g25 p05_n08_g25 p05_n10_g25)",
+        "seeds=(8 9 10 11 12 13)",
+        'TAU="0.005"',
+        'SLOW_INTERVAL="1"',
+        'GLOBAL_MODE="synchronous_joint"',
+        'TRAIN_NOISE="0.3"',
+        "--profile paper_faithful",
+        "--episodes 500",
+        '--tau "$TAU"',
+        '--slow-update-every-episodes "$SLOW_INTERVAL"',
+        '--global-actor-mode "$GLOBAL_MODE"',
+        "--diagnostics",
+        "--scope train",
+        "primary_metric_window=last100",
+        "secondary_metric_window=last50",
+        "AoI-Reproduction-diagnostics/platoon-size-trend-v1",
+    ):
+        assert token in script
+    for forbidden in (
+        "p05_n04_g25",
+        "--eval-only",
+        "--eval-purpose",
+        "--eval-seeds",
+        "--eval-noise",
+        "detached_actor",
+        "legacy_release",
+        "final_test",
+        "PILOT_APPROVED",
+        "TRAIN_APPROVED",
+    ):
+        assert forbidden not in script
+
+
+def test_hpc_readme_documents_platoon_size_trend_and_reused_baseline():
+    readme = _read("README_HPC.md")
+    for token in (
+        "Fig. 5(c)/(d) platoon-size trend (18 new training cells)",
+        "aoi_platoon_size_trend_array.sbatch",
+        "platoon sizes 6, 8, and 10",
+        "gap-global-slow-42-v1",
+        "3 new platoon sizes x 6 seeds = 18",
+        "--array=0-17%8",
+        "final 100 episodes",
+        "final 50",
+        "paired independent unit",
+        "strict binary",
+        "continuous payload",
+        "favorable seed subset",
+    ):
+        assert token in readme
+
+
 def test_pilot_preserves_exact_formal_identity_and_validation_split():
     script = _read("aoi_pilot_1gpu.sbatch")
     for token in (

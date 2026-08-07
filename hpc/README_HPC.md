@@ -367,3 +367,33 @@ and the final 50 as a sensitivity check; keep mean/worst-agent AoI, strict
 binary endpoint CAM, and continuous payload completion separate. Phase B can
 support conclusions about the mechanism at gap 25 only. Do not submit an eval
 array, the formal matrix, or `final_test`.
+
+## Fig. 5(c)/(d) platoon-size trend (18 new training cells)
+
+`aoi_platoon_size_trend_array.sbatch` extends the paper-facing
+`paper_faithful`, `tau=0.005`, synchronous-global, slow-update-1 configuration
+to platoon sizes 6, 8, and 10 at `P=5` and gap 25 m. It uses training seeds
+8..13, 500 episodes, and the released fixed training noise 0.3. The completed
+size-4 baseline for the same six seeds is reused from Phase A of
+`gap-global-slow-42-v1`; it is not trained again.
+
+The new array therefore contains exactly
+`3 new platoon sizes x 6 seeds = 18` training cells under the isolated result
+root `/eeedata/sgxjw2/AoI-Reproduction-diagnostics/platoon-size-trend-v1`:
+
+```bash
+mkdir -p /eeedata/sgxjw2/AoI-Reproduction-diagnostics/platoon-size-trend-v1/slurm_logs
+
+size_train_job=$(sbatch --parsable --array=0-17%8 \
+  hpc/aoi_platoon_size_trend_array.sbatch)
+```
+
+This round is training-only. Combine the 18 new cells with the six existing
+`p05_n04_g25` baseline runs only after checking the science configuration of
+both roots. Use the final 100 episodes as primary and the final 50 as a
+sensitivity window. Treat seed as the paired independent unit across sizes;
+report every seed, mean and standard deviation, median and interquartile range,
+leave-one-seed-out sensitivity, and collapsed-run counts. Keep strict binary
+endpoint CAM and continuous payload completion separate. Do not select a
+favorable seed subset, submit an eval array, run the formal matrix, or run
+`final_test`.
