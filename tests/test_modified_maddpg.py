@@ -10,6 +10,11 @@ from config import DEFAULT_ALGORITHM, build_parser, config_from_args, resolve_co
 from global_critic import Global_Critic
 from local_critic import Agent
 from runner import train
+from analysis.summarize_modified_maddpg_gap_extension import (
+    EXPECTED_GAPS,
+    EXTENSION_GAPS,
+    summarize as summarize_gap_extension,
+)
 from analysis.summarize_modified_maddpg_default import EXPECTED_SEEDS, summarize
 
 
@@ -212,3 +217,58 @@ def test_default_summarizer_validates_six_cells_and_separates_binary_from_payloa
     assert report["cohort"]["last100_mean_binary_cam"] == pytest.approx(0.8)
     assert report["cohort"]["last100_mean_payload_completion"] == pytest.approx(0.99)
     assert len(report["per_episode"]) == 3000
+
+
+def test_gap_summarizer_combines_eighteen_new_cells_with_six_default_cells(tmp_path):
+    extension_root = tmp_path / "gap-extension"
+    default_root = tmp_path / "default"
+    for gap in EXPECTED_GAPS:
+        scenario = f"p05_n04_g{gap:02d}"
+        for seed in EXPECTED_SEEDS:
+            if gap in EXTENSION_GAPS:
+                run_name = f"modified_maddpg_gap_{scenario}_seed{seed:02d}"
+                run_dir = extension_root / "runs" / run_name
+            else:
+                run_name = f"modified_maddpg_default_{scenario}_seed{seed:02d}"
+                run_dir = default_root / "runs" / run_name
+            run_dir.mkdir(parents=True)
+            config = resolve_config(
+                "paper_faithful",
+                scenario,
+                algorithm="modified_maddpg",
+                seed=seed,
+                tau=0.005,
+                slow_update_every_episodes=1,
+                global_update_mode="synchronous_joint",
+                is_formal_result=False,
+            )
+            (run_dir / "config.resolved.json").write_text(
+                json.dumps(config.to_dict()), encoding="utf-8"
+            )
+            (run_dir / "COMPLETE.json").write_text(json.dumps({
+                "status": "complete",
+                "algorithm": "modified_maddpg",
+                "checkpoint_selection": {"best_episode": 450},
+            }), encoding="utf-8")
+            aoi = np.full((500, 5), float(gap), dtype=np.float32)
+            cam = np.full((500, 5), 1.0 - gap / 1000.0, dtype=np.float32)
+            remaining = np.full((500, 100, 5), float(gap * 10), dtype=np.float32)
+            np.savez_compressed(
+                run_dir / "train_metrics.npz",
+                mean_aoi_ms_episode_agent=aoi,
+                endpoint_cam_episode_agent=cam,
+                remaining_demand=remaining,
+            )
+
+    report = summarize_gap_extension(extension_root, default_root)
+    assert len(report["rows"]) == 24
+    assert len(report["per_episode"]) == 12000
+    assert [row["gap_m"] for row in report["by_gap"]] == list(EXPECTED_GAPS)
+    assert report["by_gap"][0]["last100_mean_aoi_ms"] == pytest.approx(5.0)
+    assert report["by_gap"][-1]["last100_mean_aoi_ms"] == pytest.approx(35.0)
+    assert report["trend_last100"]["aoi_nondecreasing_count"] == 6
+    assert report["trend_last100"]["aoi_endpoint_rise_count"] == 6
+    assert report["trend_last100"]["binary_endpoint_decline_count"] == 6
+    assert report["trend_last100"]["payload_endpoint_decline_count"] == 6
+    reused = [row for row in report["rows"] if row["gap_m"] == 25]
+    assert {row["source"] for row in reused} == {"default_reuse"}

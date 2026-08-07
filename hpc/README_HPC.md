@@ -432,3 +432,39 @@ completion separate. There is no eval array, formal matrix, or `final_test` in
 this round. Future gap and platoon-size experiments belong in sibling
 subdirectories `gap-extension/` and `platoon-size-extension/` under
 `Modified_MADDPG_results/`.
+
+## Modified MADDPG Algorithm 1 gap extension
+
+`aoi_modified_maddpg_gap_array.sbatch` adds the three missing Fig. 5(a)/(b)
+gap settings for Algorithm 1. It trains exactly 18 cells:
+gaps 5, 15, and 35 m by seeds 8..13. The validated default gap-25 cells are
+not rerun. All new cells keep `P=5`, `N=4`, `tau=0.005`,
+`slow_update_every_episodes=1`, synchronized global actor updates, 500
+episodes, and fixed training noise 0.3.
+
+The requested extension root is
+`/eeedata/sgxjw2/Modified_MADDPG_results/gap-extension`:
+
+```bash
+extension_root=/eeedata/sgxjw2/Modified_MADDPG_results/gap-extension
+default_root=/eeedata/sgxjw2/AoI-Reproduction-diagnostics/Modified_MADDPG_results/default/P5_N4_gap25
+mkdir -p "$extension_root/slurm_logs"
+
+gap_job=$(sbatch --parsable --array=0-17%6 \
+  hpc/aoi_modified_maddpg_gap_array.sbatch)
+```
+
+After all 18 new cells finish, combine them with the six verified default
+cells:
+
+```bash
+python analysis/summarize_modified_maddpg_gap_extension.py \
+  --extension-root "$extension_root" \
+  --default-root "$default_root"
+```
+
+The summarizer rejects missing or mismatched configurations and produces the
+four-gap train-last100 table, train-last50 sensitivity, per-seed trends, and
+separate strict-binary/payload results under `$extension_root/analysis`.
+This remains a training-only diagnostic: do not submit an eval array, formal
+matrix, or `final_test`, and do not omit or replace an unfavorable seed.
