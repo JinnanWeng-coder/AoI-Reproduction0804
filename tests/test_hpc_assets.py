@@ -509,6 +509,67 @@ def test_hpc_readme_documents_modified_maddpg_gap_extension_and_default_reuse():
         assert token in readme
 
 
+def test_modified_maddpg_platoon_size_array_is_exactly_eighteen_training_cells():
+    script = _read("aoi_modified_maddpg_platoon_size_array.sbatch")
+    for token in (
+        "#SBATCH --array=0-17%6",
+        "TASK_COUNT=18",
+        "scenarios=(p05_n06_g25 p05_n08_g25 p05_n10_g25)",
+        "seeds=(8 9 10 11 12 13)",
+        'ALGORITHM="modified_maddpg"',
+        'TAU="0.005"',
+        'SLOW_INTERVAL="1"',
+        'GLOBAL_MODE="synchronous_joint"',
+        'TRAIN_NOISE="0.3"',
+        "Modified_MADDPG_results/platoon-size-extension",
+        'scenario_index=$((SLURM_ARRAY_TASK_ID / ${#seeds[@]}))',
+        'seed_index=$((SLURM_ARRAY_TASK_ID % ${#seeds[@]}))',
+        'run_name="modified_maddpg_platoon_${scenario}_seed${seed_token}"',
+        '--algorithm "$ALGORITHM"',
+        "--profile paper_faithful",
+        '--scenario "$scenario"',
+        "--episodes 500",
+        '--tau "$TAU"',
+        '--slow-update-every-episodes "$SLOW_INTERVAL"',
+        '--global-actor-mode "$GLOBAL_MODE"',
+        "--diagnostics",
+        "--scope train",
+        "primary_metric_window=last100",
+        "secondary_metric_window=last50",
+    ):
+        assert token in script
+    assert "p05_n04_g25" not in script
+    for forbidden in (
+        "--eval-only",
+        "--eval-purpose",
+        "--eval-seeds",
+        "--eval-noise",
+        "detached_actor",
+        "legacy_release",
+        "final_test",
+        "PILOT_APPROVED",
+        "TRAIN_APPROVED",
+    ):
+        assert forbidden not in script
+
+
+def test_hpc_readme_documents_modified_maddpg_platoon_extension_and_default_reuse():
+    readme = _read("README_HPC.md")
+    for token in (
+        "Modified MADDPG Algorithm 1 platoon-size extension",
+        "aoi_modified_maddpg_platoon_size_array.sbatch",
+        "exactly 18 cells",
+        "sizes 6, 8, and 10",
+        "seeds 8..13",
+        "/eeedata/sgxjw2/Modified_MADDPG_results/platoon-size-extension",
+        "summarize_modified_maddpg_platoon_size_extension.py",
+        "default_root",
+        "not rerun",
+        "training-only diagnostic",
+    ):
+        assert token in readme
+
+
 def test_pilot_preserves_exact_formal_identity_and_validation_split():
     script = _read("aoi_pilot_1gpu.sbatch")
     for token in (

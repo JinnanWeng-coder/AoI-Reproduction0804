@@ -15,6 +15,11 @@ from analysis.summarize_modified_maddpg_gap_extension import (
     EXTENSION_GAPS,
     summarize as summarize_gap_extension,
 )
+from analysis.summarize_modified_maddpg_platoon_size_extension import (
+    EXPECTED_SIZES,
+    EXTENSION_SIZES,
+    summarize as summarize_platoon_size_extension,
+)
 from analysis.summarize_modified_maddpg_default import EXPECTED_SEEDS, summarize
 
 
@@ -271,4 +276,59 @@ def test_gap_summarizer_combines_eighteen_new_cells_with_six_default_cells(tmp_p
     assert report["trend_last100"]["binary_endpoint_decline_count"] == 6
     assert report["trend_last100"]["payload_endpoint_decline_count"] == 6
     reused = [row for row in report["rows"] if row["gap_m"] == 25]
+    assert {row["source"] for row in reused} == {"default_reuse"}
+
+
+def test_platoon_summarizer_combines_eighteen_new_cells_with_six_default_cells(tmp_path):
+    extension_root = tmp_path / "platoon-size-extension"
+    default_root = tmp_path / "default"
+    for size in EXPECTED_SIZES:
+        scenario = f"p05_n{size:02d}_g25"
+        for seed in EXPECTED_SEEDS:
+            if size in EXTENSION_SIZES:
+                run_name = f"modified_maddpg_platoon_{scenario}_seed{seed:02d}"
+                run_dir = extension_root / "runs" / run_name
+            else:
+                run_name = f"modified_maddpg_default_{scenario}_seed{seed:02d}"
+                run_dir = default_root / "runs" / run_name
+            run_dir.mkdir(parents=True)
+            config = resolve_config(
+                "paper_faithful",
+                scenario,
+                algorithm="modified_maddpg",
+                seed=seed,
+                tau=0.005,
+                slow_update_every_episodes=1,
+                global_update_mode="synchronous_joint",
+                is_formal_result=False,
+            )
+            (run_dir / "config.resolved.json").write_text(
+                json.dumps(config.to_dict()), encoding="utf-8"
+            )
+            (run_dir / "COMPLETE.json").write_text(json.dumps({
+                "status": "complete",
+                "algorithm": "modified_maddpg",
+                "checkpoint_selection": {"best_episode": 450},
+            }), encoding="utf-8")
+            aoi = np.full((500, 5), float(size), dtype=np.float32)
+            cam = np.full((500, 5), 1.0 - size / 100.0, dtype=np.float32)
+            remaining = np.full((500, 100, 5), float(size * 100), dtype=np.float32)
+            np.savez_compressed(
+                run_dir / "train_metrics.npz",
+                mean_aoi_ms_episode_agent=aoi,
+                endpoint_cam_episode_agent=cam,
+                remaining_demand=remaining,
+            )
+
+    report = summarize_platoon_size_extension(extension_root, default_root)
+    assert len(report["rows"]) == 24
+    assert len(report["per_episode"]) == 12000
+    assert [row["platoon_size"] for row in report["by_size"]] == list(EXPECTED_SIZES)
+    assert report["by_size"][0]["last100_mean_aoi_ms"] == pytest.approx(4.0)
+    assert report["by_size"][-1]["last100_mean_aoi_ms"] == pytest.approx(10.0)
+    assert report["trend_last100"]["aoi_nondecreasing_count"] == 6
+    assert report["trend_last100"]["aoi_endpoint_rise_count"] == 6
+    assert report["trend_last100"]["binary_endpoint_decline_count"] == 6
+    assert report["trend_last100"]["payload_endpoint_decline_count"] == 6
+    reused = [row for row in report["rows"] if row["platoon_size"] == 4]
     assert {row["source"] for row in reused} == {"default_reuse"}

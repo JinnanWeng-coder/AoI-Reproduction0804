@@ -468,3 +468,39 @@ four-gap train-last100 table, train-last50 sensitivity, per-seed trends, and
 separate strict-binary/payload results under `$extension_root/analysis`.
 This remains a training-only diagnostic: do not submit an eval array, formal
 matrix, or `final_test`, and do not omit or replace an unfavorable seed.
+
+## Modified MADDPG Algorithm 1 platoon-size extension
+
+`aoi_modified_maddpg_platoon_size_array.sbatch` adds the three missing
+Fig. 5(c)/(d) platoon sizes for Algorithm 1. It trains exactly 18 cells:
+sizes 6, 8, and 10 by seeds 8..13. The validated size-4 default cells are not
+rerun. All new cells keep `P=5`, gap 25 m, `tau=0.005`,
+`slow_update_every_episodes=1`, synchronized global actor updates, 500
+episodes, and fixed training noise 0.3.
+
+The requested extension root is
+`/eeedata/sgxjw2/Modified_MADDPG_results/platoon-size-extension`:
+
+```bash
+extension_root=/eeedata/sgxjw2/Modified_MADDPG_results/platoon-size-extension
+default_root=/eeedata/sgxjw2/AoI-Reproduction-diagnostics/Modified_MADDPG_results/default/P5_N4_gap25
+mkdir -p "$extension_root/slurm_logs"
+
+size_job=$(sbatch --parsable --array=0-17%6 \
+  hpc/aoi_modified_maddpg_platoon_size_array.sbatch)
+```
+
+After all 18 new cells finish, combine them with the six verified default
+cells:
+
+```bash
+python analysis/summarize_modified_maddpg_platoon_size_extension.py \
+  --extension-root "$extension_root" \
+  --default-root "$default_root"
+```
+
+The summarizer rejects missing or mismatched configurations and produces the
+four-size train-last100 table, train-last50 sensitivity, per-seed trends, and
+separate strict-binary/payload results under `$extension_root/analysis`.
+This remains a training-only diagnostic: do not submit an eval array, formal
+matrix, or `final_test`, and do not omit or replace an unfavorable seed.
