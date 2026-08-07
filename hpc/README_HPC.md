@@ -443,10 +443,10 @@ not rerun. All new cells keep `P=5`, `N=4`, `tau=0.005`,
 episodes, and fixed training noise 0.3.
 
 The requested extension root is
-`/eeedata/sgxjw2/Modified_MADDPG_results/gap-extension`:
+`/eeedata/sgxjw2/AoI-Reproduction-diagnostics/Modified_MADDPG_results/gap-extension`:
 
 ```bash
-extension_root=/eeedata/sgxjw2/Modified_MADDPG_results/gap-extension
+extension_root=/eeedata/sgxjw2/AoI-Reproduction-diagnostics/Modified_MADDPG_results/gap-extension
 default_root=/eeedata/sgxjw2/AoI-Reproduction-diagnostics/Modified_MADDPG_results/default/P5_N4_gap25
 mkdir -p "$extension_root/slurm_logs"
 
@@ -479,10 +479,10 @@ rerun. All new cells keep `P=5`, gap 25 m, `tau=0.005`,
 episodes, and fixed training noise 0.3.
 
 The requested extension root is
-`/eeedata/sgxjw2/Modified_MADDPG_results/platoon-size-extension`:
+`/eeedata/sgxjw2/AoI-Reproduction-diagnostics/Modified_MADDPG_results/platoon-size-extension`:
 
 ```bash
-extension_root=/eeedata/sgxjw2/Modified_MADDPG_results/platoon-size-extension
+extension_root=/eeedata/sgxjw2/AoI-Reproduction-diagnostics/Modified_MADDPG_results/platoon-size-extension
 default_root=/eeedata/sgxjw2/AoI-Reproduction-diagnostics/Modified_MADDPG_results/default/P5_N4_gap25
 mkdir -p "$extension_root/slurm_logs"
 

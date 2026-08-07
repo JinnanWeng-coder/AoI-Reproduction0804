@@ -7,8 +7,8 @@
 #SBATCH --gres=gpu:l20:1
 #SBATCH --array=0-17%6
 #SBATCH --time=6-23:30:00
-#SBATCH -o /eeedata/sgxjw2/Modified_MADDPG_results/gap-extension/slurm_logs/%x_%A_%a.out
-#SBATCH -e /eeedata/sgxjw2/Modified_MADDPG_results/gap-extension/slurm_logs/%x_%A_%a.err
+#SBATCH -o /eeedata/sgxjw2/AoI-Reproduction-diagnostics/Modified_MADDPG_results/gap-extension/slurm_logs/%x_%A_%a.out
+#SBATCH -e /eeedata/sgxjw2/AoI-Reproduction-diagnostics/Modified_MADDPG_results/gap-extension/slurm_logs/%x_%A_%a.err
 
 set -euo pipefail
 
@@ -16,7 +16,7 @@ AOI_BASE_ROOT="${AOI_BASE_ROOT:-/eeedata/sgxjw2}"
 PROJECT_DIR="${PROJECT_DIR:-$AOI_BASE_ROOT/AoI-Reproduction0804}"
 AOI_ENV_DIR="${AOI_ENV_DIR:-$AOI_BASE_ROOT/conda_envs/aoi_cuda}"
 PYTHON_BIN="$AOI_ENV_DIR/bin/python"
-RESULT_ROOT="${AOI_RESULT_ROOT:-$AOI_BASE_ROOT/Modified_MADDPG_results/gap-extension}"
+RESULT_ROOT="${AOI_RESULT_ROOT:-$AOI_BASE_ROOT/AoI-Reproduction-diagnostics/Modified_MADDPG_results/gap-extension}"
 RUN_ROOT="$RESULT_ROOT/runs"
 
 ALGORITHM="modified_maddpg"
@@ -50,7 +50,7 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Python environment is missing: $PYTHON_BIN" >&2
   exit 2
 fi
-if [[ "$RESULT_ROOT" != "$AOI_BASE_ROOT/Modified_MADDPG_results/gap-extension" ]]; then
+if [[ "$RESULT_ROOT" != "$AOI_BASE_ROOT/AoI-Reproduction-diagnostics/Modified_MADDPG_results/gap-extension" ]]; then
   echo "Refusing to write outside the requested Algorithm 1 gap-extension root: $RESULT_ROOT" >&2
   exit 2
 fi
