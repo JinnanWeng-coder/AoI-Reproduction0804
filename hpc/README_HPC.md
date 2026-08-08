@@ -504,3 +504,46 @@ four-size train-last100 table, train-last50 sensitivity, per-seed trends, and
 separate strict-binary/payload results under `$extension_root/analysis`.
 This remains a training-only diagnostic: do not submit an eval array, formal
 matrix, or `final_test`, and do not omit or replace an unfavorable seed.
+
+## Canonical TDec results and Algorithm 1 comparison bundle
+
+`analysis/prepare_tdec_comparison_bundle.py` is a post-processing-only tool.
+It does not import the environment, train a policy, evaluate a checkpoint, or
+alter an original run. It selects the 42 unique TDec source runs that match
+seeds 8..13, `tau=0.005`, `slow=1`, and synchronized global actor updates,
+then builds `default/`, `gap-extension/`, and `platoon-size-extension/` views.
+The canonical `runs/` entries are symlinks so checkpoints and replay buffers
+are not duplicated.
+
+Run it after both Algorithm 1 extensions are present:
+
+```bash
+base=/eeedata/sgxjw2/AoI-Reproduction-diagnostics
+
+python analysis/prepare_tdec_comparison_bundle.py \
+  --tdec-gap-root "$base/gap-global-slow-42-v1" \
+  --tdec-platoon-root "$base/platoon-size-trend-v1" \
+  --modified-root "$base/Modified_MADDPG_results" \
+  --tdec-output-root "$base/Modified_MADDPG_with_TDec_results" \
+  --comparison-output-root "$base/algorithm-comparison/Modified_MADDPG_vs_TDec"
+```
+
+The command validates all configurations and binary-CAM semantics before
+writing data. It exports complete 500-episode seed and agent CSVs, train-last100
+and train-last50 summaries, paired Algorithm 1 differences, and PNG-only
+figures. Strict binary CAM and continuous payload completion remain separate.
+
+Create the compact download package outside the directories being archived:
+
+```bash
+bundle="$base/Modified_MADDPG_vs_TDec_plot_bundle.tar.zst"
+tar --zstd -cf "$bundle" \
+  --exclude='*/runs' \
+  -C "$base" \
+  Modified_MADDPG_with_TDec_results \
+  algorithm-comparison/Modified_MADDPG_vs_TDec
+```
+
+The bundle intentionally excludes checkpoints, replay buffers, original NPZ
+files, and run symlinks. The unmodified source runs remain at their original
+locations.
