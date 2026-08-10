@@ -2,7 +2,8 @@
 set -euo pipefail
 
 AOI_BASE_ROOT="${AOI_BASE_ROOT:-/eeedata/sgxjw2}"
-PROJECT_DIR="${PROJECT_DIR:-$AOI_BASE_ROOT/AoI-Reproduction0804}"
+AOI_PROJECT_ROOT="${AOI_PROJECT_ROOT:-$AOI_BASE_ROOT/Parvini-TVT2023-reproduction}"
+PROJECT_DIR="${PROJECT_DIR:-$AOI_PROJECT_ROOT/AoI-Reproduction0804}"
 CONDA_ROOT="${CONDA_ROOT:-$AOI_BASE_ROOT/miniconda3}"
 AOI_ENV_DIR="${AOI_ENV_DIR:-$AOI_BASE_ROOT/conda_envs/aoi_cuda}"
 PYTHON_BIN="$AOI_ENV_DIR/bin/python"

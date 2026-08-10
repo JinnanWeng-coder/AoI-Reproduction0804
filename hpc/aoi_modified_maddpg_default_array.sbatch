@@ -7,16 +7,18 @@
 #SBATCH --gres=gpu:l20:1
 #SBATCH --array=0-5%6
 #SBATCH --time=6-23:30:00
-#SBATCH -o /eeedata/sgxjw2/AoI-Reproduction-diagnostics/Modified_MADDPG_results/default/P5_N4_gap25/slurm_logs/%x_%A_%a.out
-#SBATCH -e /eeedata/sgxjw2/AoI-Reproduction-diagnostics/Modified_MADDPG_results/default/P5_N4_gap25/slurm_logs/%x_%A_%a.err
+#SBATCH -o /eeedata/sgxjw2/Parvini-TVT2023-reproduction/AoI-Reproduction-diagnostics/Modified_MADDPG_results/default/P5_N4_gap25/slurm_logs/%x_%A_%a.out
+#SBATCH -e /eeedata/sgxjw2/Parvini-TVT2023-reproduction/AoI-Reproduction-diagnostics/Modified_MADDPG_results/default/P5_N4_gap25/slurm_logs/%x_%A_%a.err
 
 set -euo pipefail
 
 AOI_BASE_ROOT="${AOI_BASE_ROOT:-/eeedata/sgxjw2}"
-PROJECT_DIR="${PROJECT_DIR:-$AOI_BASE_ROOT/AoI-Reproduction0804}"
+AOI_PROJECT_ROOT="${AOI_PROJECT_ROOT:-$AOI_BASE_ROOT/Parvini-TVT2023-reproduction}"
+PROJECT_DIR="${PROJECT_DIR:-$AOI_PROJECT_ROOT/AoI-Reproduction0804}"
 AOI_ENV_DIR="${AOI_ENV_DIR:-$AOI_BASE_ROOT/conda_envs/aoi_cuda}"
+DIAGNOSTICS_ROOT="${AOI_DIAGNOSTICS_ROOT:-$AOI_PROJECT_ROOT/AoI-Reproduction-diagnostics}"
 PYTHON_BIN="$AOI_ENV_DIR/bin/python"
-RESULT_ROOT="${AOI_RESULT_ROOT:-$AOI_BASE_ROOT/AoI-Reproduction-diagnostics/Modified_MADDPG_results/default/P5_N4_gap25}"
+RESULT_ROOT="${AOI_RESULT_ROOT:-$DIAGNOSTICS_ROOT/Modified_MADDPG_results/default/P5_N4_gap25}"
 RUN_ROOT="$RESULT_ROOT/runs"
 
 ALGORITHM="modified_maddpg"
@@ -43,8 +45,8 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Python environment is missing: $PYTHON_BIN" >&2
   exit 2
 fi
-if [[ "$RESULT_ROOT" == "$AOI_BASE_ROOT/AoI-Reproduction0804-results"* ]]; then
-  echo "Refusing to write this Algorithm 1 experiment into the historical formal-result root." >&2
+if [[ "$RESULT_ROOT" != "$DIAGNOSTICS_ROOT/Modified_MADDPG_results/default/P5_N4_gap25" ]]; then
+  echo "Refusing to write outside the requested Algorithm 1 default root: $RESULT_ROOT" >&2
   exit 2
 fi
 

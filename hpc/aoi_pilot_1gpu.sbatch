@@ -6,16 +6,24 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:l20:1
 #SBATCH --time=6-23:30:00
-#SBATCH -o /eeedata/sgxjw2/AoI-Reproduction0804-results/slurm_logs/%x_%j.out
-#SBATCH -e /eeedata/sgxjw2/AoI-Reproduction0804-results/slurm_logs/%x_%j.err
+#SBATCH -o /eeedata/sgxjw2/Parvini-TVT2023-reproduction/AoI-Reproduction-diagnostics/Modified_MADDPG_with_TDec_results/heldout-formal-matrix/slurm_logs/%x_%j.out
+#SBATCH -e /eeedata/sgxjw2/Parvini-TVT2023-reproduction/AoI-Reproduction-diagnostics/Modified_MADDPG_with_TDec_results/heldout-formal-matrix/slurm_logs/%x_%j.err
 
 set -euo pipefail
 
 AOI_BASE_ROOT="${AOI_BASE_ROOT:-/eeedata/sgxjw2}"
-PROJECT_DIR="${PROJECT_DIR:-$AOI_BASE_ROOT/AoI-Reproduction0804}"
+AOI_PROJECT_ROOT="${AOI_PROJECT_ROOT:-$AOI_BASE_ROOT/Parvini-TVT2023-reproduction}"
+PROJECT_DIR="${PROJECT_DIR:-$AOI_PROJECT_ROOT/AoI-Reproduction0804}"
 AOI_ENV_DIR="${AOI_ENV_DIR:-$AOI_BASE_ROOT/conda_envs/aoi_cuda}"
 PYTHON_BIN="$AOI_ENV_DIR/bin/python"
-RESULT_ROOT="${AOI_RESULT_ROOT:-$AOI_BASE_ROOT/AoI-Reproduction0804-results}"
+DIAGNOSTICS_ROOT="${AOI_DIAGNOSTICS_ROOT:-$AOI_PROJECT_ROOT/AoI-Reproduction-diagnostics}"
+EXPECTED_RESULT_ROOT="$DIAGNOSTICS_ROOT/Modified_MADDPG_with_TDec_results/heldout-formal-matrix"
+: "${AOI_RESULT_ROOT:?Set AOI_RESULT_ROOT=$EXPECTED_RESULT_ROOT explicitly before submitting this deferred held-out job}"
+RESULT_ROOT="$AOI_RESULT_ROOT"
+if [[ "$RESULT_ROOT" != "$EXPECTED_RESULT_ROOT" ]]; then
+  echo "AOI_RESULT_ROOT must equal $EXPECTED_RESULT_ROOT; got $RESULT_ROOT" >&2
+  exit 2
+fi
 RUN_ROOT="$RESULT_ROOT/runs"
 HANDOFF_ROOT="$RESULT_ROOT/handoff"
 PILOT_NAME="reproduction_baseline_p05_n04_g25_seed02"

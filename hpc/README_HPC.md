@@ -1,7 +1,8 @@
 # HPC launchers
 
 All launchers assume the repository is at
-`/eeedata/sgxjw2/AoI-Reproduction0804` and the Python environment at
+`/eeedata/sgxjw2/Parvini-TVT2023-reproduction/AoI-Reproduction0804`, results
+are under the sibling `AoI-Reproduction-diagnostics`, and the Python environment is at
 `/eeedata/sgxjw2/conda_envs/aoi_cuda`. Override `PROJECT_DIR`, `AOI_ENV_DIR`, or
 result-root variables when required.
 
@@ -15,10 +16,13 @@ They train only, use the fixed `tau=0.005`, slow-update-1, synchronous-global
 baseline, and write one `policy_final.pt` without replay or periodic
 checkpoints.
 
-The pilot and matrix launchers are retained for a later held-out stage. Their
-matrix helper explicitly uses resumable checkpoints. They should not be started
-during early algorithm development without reviewing the storage budget and
-evaluation protocol.
+The pilot, matrix, and audit launchers are retained for a later held-out stage.
+They explicitly use resumable checkpoints and refuse to start unless
+`AOI_RESULT_ROOT` is set to the dedicated
+`Modified_MADDPG_with_TDec_results/heldout-formal-matrix` directory. Create its
+`slurm_logs/` directory before `sbatch`. They should not be started during early
+algorithm development without reviewing the storage budget and evaluation
+protocol.
 
 Before submission:
 

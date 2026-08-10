@@ -3,7 +3,7 @@
 ## Prepare
 
 ```bash
-cd /eeedata/sgxjw2/AoI-Reproduction0804
+cd /eeedata/sgxjw2/Parvini-TVT2023-reproduction/AoI-Reproduction0804
 git fetch origin --tags
 git checkout main
 git pull --ff-only origin main
