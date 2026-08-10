@@ -44,7 +44,7 @@ test -z "$(git status --porcelain --untracked-files=all)"
 
 AUDIT_ROOT="$HANDOFF_ROOT/audits/${AUDIT_SCOPE}_job${SLURM_JOB_ID}"
 mkdir -p "$AUDIT_ROOT" "$TMPDIR" "$XDG_CACHE_HOME" "$MPLCONFIGDIR" "$PYTHONPYCACHEPREFIX"
-mapfile -t run_dirs < <(find "$RUN_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'paper_faithful_*_seed0[2-7]' -print | sort)
+mapfile -t run_dirs < <(find "$RUN_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'reproduction_baseline_*_seed0[2-7]' -print | sort)
 if [[ ${#run_dirs[@]} -ne 48 ]]; then
   echo "Expected exactly 48 formal run directories, found ${#run_dirs[@]}." >&2
   exit 3

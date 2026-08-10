@@ -1,31 +1,28 @@
 import numpy as np
 
-from Classes.Environment_Platoon import PaperEnviron
-from config import resolve_config
+from aoi_v2x_reproduction.envs.platoon import PaperEnviron
+from aoi_v2x_reproduction.config import resolve_config
 
 
 def _config(**overrides):
     values = {"seed": 41, "episodes": 3, "steps_per_episode": 4}
     values.update(overrides)
-    return resolve_config("paper_faithful", "p05_n04_g25", **values)
+    return resolve_config(scenario="p05_n04_g25", **values)
 
 
 def test_semantic_version_and_lifecycle_defaults_are_explicit():
-    paper = _config()
-    legacy = resolve_config("legacy_release", "p05_n04_g25")
-    assert paper.semantic_version == "paper_faithful_v4"
-    assert paper.mobility_revision == "lane_graph_exit_safe_v1"
-    assert legacy.semantic_version == "legacy_release_v1"
-    assert paper.initial_aoi_ms == 100.0
-    assert paper.eval_protocol == "sequential_warm"
-    assert paper.eval_warmup_episodes == 5
-    assert paper.global_reward_normalization == "source_normalized_per_rb_mean"
-    assert paper.mobility_model == "urban_grid_correlated"
-    assert paper.gap_definition == "bumper_to_bumper"
-    assert paper.vehicle_length_m == 4.0
-    assert paper.effective_center_spacing_m == 29.0
-    assert legacy.gap_definition == "center_to_center"
-    assert legacy.effective_center_spacing_m == 25.0
+    baseline = _config()
+    assert baseline.semantic_version == "reproduction_baseline_v1"
+    assert baseline.mobility_revision == "lane_graph_exit_safe_v1"
+    assert baseline.tau == 0.005
+    assert baseline.initial_aoi_ms == 100.0
+    assert baseline.eval_protocol == "sequential_warm"
+    assert baseline.eval_warmup_episodes == 5
+    assert baseline.global_reward_normalization == "source_normalized_per_rb_mean"
+    assert baseline.mobility_model == "urban_grid_correlated"
+    assert baseline.gap_definition == "bumper_to_bumper"
+    assert baseline.vehicle_length_m == 4.0
+    assert baseline.effective_center_spacing_m == 29.0
 
 
 def test_start_episode_preserves_aoi_and_previous_interference():

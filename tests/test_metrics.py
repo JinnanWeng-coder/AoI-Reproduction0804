@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from metrics import MetricStore
+from aoi_v2x_reproduction.runtime.metrics import MetricStore
 
 
 def test_metrics_save_global_combined_and_immediate_reward_proxy():

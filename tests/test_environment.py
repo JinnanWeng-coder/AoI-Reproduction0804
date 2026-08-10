@@ -1,14 +1,16 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
-from Classes.Environment_Platoon import PaperEnviron
-from config import resolve_config
+from aoi_v2x_reproduction.envs.platoon import PaperEnviron
+from aoi_v2x_reproduction.config import resolve_config
 
 
 def _paper_config(**overrides):
     values = {"seed": 13, "episodes": 2, "steps_per_episode": 5}
     values.update(overrides)
-    return resolve_config("paper_faithful", "p05_n04_g25", **values)
+    return resolve_config(scenario="p05_n04_g25", **values)
 
 
 def test_paper_state_time_power_and_geometry():
@@ -56,7 +58,7 @@ def test_remaining_time_reaches_zero_at_deadline():
 
 
 def test_slow_fading_cadence_moves_positions_only_at_configured_boundary():
-    config = _paper_config(slow_update_every_episodes=2)
+    config = replace(_paper_config(), slow_update_every_episodes=2)
     env = PaperEnviron(config)
     env.reset(17)
     initial_positions = [tuple(vehicle.position) for vehicle in env.vehicles]

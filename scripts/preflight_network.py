@@ -12,23 +12,21 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from global_critic import Global_Critic
-from local_critic import Agent
-from config import resolve_config
-from runner import resolve_device, seed_everything
+from aoi_v2x_reproduction.algorithms.modified_maddpg.learner import Global_Critic
+from aoi_v2x_reproduction.algorithms.modified_maddpg.agent import Agent
+from aoi_v2x_reproduction.config import resolve_config
+from aoi_v2x_reproduction.runtime.runner import resolve_device, seed_everything
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--scenario", default="p05_n10_g25")
-    parser.add_argument("--profile", default="paper_faithful")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--output", default=None)
     args = parser.parse_args(argv)
     config = resolve_config(
-        args.profile,
-        args.scenario,
+        scenario=args.scenario,
         seed=97,
         episodes=1,
         steps_per_episode=2,

@@ -38,7 +38,6 @@ def _run_location(extension_root: Path, default_root: Path, gap: int, seed: int)
 def _validate_config(config: Dict[str, object], gap: int, seed: int) -> None:
     expected = {
         "algorithm": EXPECTED_ALGORITHM,
-        "profile": "paper_faithful",
         "seed": seed,
         "episodes": 500,
         "slow_update_every_episodes": 1,
@@ -49,6 +48,8 @@ def _validate_config(config: Dict[str, object], gap: int, seed: int) -> None:
             raise ValueError(
                 f"gap {gap} seed {seed}: {key}={config.get(key)!r}, expected {wanted!r}"
             )
+    if config.get("profile") not in {"paper_faithful", "reproduction_baseline"}:
+        raise ValueError(f"gap {gap} seed {seed}: unsupported profile={config.get('profile')!r}")
     scenario = config.get("scenario")
     if not isinstance(scenario, dict):
         raise ValueError(f"gap {gap} seed {seed}: scenario must be an object")

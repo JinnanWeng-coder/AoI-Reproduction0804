@@ -3,13 +3,13 @@ import copy
 import numpy as np
 import torch
 
-from config import resolve_config
-from global_critic import Global_Critic
-from local_critic import Agent
+from aoi_v2x_reproduction.config import resolve_config
+from aoi_v2x_reproduction.algorithms.modified_maddpg.learner import Global_Critic
+from aoi_v2x_reproduction.algorithms.modified_maddpg.agent import Agent
 
 
 def _learner(mode="synchronous_joint", diagnostics=False):
-    config = resolve_config("paper_faithful", "p05_n04_g25", seed=4, episodes=2, steps_per_episode=3, device="cpu", actor_hidden=[16, 8], local_critic_hidden=[16, 8], global_critic_hidden=[16, 8, 4], batch_size=4, replay_capacity=32, global_update_mode=mode, diagnostics=diagnostics)
+    config = resolve_config(scenario="p05_n04_g25", seed=4, episodes=2, steps_per_episode=3, device="cpu", actor_hidden=[16, 8], local_critic_hidden=[16, 8], global_critic_hidden=[16, 8, 4], batch_size=4, replay_capacity=32, global_update_mode=mode, diagnostics=diagnostics)
     config.device_resolved = "cpu"
     agents = [Agent(config, index) for index in range(config.number_agents)]
     return config, agents, Global_Critic(config, agents)
@@ -28,12 +28,6 @@ def test_global_only_gradient_is_nonzero_for_every_actor():
     audit = learner.actor_global_gradient_audit(_batch(config)[0])
     assert audit["finite"] is True
     assert all(value > 0 for value in audit["global_gradient_norms"])
-
-
-def test_legacy_detach_global_gradient_is_zero():
-    config, _agents, learner = _learner("legacy_detach")
-    audit = learner.actor_global_gradient_audit(_batch(config)[0])
-    assert audit["global_gradient_norms"] == [0.0] * config.number_agents
 
 
 def test_detached_actor_blocks_global_actor_gradient_but_updates_global_critic():

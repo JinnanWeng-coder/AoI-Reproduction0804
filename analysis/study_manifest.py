@@ -99,8 +99,6 @@ def build_study_manifest(run_root: Path, output: Path, algorithm: str = "Modifie
                 "reproduction_git_commit": provenance.get("reproduction_git_commit"),
                 "reproduction_git_branch": provenance.get("reproduction_git_branch"),
                 "reproduction_git_dirty": provenance.get("reproduction_git_dirty"),
-                "reproduction_tracked_tree_sha256": provenance.get("reproduction_tracked_tree_sha256"),
-                "source_manifest_sha256": provenance.get("source_manifest_sha256"),
             })
     manifest = {
         "schema_version": 3,

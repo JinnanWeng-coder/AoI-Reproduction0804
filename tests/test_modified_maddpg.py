@@ -5,11 +5,11 @@ import numpy as np
 import pytest
 import torch
 
-from Classes.Environment_Platoon import PaperEnviron, power_penalty
-from config import DEFAULT_ALGORITHM, build_parser, config_from_args, resolve_config
-from global_critic import Global_Critic
-from local_critic import Agent
-from runner import train
+from aoi_v2x_reproduction.envs.platoon import PaperEnviron, power_penalty
+from aoi_v2x_reproduction.config import DEFAULT_ALGORITHM, build_parser, config_from_args, resolve_config
+from aoi_v2x_reproduction.algorithms.modified_maddpg.learner import Global_Critic
+from aoi_v2x_reproduction.algorithms.modified_maddpg.agent import Agent
+from aoi_v2x_reproduction.runtime.runner import train
 from analysis.summarize_modified_maddpg_gap_extension import (
     EXPECTED_GAPS,
     EXTENSION_GAPS,
@@ -25,8 +25,7 @@ from analysis.summarize_modified_maddpg_default import EXPECTED_SEEDS, summarize
 
 def _config(tmp_path=None, diagnostics=False):
     return resolve_config(
-        "paper_faithful",
-        "p05_n04_g25",
+        scenario="p05_n04_g25",
         algorithm="modified_maddpg",
         seed=8,
         episodes=2,
@@ -38,6 +37,7 @@ def _config(tmp_path=None, diagnostics=False):
         batch_size=4,
         replay_capacity=32,
         checkpoint_every=1,
+        checkpoint_mode="resumable",
         target_noise_sigma=0.0,
         diagnostics=diagnostics,
         selection_validation_seeds=[301],
@@ -66,8 +66,8 @@ def _batch(config):
 
 
 def test_algorithm1_is_explicit_and_default_tdec_hash_remains_implicit():
-    tdec = resolve_config("paper_faithful", "p05_n04_g25")
-    modified = resolve_config("paper_faithful", "p05_n04_g25", algorithm="modified_maddpg")
+    tdec = resolve_config(scenario="p05_n04_g25")
+    modified = resolve_config(scenario="p05_n04_g25", algorithm="modified_maddpg")
     assert tdec.algorithm == DEFAULT_ALGORITHM
     assert "algorithm" not in tdec.to_dict()
     assert modified.to_dict()["algorithm"] == "modified_maddpg"
@@ -76,8 +76,6 @@ def test_algorithm1_is_explicit_and_default_tdec_hash_remains_implicit():
 
     args = build_parser().parse_args(["--algorithm", "modified_maddpg", "--seed", "8"])
     assert config_from_args(args).algorithm == "modified_maddpg"
-    with pytest.raises(ValueError, match="paper_faithful"):
-        resolve_config("legacy_release", "p05_n04_g25", algorithm="modified_maddpg")
 
 
 def test_algorithm1_has_exactly_one_local_critic_per_agent():
@@ -151,8 +149,7 @@ def test_algorithm_checkpoints_cannot_cross_load_between_algorithms():
     modified = _config()
     modified_agents, _modified_learner = _system(modified)
     tdec = resolve_config(
-        "paper_faithful",
-        "p05_n04_g25",
+        scenario="p05_n04_g25",
         episodes=2,
         steps_per_episode=3,
         device="cpu",
@@ -191,8 +188,7 @@ def test_default_summarizer_validates_six_cells_and_separates_binary_from_payloa
         run_dir = runs_root / run_name
         run_dir.mkdir(parents=True)
         config = resolve_config(
-            "paper_faithful",
-            "p05_n04_g25",
+            scenario="p05_n04_g25",
             algorithm="modified_maddpg",
             seed=seed,
             tau=0.005,
@@ -238,8 +234,7 @@ def test_gap_summarizer_combines_eighteen_new_cells_with_six_default_cells(tmp_p
                 run_dir = default_root / "runs" / run_name
             run_dir.mkdir(parents=True)
             config = resolve_config(
-                "paper_faithful",
-                scenario,
+                scenario=scenario,
                 algorithm="modified_maddpg",
                 seed=seed,
                 tau=0.005,
@@ -293,8 +288,7 @@ def test_platoon_summarizer_combines_eighteen_new_cells_with_six_default_cells(t
                 run_dir = default_root / "runs" / run_name
             run_dir.mkdir(parents=True)
             config = resolve_config(
-                "paper_faithful",
-                scenario,
+                scenario=scenario,
                 algorithm="modified_maddpg",
                 seed=seed,
                 tau=0.005,

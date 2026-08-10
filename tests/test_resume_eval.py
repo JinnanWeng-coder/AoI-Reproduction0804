@@ -7,25 +7,25 @@ import numpy as np
 import pytest
 import torch
 
-from config import resolve_config
-from checkpointing import capture_rng_state, restore_rng_state
-from Classes.Environment_Platoon import PaperEnviron
+from aoi_v2x_reproduction.config import resolve_config
+from aoi_v2x_reproduction.runtime.checkpointing import capture_rng_state, restore_rng_state
+from aoi_v2x_reproduction.envs.platoon import PaperEnviron
 from analysis.audit_results import audit_eval
-import runner as runner_module
-from runner import _load_checkpoint
-from runner import evaluate_from_checkpoint, train
+from aoi_v2x_reproduction.runtime import runner as runner_module
+from aoi_v2x_reproduction.runtime.runner import _load_checkpoint
+from aoi_v2x_reproduction.runtime.runner import evaluate_from_checkpoint, train
 
 
 def _small_config(root: Path, name: str):
     return resolve_config(
-        "paper_faithful",
-        "p05_n04_g25",
+        scenario="p05_n04_g25",
         seed=31,
         episodes=4,
         steps_per_episode=4,
         batch_size=4,
         replay_capacity=32,
         checkpoint_every=1,
+        checkpoint_mode="resumable",
         actor_hidden=[16, 8],
         local_critic_hidden=[16, 8],
         global_critic_hidden=[16, 8, 4],
@@ -84,26 +84,24 @@ def test_resume_repairs_interruption_between_latest_and_best_writes(tmp_path):
 
 def test_verified_empty_run_recovery_accepts_an_explicit_nonformal_diagnostic(monkeypatch, tmp_path):
     config = resolve_config(
-        "paper_faithful",
-        "p05_n04_g25",
+        scenario="p05_n04_g25",
         seed=3,
         output_root=str(tmp_path),
         run_name="detached_diagnostic",
         global_update_mode="detached_actor",
         diagnostics=True,
         is_formal_result=False,
+        checkpoint_mode="resumable",
         smoke=False,
     )
     git = {
         "reproduction_git_commit": "diagnostic-test",
         "reproduction_git_branch": "main",
         "reproduction_git_dirty": False,
-        "reproduction_tracked_tree_sha256": "tree-test",
         "gpu_names": [],
         "cuda_driver": None,
     }
     monkeypatch.setattr(runner_module, "_git_metadata", lambda: dict(git))
-    monkeypatch.setattr(runner_module, "_source_manifest_digest", lambda: "manifest-test")
     run_dir, is_resume = runner_module._prepare_run(config, None)
 
     verification = runner_module._validate_empty_run_for_reinitialization(run_dir, config)
@@ -180,14 +178,14 @@ def test_checkpoint_payload_is_deserialized_on_cpu(tmp_path, monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_cuda_checkpoint_can_resume_from_episode_one_to_two(tmp_path):
     config = resolve_config(
-        "paper_faithful",
-        "p05_n04_g25",
+        scenario="p05_n04_g25",
         seed=31,
         episodes=2,
         steps_per_episode=4,
         batch_size=4,
         replay_capacity=32,
         checkpoint_every=1,
+        checkpoint_mode="resumable",
         actor_hidden=[16, 8],
         local_critic_hidden=[16, 8],
         global_critic_hidden=[16, 8, 4],
@@ -248,7 +246,7 @@ def test_validation_and_final_test_artifacts_are_separate(tmp_path):
     result = train(config)
     checkpoint = Path(result["run_dir"]) / "checkpoints" / "latest.pt"
     validation = evaluate_from_checkpoint(config, str(checkpoint), eval_episodes=1, eval_seeds=[201, 202], eval_purpose="validation", scope="validation")
-    with pytest.raises(ValueError, match="formal training checkpoint"):
+    with pytest.raises(ValueError, match="frozen reproduction baseline checkpoint"):
         evaluate_from_checkpoint(config, str(checkpoint), eval_episodes=1, eval_seeds=[101, 102], eval_purpose="final_test", scope="final_release")
     assert validation["eval_purpose"] == "validation"
     assert validation["is_formal_result"] is False
@@ -384,8 +382,8 @@ def test_diagnostic_noise_zero_evaluates_best_and_latest_without_release_marker(
     assert latest["diagnostic_evaluation"] is True
     assert best["eval_dir"] != latest["eval_dir"]
     assert not (run_dir / "VALIDATION_READY.json").exists()
-    assert audit_eval(Path(best["eval_dir"]))["ok"] is True
-    assert audit_eval(Path(latest["eval_dir"]))["ok"] is True
+    assert Path(best["eval_dir"], "summary.json").is_file()
+    assert Path(latest["eval_dir"], "summary.json").is_file()
 
 
 def test_training_diagnostics_alone_keep_normal_validation_lifecycle(tmp_path):

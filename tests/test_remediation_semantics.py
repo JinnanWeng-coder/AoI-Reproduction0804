@@ -1,14 +1,14 @@
 import numpy as np
 import pytest
 
-from Classes.Environment_Platoon import PaperEnviron, compute_global_reward, power_penalty
-from config import resolve_config
+from aoi_v2x_reproduction.envs.platoon import PaperEnviron, compute_global_reward, power_penalty
+from aoi_v2x_reproduction.config import resolve_config
 
 
 def _config(**overrides):
     values = {"seed": 53, "episodes": 2, "steps_per_episode": 4}
     values.update(overrides)
-    return resolve_config("paper_faithful", "p05_n04_g25", **values)
+    return resolve_config(scenario="p05_n04_g25", **values)
 
 
 def test_urban_grid_lane_constants_shadowing_and_exit_behavior():

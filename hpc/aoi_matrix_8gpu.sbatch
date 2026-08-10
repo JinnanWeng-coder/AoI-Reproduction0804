@@ -72,7 +72,6 @@ test -z "$(git status --porcelain --untracked-files=all)"
 "$PYTHON_BIN" -c 'import torch; assert torch.cuda.is_available(); assert torch.cuda.device_count() == 8; print({"torch": torch.__version__, "cuda_runtime": torch.version.cuda, "visible_gpu_count": torch.cuda.device_count()})'
 
 common_args=(
-  --profile paper_faithful
   --device cuda:0
   --output-root "$RUN_ROOT"
   --checkpoint-every 5

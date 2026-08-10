@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from config import (
+from aoi_v2x_reproduction.config import (
     CHECKPOINT_SCHEMA_VERSION,
     config_from_dict,
     matrix_specs,
@@ -47,13 +47,13 @@ def _resolved_item(item, args) -> dict:
     those arguments have been applied.
     """
     config = resolve_config(
-        profile=str(item["profile"]),
         scenario=str(item["scenario"]),
         seed=int(item["seed"]),
         device=str(args.device),
         run_name=str(item["run_name"]),
         output_root=str(args.output_root),
         checkpoint_every=int(getattr(args, "checkpoint_every", None) or 50),
+        checkpoint_mode="resumable",
     )
     resolved = dict(item)
     resolved.update(
@@ -79,7 +79,7 @@ def _resolved_item(item, args) -> dict:
 
 
 def _matrix_specs_for_args(args) -> list:
-    return [_resolved_item(item, args) for item in matrix_specs(args.profile)]
+    return [_resolved_item(item, args) for item in matrix_specs()]
 
 
 def _matrix_shard(specs: list, shard_count: int, shard_index: int) -> list:
@@ -124,8 +124,6 @@ def _command(item, args, stage: str, resume: Path = None):
     command = [
         sys.executable,
         str(ROOT / "Main.py"),
-        "--profile",
-        item["profile"],
         "--scenario",
         item["scenario"],
         "--seed",
@@ -138,6 +136,8 @@ def _command(item, args, stage: str, resume: Path = None):
         item["output_root"],
         "--checkpoint-every",
         str(item["_expected_config"]["checkpoint_every"]),
+        "--checkpoint-mode",
+        "resumable",
     ]
     if stage == "train":
         command.extend(["--scope", "train"])
@@ -291,7 +291,7 @@ def _recovery_state(run_dir: Path, item, recover_empty_run: bool = False) -> dic
         code = "COMPLETE_WITHOUT_CHECKPOINT" if complete.is_file() else "RUN_DIR_WITHOUT_CHECKPOINT"
         if not complete.is_file() and recover_empty_run and strict:
             try:
-                from runner import EmptyRunRecoveryError, _validate_empty_run_for_reinitialization
+                from aoi_v2x_reproduction.runtime.runner import EmptyRunRecoveryError, _validate_empty_run_for_reinitialization
 
                 config = config_from_dict(item["_expected_config"])
                 verification = _validate_empty_run_for_reinitialization(run_dir, config)
@@ -508,7 +508,6 @@ def _has_matching_eval(run_dir: Path, checkpoint_hash: str, args, item=None) -> 
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profile", default="paper_faithful")
     parser.add_argument("--stage", choices=("train", "eval", "audit", "all"), default="train")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--execute", action="store_true")

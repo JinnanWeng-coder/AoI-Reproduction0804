@@ -18,7 +18,7 @@ PYTHON_BIN="$AOI_ENV_DIR/bin/python"
 RESULT_ROOT="${AOI_RESULT_ROOT:-$AOI_BASE_ROOT/AoI-Reproduction0804-results}"
 RUN_ROOT="$RESULT_ROOT/runs"
 HANDOFF_ROOT="$RESULT_ROOT/handoff"
-PILOT_NAME="paper_faithful_p05_n04_g25_seed02"
+PILOT_NAME="reproduction_baseline_p05_n04_g25_seed02"
 PILOT_DIR="$RUN_ROOT/$PILOT_NAME"
 LATEST="$PILOT_DIR/checkpoints/latest.pt"
 
@@ -63,7 +63,6 @@ if [[ ! -f "$PILOT_DIR/COMPLETE.json" ]]; then
   fi
 
   "$PYTHON_BIN" -u Main.py \
-    --profile paper_faithful \
     --scenario p05_n04_g25 \
     --seed 2 \
     --device cuda:0 \
@@ -81,7 +80,6 @@ fi
 
 if [[ ! -f "$PILOT_DIR/VALIDATION_READY.json" ]]; then
   "$PYTHON_BIN" -u Main.py \
-    --profile paper_faithful \
     --scenario p05_n04_g25 \
     --seed 2 \
     --device cuda:0 \

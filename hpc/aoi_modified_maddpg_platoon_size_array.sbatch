@@ -20,9 +20,6 @@ RESULT_ROOT="${AOI_RESULT_ROOT:-$AOI_BASE_ROOT/AoI-Reproduction-diagnostics/Modi
 RUN_ROOT="$RESULT_ROOT/runs"
 
 ALGORITHM="modified_maddpg"
-TAU="0.005"
-SLOW_INTERVAL="1"
-GLOBAL_MODE="synchronous_joint"
 TRAIN_NOISE="0.3"
 TASK_COUNT=18
 scenarios=(p05_n06_g25 p05_n08_g25 p05_n10_g25)
@@ -44,7 +41,6 @@ seed=${seeds[$seed_index]}
 printf -v seed_token "%02d" "$seed"
 run_name="modified_maddpg_platoon_${scenario}_seed${seed_token}"
 run_dir="$RUN_ROOT/$run_name"
-latest="$run_dir/checkpoints/latest.pt"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Python environment is missing: $PYTHON_BIN" >&2
@@ -69,13 +65,13 @@ export XDG_CACHE_HOME="$RESULT_ROOT/cache/xdg"
 export MPLCONFIGDIR="$RESULT_ROOT/cache/matplotlib"
 export PYTHONPYCACHEPREFIX="$RESULT_ROOT/cache/pycache/${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
 
-echo "algorithm=$ALGORITHM task=$SLURM_ARRAY_TASK_ID/$TASK_COUNT scenario=$scenario seed=$seed tau=$TAU slow=$SLOW_INTERVAL global=$GLOBAL_MODE train_noise=$TRAIN_NOISE"
+echo "algorithm=$ALGORITHM task=$SLURM_ARRAY_TASK_ID/$TASK_COUNT scenario=$scenario seed=$seed baseline=tau0.005_slow1_sync train_noise=$TRAIN_NOISE"
 echo "primary_metric_window=last100 secondary_metric_window=last50"
 echo "result_root=$RESULT_ROOT host=$(hostname) started=$(date --iso-8601=seconds)"
 echo "commit=$(git rev-parse HEAD)"
 test "$(git branch --show-current)" = "main"
 test -z "$(git status --porcelain --untracked-files=all)"
-"$PYTHON_BIN" -c 'import sys; from config import resolve_config; c=resolve_config(profile="paper_faithful", scenario=sys.argv[1], algorithm="modified_maddpg", seed=int(sys.argv[2]), tau=0.005, slow_update_every_episodes=1, global_update_mode="synchronous_joint"); assert c.algorithm == "modified_maddpg"; assert c.scenario.number_platoons == 5; assert c.scenario.platoon_size in (6, 8, 10); assert c.scenario.gap_m == 25.0; assert c.exploration_noise == 0.3; assert not c.is_formal_result; print({"algorithm": c.algorithm, "scenario": c.scenario.id, "platoon_size": c.scenario.platoon_size, "seed": c.seed, "training_noise": c.exploration_noise})' "$scenario" "$seed"
+"$PYTHON_BIN" -c 'import sys; from aoi_v2x_reproduction.config import resolve_config; c=resolve_config(scenario=sys.argv[1], algorithm="modified_maddpg", seed=int(sys.argv[2])); assert c.scenario.number_platoons == 5 and c.scenario.platoon_size in (6, 8, 10) and c.scenario.gap_m == 25.0; assert c.tau == 0.005 and c.slow_update_every_episodes == 1 and c.global_update_mode == "synchronous_joint"; assert c.checkpoint_mode == "policy_only"; print({"algorithm": c.algorithm, "scenario": c.scenario.id, "platoon_size": c.scenario.platoon_size, "seed": c.seed, "checkpoint_mode": c.checkpoint_mode})' "$scenario" "$seed"
 "$PYTHON_BIN" -c 'import torch; assert torch.cuda.is_available(); assert torch.cuda.device_count() == 1; print({"torch": torch.__version__, "cuda": torch.version.cuda, "gpu": torch.cuda.get_device_name(0)})'
 nvidia-smi
 
@@ -84,32 +80,21 @@ if [[ -f "$run_dir/COMPLETE.json" ]]; then
   exit 0
 fi
 
-recovery_args=()
-if [[ -f "$latest" ]]; then
-  recovery_args=(--resume "$latest")
-elif [[ -d "$run_dir" ]]; then
-  recovery_args=(--recover-empty-run)
-fi
-
 "$PYTHON_BIN" -u Main.py \
   --algorithm "$ALGORITHM" \
-  --profile paper_faithful \
   --scenario "$scenario" \
   --seed "$seed" \
   --device cuda:0 \
   --run-name "$run_name" \
   --output-root "$RUN_ROOT" \
   --episodes 500 \
-  --checkpoint-every 50 \
-  --tau "$TAU" \
-  --slow-update-every-episodes "$SLOW_INTERVAL" \
-  --global-actor-mode "$GLOBAL_MODE" \
   --diagnostics \
-  --scope train \
-  "${recovery_args[@]}"
+  --scope train
 
 test -f "$run_dir/COMPLETE.json"
 test -f "$run_dir/train_metrics.npz"
 test -f "$run_dir/train_metrics_summary.json"
+test -f "$run_dir/policy_final.pt"
+test ! -d "$run_dir/checkpoints"
 test -z "$(git status --porcelain --untracked-files=all)"
 echo "completed=$(date --iso-8601=seconds) run=$run_name primary_metric_window=last100 secondary_metric_window=last50"

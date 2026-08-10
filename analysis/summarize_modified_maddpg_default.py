@@ -26,7 +26,6 @@ def _read_json(path: Path) -> Dict[str, object]:
 def _validate_config(config: Dict[str, object], seed: int) -> None:
     expected = {
         "algorithm": EXPECTED_ALGORITHM,
-        "profile": "paper_faithful",
         "seed": seed,
         "episodes": 500,
         "slow_update_every_episodes": 1,
@@ -35,6 +34,8 @@ def _validate_config(config: Dict[str, object], seed: int) -> None:
     for key, wanted in expected.items():
         if config.get(key) != wanted:
             raise ValueError(f"seed {seed}: {key}={config.get(key)!r}, expected {wanted!r}")
+    if config.get("profile") not in {"paper_faithful", "reproduction_baseline"}:
+        raise ValueError(f"seed {seed}: unsupported profile={config.get('profile')!r}")
     scenario = config.get("scenario")
     if not isinstance(scenario, dict) or scenario.get("id") != EXPECTED_SCENARIO:
         raise ValueError(f"seed {seed}: unexpected scenario")

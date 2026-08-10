@@ -17,19 +17,32 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-from config import (
+from aoi_v2x_reproduction.config import (
     CHECKPOINT_SCHEMA_VERSION,
-    LEGACY_SEMANTIC_VERSION,
-    PAPER_MOBILITY_REVISION,
-    PAPER_SEMANTIC_VERSION,
-    formal_scientific_contract_errors,
+    REPRODUCTION_MOBILITY_REVISION,
+    REPRODUCTION_PROFILE,
+    REPRODUCTION_SEMANTIC_VERSION,
+    baseline_contract_errors,
 )
 
+# Read-only labels retained so existing result bundles remain inspectable.
+PAPER_SEMANTIC_VERSION = "paper_faithful_v4"
+PAPER_MOBILITY_REVISION = "lane_graph_exit_safe_v1"
+LEGACY_SEMANTIC_VERSION = "legacy_release_v1"
+
+
+def formal_scientific_contract_errors(config):
+    if config.profile == REPRODUCTION_PROFILE:
+        return baseline_contract_errors(config)
+    return []
+
 EXPECTED_SEMANTICS = {
+    REPRODUCTION_PROFILE: REPRODUCTION_SEMANTIC_VERSION,
     "paper_faithful": PAPER_SEMANTIC_VERSION,
     "legacy_release": LEGACY_SEMANTIC_VERSION,
 }
 EXPECTED_MOBILITY_REVISIONS = {
+    REPRODUCTION_SEMANTIC_VERSION: REPRODUCTION_MOBILITY_REVISION,
     PAPER_SEMANTIC_VERSION: PAPER_MOBILITY_REVISION,
     LEGACY_SEMANTIC_VERSION: "legacy_source_v1",
 }
@@ -43,7 +56,6 @@ FORMAL_TRAINING_SEEDS = set(range(2, 8))
 RUNTIME_PROVENANCE_KEYS = (
     "python", "numpy", "torch", "cuda_version", "cuda_device_count", "cuda_driver", "gpu_names",
     "reproduction_git_commit", "reproduction_git_branch", "reproduction_git_dirty",
-    "reproduction_tracked_tree_sha256", "source_manifest_sha256",
 )
 FORMAL_SCENARIOS = {
     "p05_n04_g05", "p07_n04_g05", "p05_n04_g15", "p05_n04_g25",
@@ -73,7 +85,7 @@ def _read_json(path: Path, errors, label: str) -> Optional[Dict[str, Any]]:
 
 def _load_resolved_config(data: Dict[str, Any], errors):
     try:
-        from config import config_from_dict
+        from aoi_v2x_reproduction.config import config_from_dict
 
         return config_from_dict(data)
     except Exception as exc:
@@ -126,10 +138,6 @@ def _audit_checkpoint(
         if payload.get("training_completed") is not True or int(payload.get("selected_episode", -1)) != int(payload.get("episode", -2)):
             errors.append(f"checkpoint_best_selection_metadata:{path.name}")
     return payload
-
-
-def _source_manifest_path() -> Path:
-    return ROOT / "SOURCE_MANIFEST.json"
 
 
 def _check_eval_binding(left: Optional[Dict[str, Any]], right: Optional[Dict[str, Any]], errors, label: str) -> None:
@@ -185,7 +193,7 @@ def _expected_train_shapes(config: Dict[str, Any]) -> Dict[str, tuple]:
         "rb": base,
         "mode": base,
     }
-    if config.get("profile") == "paper_faithful":
+    if config.get("profile") in {"paper_faithful", REPRODUCTION_PROFILE}:
         shapes.update({
             "remaining_time_ms": base,
             "interference_db": base + (n_rb,),
@@ -220,7 +228,7 @@ def _expected_eval_shapes(config: Dict[str, Any], seeds: int, episodes: int) -> 
         "rb": base,
         "mode": base,
     }
-    if config.get("profile") == "paper_faithful":
+    if config.get("profile") in {"paper_faithful", REPRODUCTION_PROFILE}:
         shapes.update({
             "interference_db": base + (n_rb,),
             "selected_interference_db": base,
@@ -335,11 +343,11 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
     if config is not None and bool(config.get("is_formal_result", True)) and bool(config.get("smoke", False)):
         errors.append("formal_result_marked_smoke")
     formal = bool(config.get("is_formal_result", True)) if config is not None else False
-    if formal and profile == "paper_faithful":
+    if formal and profile == REPRODUCTION_PROFILE:
         if resolved is not None:
             for field_name in formal_scientific_contract_errors(resolved):
                 errors.append(f"formal_contract:{field_name}")
-        if config.get("semantic_version") != PAPER_SEMANTIC_VERSION:
+        if config.get("semantic_version") != REPRODUCTION_SEMANTIC_VERSION:
             errors.append("formal_semantic_version")
         if bool(config.get("smoke", False)):
             errors.append("formal_smoke_override")
@@ -357,25 +365,20 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
             errors.append("formal_network_size")
         if config.get("gap_definition") != "bumper_to_bumper" or float(config.get("vehicle_length_m", -1.0)) != 4.0:
             errors.append("formal_gap_semantics")
-        if config.get("mobility_revision") != PAPER_MOBILITY_REVISION:
+        if config.get("mobility_revision") != REPRODUCTION_MOBILITY_REVISION:
             errors.append("formal_mobility_revision")
     if provenance is not None and expected_semantic is not None:
         for key in RUNTIME_PROVENANCE_KEYS:
             if key not in provenance:
                 errors.append(f"provenance_missing:{key}")
         if formal:
-            for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_tracked_tree_sha256", "source_manifest_sha256"):
+            for key in ("reproduction_git_commit", "reproduction_git_branch"):
                 if not provenance.get(key):
                     errors.append(f"formal_provenance_missing:{key}")
             if not isinstance(provenance.get("reproduction_git_dirty"), bool):
                 errors.append("formal_provenance_dirty_flag")
         if provenance.get("semantic_version") != expected_semantic:
             errors.append("provenance_semantic_version")
-        manifest = _source_manifest_path()
-        if formal and not manifest.is_file():
-            errors.append("formal_source_manifest_missing")
-        elif manifest.is_file() and provenance.get("source_manifest_sha256") != _sha256(manifest):
-            errors.append("source_manifest_hash")
         if config is not None:
             for key in (
                 "global_reward_normalization", "mobility_model", "eval_protocol", "eval_warmup_episodes",
@@ -390,8 +393,6 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
                 errors.append("formal_git_commit_missing")
             if formal and provenance.get("reproduction_git_dirty") is not False:
                 errors.append("formal_git_dirty")
-            if formal and not provenance.get("reproduction_tracked_tree_sha256"):
-                errors.append("formal_tree_digest_missing")
     if complete is not None:
         if require_complete and complete.get("status") != "complete":
             errors.append("complete_status")
@@ -403,14 +404,10 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
             errors.append("complete_config_hash")
         if provenance is not None and complete.get("reproduction_git_commit") != provenance.get("reproduction_git_commit"):
             errors.append("complete_git_commit")
-        if provenance is not None and complete.get("source_manifest_sha256") != provenance.get("source_manifest_sha256"):
-            errors.append("complete_source_manifest")
-        if provenance is not None and complete.get("reproduction_tracked_tree_sha256") != provenance.get("reproduction_tracked_tree_sha256"):
-            errors.append("complete_tree_digest")
         if formal and complete.get("reproduction_git_branch") != (None if provenance is None else provenance.get("reproduction_git_branch")):
             errors.append("complete_git_branch")
         if formal:
-            for key in ("source_manifest_sha256", "checkpoint_schema_version", "effective_center_spacing_m", "gap_definition", "vehicle_length_m"):
+            for key in ("checkpoint_schema_version", "effective_center_spacing_m", "gap_definition", "vehicle_length_m"):
                 if key not in complete:
                     errors.append(f"complete_missing:{key}")
             if complete.get("reproduction_git_dirty") is not False:
@@ -451,12 +448,8 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
                 errors.append(f"checkpoint_git_commit:{name}")
             if payload.get("reproduction_git_branch") is not None and payload.get("reproduction_git_branch") != provenance.get("reproduction_git_branch"):
                 errors.append(f"checkpoint_git_branch:{name}")
-            if payload.get("reproduction_tracked_tree_sha256") is not None and payload.get("reproduction_tracked_tree_sha256") != provenance.get("reproduction_tracked_tree_sha256"):
-                errors.append(f"checkpoint_tree_digest:{name}")
-            if payload.get("source_manifest_sha256") is not None and payload.get("source_manifest_sha256") != provenance.get("source_manifest_sha256"):
-                errors.append(f"checkpoint_source_manifest:{name}")
             if formal:
-                for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_git_dirty", "reproduction_tracked_tree_sha256", "source_manifest_sha256"):
+                for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_git_dirty"):
                     if key not in payload:
                         errors.append(f"formal_checkpoint_missing:{name}:{key}")
             if payload.get("mobility_revision") is not None and payload.get("mobility_revision") != provenance.get("mobility_revision"):
@@ -507,8 +500,8 @@ def audit_run(run_dir: Path, require_complete: bool = True, require_eval: bool =
                 if key not in marker or marker.get(key) != validation_reports[0].get(key):
                     errors.append(f"validation_ready_binding:{key}")
     if scope == "final_release":
-        if not (formal and profile == "paper_faithful"):
-            errors.append("final_release_requires_formal_paper_training")
+        if not (formal and profile == REPRODUCTION_PROFILE):
+            errors.append("final_release_requires_formal_baseline_training")
         final_reports = [report for report in eval_reports if report.get("eval_purpose") == "final_test"]
         if len(final_reports) != 1:
             errors.append("final_test_artifact_not_unique")
@@ -577,8 +570,6 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
     run_config = _read_json(config_path, errors, "run_config") if config_path.is_file() else None
     resolved_run_config = _load_resolved_config(run_config, errors) if run_config is not None else None
     formal_training = bool(resolved_run_config is not None and resolved_run_config.is_formal_result)
-    if formal_training and not _source_manifest_path().is_file():
-        errors.append("formal_eval_source_manifest_missing")
     if complete is not None and complete.get("status") != "complete":
         errors.append("eval_complete_status")
     if summary is not None and complete is not None and summary != complete:
@@ -662,7 +653,7 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
                 for key in ("semantic_version", "config_hash", "mobility_revision", "checkpoint_schema_version"):
                     if summary.get(key) != checkpoint_payload.get(key):
                         errors.append(f"checkpoint_{key}")
-                for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_tracked_tree_sha256", "source_manifest_sha256"):
+                for key in ("reproduction_git_commit", "reproduction_git_branch"):
                     if checkpoint_payload.get(key) is not None and summary.get(key) != checkpoint_payload.get(key):
                         errors.append(f"checkpoint_{key}")
                 if checkpoint_payload.get("completed") is not True:
@@ -763,7 +754,7 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
                 "statistics_schema_version", "checkpoint_sha256", "checkpoint_schema_version",
                 "checkpoint_name", "checkpoint_episode", "checkpoint_completed",
                 "mobility_revision", "reproduction_git_commit", "reproduction_git_branch",
-                "reproduction_tracked_tree_sha256", "source_manifest_sha256", "python", "numpy", "torch",
+                "python", "numpy", "torch",
                 "cuda_available", "cuda_version", "cuda_driver", "gpu_names",
                 "cuda_device_count",
             ):
@@ -772,10 +763,7 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
         run_provenance_path = eval_dir.parent.parent / "provenance.json"
         run_provenance = _read_json(run_provenance_path, errors, "run_provenance") if run_provenance_path.is_file() else None
         if run_provenance is not None:
-            manifest_path = _source_manifest_path()
-            if manifest_path.is_file() and summary.get("source_manifest_sha256") != _sha256(manifest_path):
-                errors.append("eval_source_manifest_hash")
-            for key in ("semantic_version", "config_hash", "mobility_revision", "reproduction_git_commit", "reproduction_git_branch", "reproduction_tracked_tree_sha256", "source_manifest_sha256"):
+            for key in ("semantic_version", "config_hash", "mobility_revision", "reproduction_git_commit", "reproduction_git_branch"):
                 if summary.get(key) != run_provenance.get(key):
                     errors.append(f"eval_run_provenance_{key}")
             if summary.get("reproduction_git_dirty") != run_provenance.get("reproduction_git_dirty"):
@@ -783,13 +771,13 @@ def audit_eval(eval_dir: Path) -> Dict[str, Any]:
             if formal_training:
                 for field_name in formal_scientific_contract_errors(resolved_run_config):
                     errors.append(f"formal_eval_contract:{field_name}")
-                for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_tracked_tree_sha256", "source_manifest_sha256"):
+                for key in ("reproduction_git_commit", "reproduction_git_branch"):
                     if not run_provenance.get(key):
                         errors.append(f"formal_eval_run_provenance_missing:{key}")
                 if run_provenance.get("reproduction_git_dirty") is not False:
                     errors.append("formal_eval_run_git_dirty")
                 if checkpoint_payload is not None:
-                    for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_tracked_tree_sha256", "source_manifest_sha256"):
+                    for key in ("reproduction_git_commit", "reproduction_git_branch"):
                         if checkpoint_payload.get(key) != run_provenance.get(key):
                             errors.append(f"formal_eval_checkpoint_provenance:{key}")
                     if checkpoint_payload.get("reproduction_git_dirty") is not False:
@@ -859,7 +847,7 @@ def audit_study_manifest(path: Path) -> Dict[str, Any]:
         if entry.get("checkpoint_schema_version") != CHECKPOINT_SCHEMA_VERSION:
             errors.append(f"entry{index}:checkpoint_schema_version")
         if entry.get("is_formal_result"):
-            for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_git_dirty", "reproduction_tracked_tree_sha256", "source_manifest_sha256"):
+            for key in ("reproduction_git_commit", "reproduction_git_branch", "reproduction_git_dirty"):
                 if not entry.get(key) and entry.get(key) is not False:
                     errors.append(f"entry{index}:provenance_missing:{key}")
         run_ref = Path(str(entry.get("run_path")))
