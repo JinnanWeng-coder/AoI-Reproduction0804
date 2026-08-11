@@ -84,12 +84,15 @@ def build_payload(config, agents, learner, replay, environment, metrics, episode
     return payload
 
 
-def build_policy_payload(config, agents, episode: int) -> Dict[str, Any]:
+def build_policy_payload(config, policy_source, episode: int) -> Dict[str, Any]:
     """Build the single lightweight policy artifact used by exploratory runs."""
 
-    actors = []
-    for agent in agents:
-        actors.append({name: tensor.detach().cpu() for name, tensor in agent.actor.state_dict().items()})
+    if hasattr(policy_source, "policy_state_dicts"):
+        actors = list(policy_source.policy_state_dicts())
+    else:
+        actors = []
+        for agent in policy_source:
+            actors.append({name: tensor.detach().cpu() for name, tensor in agent.actor.state_dict().items()})
     payload = {
         "artifact_type": "policy_only",
         "policy_schema_version": "policy_artifact_v1",
@@ -100,5 +103,11 @@ def build_policy_payload(config, agents, episode: int) -> Dict[str, Any]:
         "environment_steps": int(episode) * int(config.steps_per_episode),
         "actors": actors,
     }
+    if config.algorithm == "mappo":
+        payload["algorithm_applicability"] = {
+            "polyak_tau_applicable": False,
+            "external_action_noise_applicable": False,
+            "global_actor_update_mode_applicable": False,
+        }
     payload.update(_git_stamp())
     return payload

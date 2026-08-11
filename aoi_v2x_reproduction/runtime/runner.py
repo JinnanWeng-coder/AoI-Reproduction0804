@@ -12,6 +12,7 @@ import random
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -34,6 +35,8 @@ from ..config import (
 )
 from ..algorithms.modified_maddpg.learner import Global_Critic
 from ..algorithms.modified_maddpg.agent import Agent
+from ..algorithms.mappo.rollout import OnPolicyRollout
+from ..algorithms.mappo.trainer import MAPPOTrainer
 from .metrics import MetricStore
 
 
@@ -116,6 +119,27 @@ def _make_system(config):
         algorithm=config.algorithm,
     )
     return environment, agents, learner, replay, metrics, device
+
+
+def _make_mappo_system(config):
+    device = resolve_device(config.device)
+    config.device_resolved = str(device)
+    seed_everything(config.seed, device)
+    environment = _make_environment(config)
+    trainer = MAPPOTrainer(config, device)
+    rollout = OnPolicyRollout(config.number_agents, config.state_dim)
+    metrics = MetricStore(
+        config.number_agents,
+        config.steps_per_episode,
+        config.global_actor_weight,
+        n_rb=config.n_rb,
+        n_modes=config.n_modes,
+        power_min_dbm=config.power_min_dbm,
+        power_max_dbm=config.power_max_dbm,
+        diagnostics=config.diagnostics,
+        algorithm=config.algorithm,
+    )
+    return environment, trainer, rollout, metrics, device
 
 
 def _git_metadata() -> Dict[str, Any]:
@@ -764,12 +788,152 @@ def _repair_selection_best_after_resume(run_dir: Path, latest_payload: Dict[str,
     )
 
 
+def _train_mappo(
+    config: ExperimentConfig,
+    resume: Optional[str] = None,
+    max_episodes: Optional[int] = None,
+    recover_empty_run: bool = False,
+) -> Dict[str, Any]:
+    if resume or recover_empty_run:
+        raise ValueError("the first MAPPO baseline does not support training resume or empty-run recovery")
+    if config.checkpoint_mode == "resumable":
+        raise ValueError("the first MAPPO baseline supports checkpoint_mode none or policy_only")
+    if max_episodes is not None and int(max_episodes) < int(config.episodes):
+        raise ValueError("the first MAPPO baseline does not support partial training runs")
+    run_dir, is_resume = _prepare_run(config, None, recover_empty_run=False)
+    if is_resume:
+        raise RuntimeError("MAPPO exploratory runs must start from a new run directory")
+    environment, trainer, rollout, metrics, device = _make_mappo_system(config)
+    if hasattr(environment, "reset_world") and not getattr(environment, "_world_initialized", False):
+        environment.reset_world(config.seed)
+
+    started = time.perf_counter()
+    stop_episode = int(config.episodes)
+    for episode in range(stop_episode):
+        observations = environment.start_episode(episode)
+        task1_steps: List[np.ndarray] = []
+        task2_steps: List[np.ndarray] = []
+        global_steps: List[float] = []
+        step_records: List[Dict[str, Any]] = []
+        for _step in range(config.steps_per_episode):
+            sampled = trainer.act(observations, deterministic=False)
+            next_observations, reward_global, reward_task1, reward_task2, terminated, info = environment.step(
+                sampled.environment_actions
+            )
+            next_values = (
+                np.zeros(config.number_agents, dtype=np.float32)
+                if terminated
+                else trainer.values(next_observations)
+            )
+            rollout.append(
+                observations=observations,
+                rb=sampled.rb,
+                mode=sampled.mode,
+                power=sampled.power,
+                old_log_prob=sampled.log_prob,
+                values=sampled.values,
+                rewards=trainer.combined_rewards(reward_global, reward_task1, reward_task2),
+                done=terminated,
+                next_values=next_values,
+                policy_version=trainer.policy_version,
+            )
+            task1_steps.append(np.asarray(reward_task1, dtype=np.float32))
+            task2_steps.append(np.asarray(reward_task2, dtype=np.float32))
+            global_steps.append(float(reward_global))
+            step_records.append(_record_step(info, sampled.environment_actions))
+            observations = next_observations
+        metrics.append_episode(step_records, task1_steps, task2_steps, global_steps)
+
+        rollout_ready = rollout.terminal_count >= int(config.mappo_rollout_episodes)
+        final_episode_this_call = episode == stop_episode - 1
+        if rollout_ready or final_episode_this_call:
+            batch = rollout.consume(
+                gamma=config.gamma,
+                gae_lambda=config.mappo_gae_lambda,
+                expected_policy_version=trainer.policy_version,
+            )
+            diagnostics = trainer.update(batch)
+            metrics.append_mappo_update(episode + 1, diagnostics)
+
+    if len(rollout) != 0:
+        raise RuntimeError("MAPPO rollout was not consumed at the training boundary")
+    shapes = metrics.save(run_dir)
+    policy_saved = False
+    if config.checkpoint_mode == "policy_only":
+        atomic_torch_save(build_policy_payload(config, trainer, config.episodes), run_dir / "policy_final.pt")
+        policy_saved = True
+    parameter_counts = trainer.parameter_counts()
+    wall_seconds = float(time.perf_counter() - started)
+    audit = {
+        "ok": True,
+        "scope": "train",
+        "algorithm": "mappo",
+        "checkpoint_mode": config.checkpoint_mode,
+        "metrics_shapes": shapes,
+        "update_count": int(trainer.update_count),
+        "environment_steps": int(trainer.environment_steps),
+    }
+    provenance_data = json.loads((run_dir / "provenance.json").read_text(encoding="utf-8"))
+    complete = {
+        "status": "complete",
+        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+        "is_formal_result": False,
+        "algorithm": "mappo",
+        "profile": config.profile,
+        "semantic_version": config.semantic_version,
+        "mobility_revision": config.mobility_revision,
+        "config_hash": config.canonical_hash(),
+        "reproduction_git_commit": provenance_data.get("reproduction_git_commit"),
+        "reproduction_git_branch": provenance_data.get("reproduction_git_branch"),
+        "reproduction_git_dirty": provenance_data.get("reproduction_git_dirty"),
+        "python": provenance_data.get("python"),
+        "numpy": provenance_data.get("numpy"),
+        "torch": provenance_data.get("torch"),
+        "cuda_version": provenance_data.get("cuda_version"),
+        "cuda_driver": provenance_data.get("cuda_driver"),
+        "gpu_names": provenance_data.get("gpu_names", []),
+        "scenario": config.scenario.id,
+        "seed": int(config.seed),
+        "episodes": int(config.episodes),
+        "steps_per_episode": int(config.steps_per_episode),
+        "environment_steps": int(trainer.environment_steps),
+        "update_count": int(trainer.update_count),
+        "checkpoint_mode": config.checkpoint_mode,
+        "policy_final": "policy_final.pt" if policy_saved else None,
+        "reward_semantics": "global_plus_per_agent_task1_plus_task2",
+        "actor_sharing": False,
+        "central_critic_output": "per_agent_state_value",
+        "power_distribution": "beta_open_unit_interval",
+        "algorithm_applicability": {
+            "polyak_tau_applicable": False,
+            "external_action_noise_applicable": False,
+            "global_actor_update_mode_applicable": False,
+        },
+        "parameter_counts": parameter_counts,
+        "training_wall_seconds": wall_seconds,
+        "metrics_shapes": shapes,
+        "audit": audit,
+    }
+    _write_json(run_dir / "COMPLETE.json", complete)
+    with (run_dir / "stdout.log").open("a", encoding="utf-8") as handle:
+        handle.write("MAPPO run completed\n")
+    return {
+        "run_dir": str(run_dir),
+        "episodes": int(config.episodes),
+        "device": str(device),
+        "audit": audit,
+        "parameter_counts": parameter_counts,
+    }
+
+
 def train(
     config: ExperimentConfig,
     resume: Optional[str] = None,
     max_episodes: Optional[int] = None,
     recover_empty_run: bool = False,
 ) -> Dict[str, Any]:
+    if config.algorithm == "mappo":
+        return _train_mappo(config, resume, max_episodes, recover_empty_run)
     if resume and config.checkpoint_mode != "resumable":
         raise ValueError("training resume requires checkpoint_mode=resumable")
     run_dir, is_resume = _prepare_run(config, resume, recover_empty_run=recover_empty_run)
@@ -1028,6 +1192,8 @@ def evaluate_from_checkpoint(
     eval_noise: float = 0.0,
     diagnostic_eval: bool = False,
 ) -> Dict[str, Any]:
+    if config.algorithm == "mappo":
+        raise ValueError("MAPPO held-out evaluation is deferred; the exploratory baseline writes policy_final.pt only")
     if eval_purpose not in EVAL_PURPOSE_SEEDS:
         raise ValueError("eval_purpose must be explicitly set to validation or final_test")
     expected_scope = SCOPE_FOR_PURPOSE[eval_purpose]

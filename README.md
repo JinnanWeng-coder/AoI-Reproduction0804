@@ -1,7 +1,8 @@
 # AoI-V2X reproduction
 
 This repository contains the maintained reproduction implementation for the
-Modified MADDPG algorithms in the AoI-V2X study. Active runs use one baseline:
+Modified MADDPG algorithms in the AoI-V2X study and an exploratory MAPPO
+extension. Modified MADDPG runs use one baseline:
 
 - Polyak coefficient `tau=0.005`
 - synchronous joint global-actor update
@@ -19,6 +20,7 @@ The exact pre-refactor repository remains available at Git tag
 ```text
 aoi_v2x_reproduction/
   algorithms/modified_maddpg/  actor, critics, learner, replay
+  algorithms/mappo/            hybrid actors, central critic, GAE/PPO rollout
   envs/platoon.py              V2X platoon environment
   runtime/                     training, evaluation, metrics, checkpoints
   cli.py                       command-line entry point
@@ -43,7 +45,16 @@ bash scripts/run_smoke.sh cpu
 ```
 
 Algorithm 1 is selected with `--algorithm modified_maddpg`; Algorithm 2 with
-task decomposition is the default `modified_maddpg_tdec`.
+task decomposition is the default `modified_maddpg_tdec`. The exploratory
+extension is selected with `--algorithm mappo`.
+
+The first MAPPO implementation keeps one actor per platoon, uses categorical
+RB and transmission-mode heads, a Beta power head, and a centralized critic
+that predicts one state value per agent. It uses the same per-agent reward
+decomposition and unchanged V2X environment. Its first confirmation wave is
+training-only at P=5, N=4, gap=25 with seeds 8--13. Polyak tau, external action
+noise, and the MADDPG global-actor update mode do not apply to MAPPO; `tau=0.005`
+is retained only in the shared resolved-config baseline metadata.
 
 ## Artifact policy
 
@@ -51,6 +62,10 @@ Early training writes metrics, configuration, provenance, completion metadata,
 and one final actor-only `policy_final.pt`. It does not create replay snapshots
 or periodic/best/latest checkpoints. Use `--checkpoint-mode none` to omit even
 the final policy.
+
+The first MAPPO policy artifact follows the same lightweight rule: it contains
+only the five actor state dictionaries, not the central critic, optimizers,
+rollout data, or RNG state. MAPPO resume and held-out evaluation are deferred.
 
 `--checkpoint-mode resumable` is reserved for a later, explicitly planned
 resume or held-out evaluation stage. It stores optimizer, replay, environment,

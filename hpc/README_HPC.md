@@ -16,6 +16,17 @@ They train only, use the fixed `tau=0.005`, slow-update-1, synchronous-global
 baseline, and write one `policy_final.pt` without replay or periodic
 checkpoints.
 
+The first MAPPO confirmation uses:
+
+- `aoi_mappo_default_array.sbatch`: P=5, N=4, gap=25, seeds 8–13
+
+It is training-only and writes to
+`MAPPO_results/default/P5_N4_gap25`. The six cells use separate local actors,
+a centralized per-agent critic, five episodes per on-policy rollout, and ten
+PPO epochs. The shared config still records `tau=0.005`, but Polyak tau,
+external action noise, and global-actor update semantics are explicitly marked
+not applicable in MAPPO completion metadata.
+
 The pilot, matrix, and audit launchers are retained for a later held-out stage.
 They explicitly use resumable checkpoints and refuse to start unless
 `AOI_RESULT_ROOT` is set to the dedicated

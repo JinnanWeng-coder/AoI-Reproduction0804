@@ -29,6 +29,21 @@ Each completed cell must contain `COMPLETE.json`, `train_metrics.npz`,
 `train_metrics_summary.json`, and `policy_final.pt`, with no `checkpoints/`
 directory.
 
+For the first MAPPO confirmation, create the log directory before submission,
+run seed 8 as a pilot, and submit seeds 9--13 only after that cell completes:
+
+```bash
+MAPPO_ROOT=/eeedata/sgxjw2/Parvini-TVT2023-reproduction/AoI-Reproduction-diagnostics/MAPPO_results/default/P5_N4_gap25
+mkdir -p "$MAPPO_ROOT/slurm_logs"
+sbatch --array=0 hpc/aoi_mappo_default_array.sbatch
+# after seed 8 passes:
+sbatch --array=1-5%5 hpc/aoi_mappo_default_array.sbatch
+/eeedata/sgxjw2/conda_envs/aoi_cuda/bin/python analysis/summarize_mappo_default.py --result-root "$MAPPO_ROOT"
+```
+
+This MAPPO wave is training-only. Do not run held-out evaluation, a formal
+matrix, or `final_test` from these policy-only artifacts.
+
 ## Deferred evaluation workflow
 
 Held-out evaluation is intentionally not part of early exploration. When it is

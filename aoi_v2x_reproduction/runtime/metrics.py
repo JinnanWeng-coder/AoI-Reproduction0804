@@ -52,11 +52,12 @@ class MetricStore:
         self.power_max_dbm = float(power_max_dbm)
         self.diagnostics = bool(diagnostics)
         self.algorithm = str(algorithm)
-        self.gradient_fields = (
-            self.MODIFIED_MADDPG_GRADIENT_FIELDS
-            if self.algorithm == "modified_maddpg"
-            else self.GRADIENT_FIELDS
-        )
+        if self.algorithm == "mappo":
+            self.gradient_fields = ()
+        elif self.algorithm == "modified_maddpg":
+            self.gradient_fields = self.MODIFIED_MADDPG_GRADIENT_FIELDS
+        else:
+            self.gradient_fields = self.GRADIENT_FIELDS
         self.episodes: List[Dict[str, Any]] = []
         self.learning: List[Dict[str, Any]] = []
         self.gradient_episodes: List[Dict[str, Any]] = []
@@ -72,6 +73,15 @@ class MetricStore:
     def append_learning(self, diagnostics):
         if diagnostics:
             self.learning.append(diagnostics)
+
+    def append_mappo_update(self, episode: int, diagnostics: Dict[str, Any]) -> None:
+        """Store one compact record for a completed on-policy update."""
+
+        if self.algorithm != "mappo":
+            raise ValueError("MAPPO update diagnostics require algorithm=mappo")
+        record = dict(diagnostics)
+        record["episode"] = int(episode)
+        self.learning.append(record)
 
     def append_learning_episode(self, records: List[Dict[str, Any]]) -> None:
         """Store compact episode summaries instead of every replay update."""

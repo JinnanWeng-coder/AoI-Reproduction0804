@@ -22,7 +22,24 @@ REPRODUCTION_SEMANTIC_VERSION = "reproduction_baseline_v1"
 REPRODUCTION_MOBILITY_REVISION = "lane_graph_exit_safe_v1"
 CHECKPOINT_SCHEMA_VERSION = "checkpoint_v4"
 DEFAULT_ALGORITHM = "modified_maddpg_tdec"
-SUPPORTED_ALGORITHMS = (DEFAULT_ALGORITHM, "modified_maddpg")
+SUPPORTED_ALGORITHMS = (DEFAULT_ALGORITHM, "modified_maddpg", "mappo")
+
+MAPPO_CONFIG_FIELDS = (
+    "mappo_actor_lr",
+    "mappo_critic_lr",
+    "mappo_rollout_episodes",
+    "mappo_gae_lambda",
+    "mappo_clip_param",
+    "mappo_ppo_epochs",
+    "mappo_num_minibatches",
+    "mappo_value_loss_coef",
+    "mappo_entropy_coef_rb",
+    "mappo_entropy_coef_mode",
+    "mappo_entropy_coef_power",
+    "mappo_max_grad_norm",
+    "mappo_adam_eps",
+    "mappo_huber_delta",
+)
 
 
 DEFAULT_SCENARIOS: Dict[str, Dict[str, Any]] = {
@@ -62,6 +79,20 @@ COMMON_DEFAULTS: Dict[str, Any] = {
     "target_noise_clip": 0.5,
     "target_action_clip": 0.999,
     "global_actor_weight": 1.0,
+    "mappo_actor_lr": 0.0005,
+    "mappo_critic_lr": 0.0005,
+    "mappo_rollout_episodes": 5,
+    "mappo_gae_lambda": 0.95,
+    "mappo_clip_param": 0.2,
+    "mappo_ppo_epochs": 10,
+    "mappo_num_minibatches": 1,
+    "mappo_value_loss_coef": 1.0,
+    "mappo_entropy_coef_rb": 0.01,
+    "mappo_entropy_coef_mode": 0.01,
+    "mappo_entropy_coef_power": 0.001,
+    "mappo_max_grad_norm": 10.0,
+    "mappo_adam_eps": 0.00001,
+    "mappo_huber_delta": 10.0,
     "actor_hidden": [1024, 512],
     "local_critic_hidden": [512, 256],
     "global_critic_hidden": [1024, 512, 256],
@@ -145,6 +176,20 @@ class ExperimentConfig:
     target_noise_clip: float = 0.5
     target_action_clip: float = 0.999
     global_actor_weight: float = 1.0
+    mappo_actor_lr: float = 0.0005
+    mappo_critic_lr: float = 0.0005
+    mappo_rollout_episodes: int = 5
+    mappo_gae_lambda: float = 0.95
+    mappo_clip_param: float = 0.2
+    mappo_ppo_epochs: int = 10
+    mappo_num_minibatches: int = 1
+    mappo_value_loss_coef: float = 1.0
+    mappo_entropy_coef_rb: float = 0.01
+    mappo_entropy_coef_mode: float = 0.01
+    mappo_entropy_coef_power: float = 0.001
+    mappo_max_grad_norm: float = 10.0
+    mappo_adam_eps: float = 0.00001
+    mappo_huber_delta: float = 10.0
     actor_hidden: List[int] = field(default_factory=lambda: [1024, 512])
     local_critic_hidden: List[int] = field(default_factory=lambda: [512, 256])
     global_critic_hidden: List[int] = field(default_factory=lambda: [1024, 512, 256])
@@ -226,6 +271,11 @@ class ExperimentConfig:
         # analysis without re-enabling their training profiles.
         if self.semantic_version != REPRODUCTION_SEMANTIC_VERSION:
             data.pop("checkpoint_mode", None)
+        # PPO-only controls must not alter the established Algorithm 1/2
+        # config identities or their resolved artifacts.
+        if self.algorithm != "mappo":
+            for field_name in MAPPO_CONFIG_FIELDS:
+                data.pop(field_name, None)
         data["scenario"] = asdict(self.scenario)
         data["derived"] = {
             "number_agents": self.number_agents,
@@ -373,6 +423,8 @@ def validate_config(config: ExperimentConfig) -> None:
         raise ValueError("reproduction baseline requires tau=0.005")
     if config.checkpoint_mode not in {"none", "policy_only", "resumable"}:
         raise ValueError("checkpoint_mode must be none, policy_only, or resumable")
+    if config.algorithm == "mappo" and config.checkpoint_mode == "resumable":
+        raise ValueError("the first MAPPO baseline supports checkpoint_mode none or policy_only")
     if config.slow_update_every_episodes != 1:
         raise ValueError("reproduction baseline requires slow_update_every_episodes=1")
     if config.n_rb < 1 or config.n_modes < 2:
@@ -413,6 +465,20 @@ def validate_config(config: ExperimentConfig) -> None:
         raise ValueError("previous_interference_dim must be 1 or n_rb")
     if len(config.rsu_position) != 2:
         raise ValueError("rsu_position must have two coordinates")
+    if config.mappo_rollout_episodes < 1 or config.mappo_ppo_epochs < 1 or config.mappo_num_minibatches < 1:
+        raise ValueError("MAPPO rollout episodes, PPO epochs, and minibatches must be positive")
+    if config.mappo_num_minibatches != 1:
+        raise ValueError("the first MAPPO baseline uses one full rollout minibatch")
+    for name in ("mappo_actor_lr", "mappo_critic_lr", "mappo_max_grad_norm", "mappo_adam_eps", "mappo_huber_delta"):
+        if not math.isfinite(float(getattr(config, name))) or float(getattr(config, name)) <= 0.0:
+            raise ValueError(f"{name} must be finite and positive")
+    if not 0.0 <= config.mappo_gae_lambda <= 1.0:
+        raise ValueError("mappo_gae_lambda must be in [0, 1]")
+    if not 0.0 < config.mappo_clip_param < 1.0:
+        raise ValueError("mappo_clip_param must be in (0, 1)")
+    for name in ("mappo_value_loss_coef", "mappo_entropy_coef_rb", "mappo_entropy_coef_mode", "mappo_entropy_coef_power"):
+        if not math.isfinite(float(getattr(config, name))) or float(getattr(config, name)) < 0.0:
+            raise ValueError(f"{name} must be finite and non-negative")
 
 
 # Runtime/path controls are deliberately excluded: device, output_root,
@@ -567,6 +633,8 @@ def apply_smoke_overrides(overrides: Dict[str, Any]) -> Dict[str, Any]:
         "local_critic_hidden": [64, 32],
         "global_critic_hidden": [64, 32, 16],
         "exploration_noise": 0.05,
+        "mappo_rollout_episodes": 2,
+        "mappo_ppo_epochs": 2,
         "smoke": True,
         "is_formal_result": False,
     })
@@ -581,7 +649,7 @@ def _positive_int(value: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Modified MADDPG Algorithm 1/2 reproduction runner")
+    parser = argparse.ArgumentParser(description="AoI-V2X reproduction and MAPPO comparison runner")
     parser.add_argument("--algorithm", choices=SUPPORTED_ALGORITHMS, default=DEFAULT_ALGORITHM)
     parser.add_argument("--scenario", default="p05_n04_g25")
     parser.add_argument("--seed", type=int, default=2)
