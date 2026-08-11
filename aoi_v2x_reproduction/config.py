@@ -688,10 +688,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--matrix", action="store_true", help="print the complete 48-run matrix with --dry-run")
     parser.add_argument("--power-min-dbm", type=float, default=None)
     parser.add_argument("--power-max-dbm", type=float, default=None)
+    parser.add_argument("--mappo-actor-lr", type=float, default=None)
+    parser.add_argument("--mappo-entropy-coef-rb", type=float, default=None)
+    parser.add_argument("--mappo-entropy-coef-mode", type=float, default=None)
+    parser.add_argument("--mappo-entropy-coef-power", type=float, default=None)
     return parser
 
 
 def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
+    mappo_overrides = {
+        "mappo_actor_lr": args.mappo_actor_lr,
+        "mappo_entropy_coef_rb": args.mappo_entropy_coef_rb,
+        "mappo_entropy_coef_mode": args.mappo_entropy_coef_mode,
+        "mappo_entropy_coef_power": args.mappo_entropy_coef_power,
+    }
+    if args.algorithm != "mappo" and any(value is not None for value in mappo_overrides.values()):
+        raise ValueError("MAPPO hyperparameter overrides require --algorithm mappo")
     overrides: Dict[str, Any] = {
         "algorithm": args.algorithm,
         "seed": args.seed,
@@ -705,6 +717,7 @@ def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         "diagnostics": bool(args.diagnostics),
         "power_min_dbm": args.power_min_dbm,
         "power_max_dbm": args.power_max_dbm,
+        **mappo_overrides,
     }
     if args.smoke:
         overrides = apply_smoke_overrides(overrides)

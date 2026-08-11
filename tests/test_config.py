@@ -70,6 +70,26 @@ def test_cli_exposes_artifact_policy_but_not_baseline_knobs():
         parser.parse_args(["--profile", "paper_faithful"])
 
 
+def test_cli_exposes_only_the_planned_mappo_stability_overrides():
+    parser = build_parser()
+    args = parser.parse_args([
+        "--algorithm", "mappo",
+        "--mappo-actor-lr", "0.0001",
+        "--mappo-entropy-coef-rb", "0.02",
+        "--mappo-entropy-coef-mode", "0.02",
+        "--mappo-entropy-coef-power", "0.002",
+    ])
+    config = config_from_args(args)
+    assert config.mappo_actor_lr == pytest.approx(0.0001)
+    assert config.mappo_entropy_coef_rb == pytest.approx(0.02)
+    assert config.mappo_entropy_coef_mode == pytest.approx(0.02)
+    assert config.mappo_entropy_coef_power == pytest.approx(0.002)
+
+    invalid = parser.parse_args(["--algorithm", "modified_maddpg", "--mappo-actor-lr", "0.0001"])
+    with pytest.raises(ValueError, match="require --algorithm mappo"):
+        config_from_args(invalid)
+
+
 def test_diagnostic_eval_flag_is_not_valid_for_training():
     from Main import main
 

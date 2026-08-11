@@ -51,6 +51,25 @@ def test_mappo_default_array_has_the_frozen_first_wave_contract():
     assert "formal" not in text.lower()
 
 
+def test_mappo_stability_array_has_exactly_two_single_factor_arms():
+    text = (ROOT / "hpc" / "aoi_mappo_stability_array.sbatch").read_text(encoding="utf-8")
+    for required in (
+        "#SBATCH --array=0-11%6",
+        'arm="actor_lr1e4"',
+        'arm="entropy2x"',
+        'actor_lr="0.0001"',
+        'actor_lr="0.0005"',
+        'entropy_rb="0.02"',
+        'entropy_mode="0.02"',
+        'entropy_power="0.002"',
+        "seeds=(8 9 10 11 12 13)",
+        "MAPPO_results/stability-ablation-v1/P5_N4_gap25",
+    ):
+        assert required in text
+    assert "--eval-only" not in text
+    assert "--checkpoint-mode resumable" not in text
+
+
 def test_deferred_heldout_scripts_require_the_dedicated_result_root():
     for name in (
         "aoi_pilot_1gpu.sbatch",

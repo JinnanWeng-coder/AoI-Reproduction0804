@@ -27,6 +27,14 @@ PPO epochs. The shared config still records `tau=0.005`, but Polyak tau,
 external action noise, and global-actor update semantics are explicitly marked
 not applicable in MAPPO completion metadata.
 
+The follow-up stability diagnostic uses
+`aoi_mappo_stability_array.sbatch` (12 new cells): six seeds with only actor
+learning rate reduced to `1e-4`, and six seeds with only all three entropy
+coefficients doubled. The original six default cells are reused for comparison.
+`analysis/audit_mappo_default_actions.py` performs read-only action/reward
+post-processing, while `analysis/summarize_mappo_stability.py` produces the
+three-arm comparison.
+
 The pilot, matrix, and audit launchers are retained for a later held-out stage.
 They explicitly use resumable checkpoints and refuse to start unless
 `AOI_RESULT_ROOT` is set to the dedicated

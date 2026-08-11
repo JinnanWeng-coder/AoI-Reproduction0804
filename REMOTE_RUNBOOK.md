@@ -44,6 +44,20 @@ sbatch --array=1-5%5 hpc/aoi_mappo_default_array.sbatch
 This MAPPO wave is training-only. Do not run held-out evaluation, a formal
 matrix, or `final_test` from these policy-only artifacts.
 
+After the first default wave, the compact action/reward audit and two-arm
+stability diagnostic are run with:
+
+```bash
+BASELINE_ROOT=/eeedata/sgxjw2/Parvini-TVT2023-reproduction/AoI-Reproduction-diagnostics/MAPPO_results/default/P5_N4_gap25
+STABILITY_ROOT=/eeedata/sgxjw2/Parvini-TVT2023-reproduction/AoI-Reproduction-diagnostics/MAPPO_results/stability-ablation-v1/P5_N4_gap25
+python analysis/audit_mappo_default_actions.py --result-root "$BASELINE_ROOT"
+mkdir -p "$STABILITY_ROOT/slurm_logs"
+sbatch hpc/aoi_mappo_stability_array.sbatch
+python analysis/summarize_mappo_stability.py --stability-root "$STABILITY_ROOT" --baseline-root "$BASELINE_ROOT"
+```
+
+This adds 12 trainings; the six-cell default baseline is not rerun.
+
 ## Deferred evaluation workflow
 
 Held-out evaluation is intentionally not part of early exploration. When it is
