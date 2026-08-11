@@ -35,6 +35,12 @@ coefficients doubled. The original six default cells are reused for comparison.
 post-processing, while `analysis/summarize_mappo_stability.py` produces the
 three-arm comparison.
 
+The minimal combined confirmation uses `aoi_mappo_combined_array.sbatch` (six
+new cells, seeds 8--13). It combines actor learning rate `1e-4` with doubled RB,
+mode, and power entropy coefficients and writes to
+`MAPPO_results/combined-confirm-v1/P5_N4_gap25`. The summarizer accepts
+`--combined-root` to compare all four arms while reusing the existing 18 runs.
+
 The pilot, matrix, and audit launchers are retained for a later held-out stage.
 They explicitly use resumable checkpoints and refuse to start unless
 `AOI_RESULT_ROOT` is set to the dedicated

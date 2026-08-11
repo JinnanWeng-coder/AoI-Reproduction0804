@@ -1,4 +1,4 @@
-"""Compare the existing MAPPO baseline with two single-factor stability arms."""
+"""Compare the MAPPO baseline, stability arms, and optional combined arm."""
 
 from __future__ import annotations
 
@@ -17,6 +17,14 @@ ARMS = {
     "actor_lr1e4": {"actor_lr": 0.0001, "entropy_rb": 0.01, "entropy_mode": 0.01, "entropy_power": 0.001},
     "entropy2x": {"actor_lr": 0.0005, "entropy_rb": 0.02, "entropy_mode": 0.02, "entropy_power": 0.002},
 }
+COMBINED_ARM = "actor_lr1e4_entropy2x"
+COMBINED_SPEC = {
+    "actor_lr": 0.0001,
+    "entropy_rb": 0.02,
+    "entropy_mode": 0.02,
+    "entropy_power": 0.002,
+}
+ARM_SPECS = {**ARMS, COMBINED_ARM: COMBINED_SPEC}
 
 
 def _read_json(path: Path):
@@ -29,6 +37,8 @@ def _read_json(path: Path):
 def _run_name(arm: str, seed: int) -> str:
     if arm == "baseline":
         return f"mappo_default_p05_n04_g25_seed{seed:02d}"
+    if arm == COMBINED_ARM:
+        return f"mappo_combined_{arm}_p05_n04_g25_seed{seed:02d}"
     return f"mappo_stability_{arm}_p05_n04_g25_seed{seed:02d}"
 
 
@@ -39,7 +49,7 @@ def _mean_nested(records, key: str) -> float:
 def _summarize_run(run_dir: Path, arm: str, seed: int):
     config = _read_json(run_dir / "config.resolved.json")
     complete = _read_json(run_dir / "COMPLETE.json")
-    expected = ARMS[arm]
+    expected = ARM_SPECS[arm]
     checks = {
         "algorithm": "mappo",
         "seed": seed,
@@ -90,7 +100,13 @@ def _summarize_run(run_dir: Path, arm: str, seed: int):
     row = {
         "arm": arm,
         "seed": seed,
-        "source": "baseline_reuse" if arm == "baseline" else "new_stability_run",
+        "source": (
+            "baseline_reuse"
+            if arm == "baseline"
+            else "new_combined_run"
+            if arm == COMBINED_ARM
+            else "new_stability_run"
+        ),
         "run_name": run_dir.name,
         **window(100),
         **window(50),
@@ -125,12 +141,17 @@ def _summarize_run(run_dir: Path, arm: str, seed: int):
     return row, blocks
 
 
-def summarize(stability_root: Path, baseline_root: Path):
+def summarize(stability_root: Path, baseline_root: Path, combined_root: Path | None = None):
     stability_root = stability_root.expanduser().resolve()
     baseline_root = baseline_root.expanduser().resolve()
+    roots = {"baseline": baseline_root, "actor_lr1e4": stability_root, "entropy2x": stability_root}
+    arms = list(ARMS)
+    if combined_root is not None:
+        roots[COMBINED_ARM] = combined_root.expanduser().resolve()
+        arms.append(COMBINED_ARM)
     rows, blocks = [], []
-    for arm in ARMS:
-        source_root = baseline_root if arm == "baseline" else stability_root
+    for arm in arms:
+        source_root = roots[arm]
         for seed in SEEDS:
             row, run_blocks = _summarize_run(source_root / "runs" / _run_name(arm, seed), arm, seed)
             rows.append(row)
@@ -138,9 +159,9 @@ def summarize(stability_root: Path, baseline_root: Path):
 
     summaries = []
     numeric_fields = [key for key in rows[0] if key.startswith("last")]
-    for arm in ARMS:
+    for arm in arms:
         selected = [row for row in rows if row["arm"] == arm]
-        summary = {"arm": arm, **ARMS[arm]}
+        summary = {"arm": arm, **ARM_SPECS[arm]}
         summary.update({key: float(np.mean([row[key] for row in selected])) for key in numeric_fields})
         summary["success_count_last100"] = int(sum(row["screen_success_last100"] for row in selected))
         first = [row for row in blocks if row["arm"] == arm and row["episode_start"] == 1]
@@ -163,10 +184,16 @@ def _write_csv(path: Path, rows) -> None:
 
 
 def _write_markdown(path: Path, report) -> None:
+    has_combined = any(row["arm"] == COMBINED_ARM for row in report["summary"])
+    comparison_note = (
+        "The existing baseline and two single-factor arms are reused; only the combined arm adds six trainings."
+        if has_combined
+        else "The existing six-seed baseline is reused; actor_lr1e4 and entropy2x are single-factor arms."
+    )
     lines = [
         "# MAPPO stability comparison",
         "",
-        "The existing six-seed baseline is reused; actor_lr1e4 and entropy2x are single-factor arms.",
+        comparison_note,
         "",
         "| arm | AoI mean/worst | binary CAM mean/worst | payload mean/worst | success | late ΔAoI | late ΔCAM | last20 RB/mode entropy |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
@@ -187,9 +214,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--stability-root", required=True, type=Path)
     parser.add_argument("--baseline-root", required=True, type=Path)
+    parser.add_argument("--combined-root", type=Path)
     args = parser.parse_args()
-    report = summarize(args.stability_root, args.baseline_root)
-    output = args.stability_root.expanduser().resolve() / "analysis"
+    report = summarize(args.stability_root, args.baseline_root, args.combined_root)
+    output_root = args.combined_root if args.combined_root is not None else args.stability_root
+    output = output_root.expanduser().resolve() / "analysis"
     output.mkdir(parents=True, exist_ok=True)
     _write_csv(output / "mappo_stability_per_seed.csv", report["per_seed"])
     _write_csv(output / "mappo_stability_blocks.csv", report["blocks"])

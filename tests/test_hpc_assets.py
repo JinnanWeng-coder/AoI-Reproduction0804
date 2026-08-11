@@ -70,6 +70,24 @@ def test_mappo_stability_array_has_exactly_two_single_factor_arms():
     assert "--checkpoint-mode resumable" not in text
 
 
+def test_mappo_combined_array_has_the_six_cell_confirmation_contract():
+    text = (ROOT / "hpc" / "aoi_mappo_combined_array.sbatch").read_text(encoding="utf-8")
+    for required in (
+        "#SBATCH --array=0-5%6",
+        'arm="actor_lr1e4_entropy2x"',
+        'actor_lr="0.0001"',
+        'entropy_rb="0.02"',
+        'entropy_mode="0.02"',
+        'entropy_power="0.002"',
+        "seeds=(8 9 10 11 12 13)",
+        "MAPPO_results/combined-confirm-v1/P5_N4_gap25",
+        "--episodes 500",
+    ):
+        assert required in text
+    assert "--eval-only" not in text
+    assert "--checkpoint-mode resumable" not in text
+
+
 def test_deferred_heldout_scripts_require_the_dedicated_result_root():
     for name in (
         "aoi_pilot_1gpu.sbatch",

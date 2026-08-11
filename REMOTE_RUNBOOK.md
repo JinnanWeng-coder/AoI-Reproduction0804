@@ -58,6 +58,20 @@ python analysis/summarize_mappo_stability.py --stability-root "$STABILITY_ROOT" 
 
 This adds 12 trainings; the six-cell default baseline is not rerun.
 
+After reviewing the two single-factor arms, run the six-cell combined
+confirmation without rerunning the existing 18 cells:
+
+```bash
+COMBINED_ROOT=/eeedata/sgxjw2/Parvini-TVT2023-reproduction/AoI-Reproduction-diagnostics/MAPPO_results/combined-confirm-v1/P5_N4_gap25
+mkdir -p "$COMBINED_ROOT/slurm_logs"
+sbatch --array=0 hpc/aoi_mappo_combined_array.sbatch
+# after seed 8 passes:
+sbatch --array=1-5%5 hpc/aoi_mappo_combined_array.sbatch
+python analysis/summarize_mappo_stability.py --baseline-root "$BASELINE_ROOT" --stability-root "$STABILITY_ROOT" --combined-root "$COMBINED_ROOT"
+```
+
+This stage remains training-only and adds no new scenario variable.
+
 ## Deferred evaluation workflow
 
 Held-out evaluation is intentionally not part of early exploration. When it is

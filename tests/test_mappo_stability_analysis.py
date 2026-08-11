@@ -5,18 +5,20 @@ import numpy as np
 import pytest
 
 from analysis.audit_mappo_default_actions import audit
-from analysis.summarize_mappo_stability import ARMS, SEEDS, summarize
+from analysis.summarize_mappo_stability import ARM_SPECS, COMBINED_ARM, SEEDS, summarize
 from aoi_v2x_reproduction.config import resolve_config
 
 
 def _run_name(arm: str, seed: int) -> str:
     if arm == "baseline":
         return f"mappo_default_p05_n04_g25_seed{seed:02d}"
+    if arm == COMBINED_ARM:
+        return f"mappo_combined_{arm}_p05_n04_g25_seed{seed:02d}"
     return f"mappo_stability_{arm}_p05_n04_g25_seed{seed:02d}"
 
 
 def _write_run(root: Path, arm: str, seed: int, include_action_audit: bool) -> None:
-    settings = ARMS[arm]
+    settings = ARM_SPECS[arm]
     run_dir = root / "runs" / _run_name(arm, seed)
     run_dir.mkdir(parents=True)
     config = resolve_config(
@@ -46,7 +48,7 @@ def _write_run(root: Path, arm: str, seed: int, include_action_audit: bool) -> N
     } for _ in range(100)]
     (run_dir / "learning_diagnostics.json").write_text(json.dumps(diagnostics), encoding="utf-8")
 
-    offset = {"baseline": 0.0, "actor_lr1e4": 1.0, "entropy2x": 2.0}[arm]
+    offset = {"baseline": 0.0, "actor_lr1e4": 1.0, "entropy2x": 2.0, COMBINED_ARM: 3.0}[arm]
     metrics = {
         "mean_aoi_ms_episode_agent": np.full((500, 5), seed + offset, dtype=np.float32),
         "endpoint_cam_episode_agent": np.full((500, 5), 0.8, dtype=np.float32),
@@ -98,3 +100,24 @@ def test_stability_summary_reuses_baseline_and_compares_twelve_new_cells(tmp_pat
     assert by_arm["actor_lr1e4"]["last100_mean_aoi_ms"] == pytest.approx(11.5)
     assert by_arm["entropy2x"]["last100_mean_aoi_ms"] == pytest.approx(12.5)
     assert all(row["success_count_last100"] == 6 for row in report["summary"])
+
+
+def test_stability_summary_optionally_adds_six_combined_cells(tmp_path):
+    baseline_root = tmp_path / "baseline"
+    stability_root = tmp_path / "stability"
+    combined_root = tmp_path / "combined"
+    for seed in SEEDS:
+        _write_run(baseline_root, "baseline", seed, include_action_audit=False)
+        _write_run(stability_root, "actor_lr1e4", seed, include_action_audit=False)
+        _write_run(stability_root, "entropy2x", seed, include_action_audit=False)
+        _write_run(combined_root, COMBINED_ARM, seed, include_action_audit=False)
+
+    report = summarize(stability_root, baseline_root, combined_root)
+
+    assert len(report["per_seed"]) == 24
+    assert len(report["blocks"]) == 120
+    assert len(report["summary"]) == 4
+    combined = next(row for row in report["summary"] if row["arm"] == COMBINED_ARM)
+    assert combined["last100_mean_aoi_ms"] == pytest.approx(13.5)
+    assert combined["actor_lr"] == pytest.approx(0.0001)
+    assert combined["entropy_rb"] == pytest.approx(0.02)
