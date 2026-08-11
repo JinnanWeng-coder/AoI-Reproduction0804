@@ -41,6 +41,14 @@ mode, and power entropy coefficients and writes to
 `MAPPO_results/combined-confirm-v1/P5_N4_gap25`. The summarizer accepts
 `--combined-root` to compare all four arms while reusing the existing 18 runs.
 
+The frozen-policy held-out diagnostic uses
+`aoi_mappo_policy_eval_array.sbatch` (48 lightweight evaluations): four arms,
+six training seeds, and deterministic/stochastic policy action selection. Each
+cell uses validation seeds 201--206, five warm-up episodes, and 100 scored
+episodes. It reads existing `policy_final.pt` files without retraining and
+writes only under `MAPPO_results/policy-eval-v1/P5_N4_gap25`.
+`analysis/summarize_mappo_policy_eval.py` validates and compares all 48 cells.
+
 The pilot, matrix, and audit launchers are retained for a later held-out stage.
 They explicitly use resumable checkpoints and refuse to start unless
 `AOI_RESULT_ROOT` is set to the dedicated

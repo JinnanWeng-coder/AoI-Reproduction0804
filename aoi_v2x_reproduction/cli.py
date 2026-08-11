@@ -23,6 +23,7 @@ def main(argv=None) -> int:
         print(f"scope={args.scope}")
         print(f"eval_purpose={args.eval_purpose}")
         print(f"eval_noise={args.eval_noise}")
+        print(f"mappo_eval_mode={args.mappo_eval_mode}")
         print(f"diagnostic_eval={args.diagnostic_eval}")
         print(f"recover_empty_run={args.recover_empty_run}")
         print("validation_eval_seeds=201,202,203,204,205,206")
@@ -44,6 +45,15 @@ def main(argv=None) -> int:
             raise SystemExit("--eval-only requires --scope validation or --scope final_release")
         if args.eval_purpose is None:
             raise SystemExit("--eval-only requires an explicit --eval-purpose")
+        if config.algorithm == "mappo":
+            if args.mappo_eval_mode is None:
+                raise SystemExit("MAPPO --eval-only requires --mappo-eval-mode deterministic or stochastic")
+            if not args.diagnostic_eval:
+                raise SystemExit("MAPPO policy-only evaluation requires --diagnostic-eval")
+            if args.eval_noise != 0.0:
+                raise SystemExit("MAPPO evaluation does not use external --eval-noise")
+        elif args.mappo_eval_mode is not None:
+            raise SystemExit("--mappo-eval-mode requires --algorithm mappo")
         expected_scope = "validation" if args.eval_purpose == "validation" else "final_release"
         if args.scope != expected_scope:
             raise SystemExit(f"--scope {args.scope} does not match --eval-purpose {args.eval_purpose}")
@@ -57,12 +67,15 @@ def main(argv=None) -> int:
             scope=args.scope,
             eval_noise=args.eval_noise,
             diagnostic_eval=args.diagnostic_eval,
+            mappo_eval_mode=args.mappo_eval_mode,
         )
     else:
         if args.scope != "train":
             raise SystemExit("training requires --scope train")
         if args.eval_purpose is not None:
             raise SystemExit("--eval-purpose is only meaningful with --eval-only")
+        if args.mappo_eval_mode is not None:
+            raise SystemExit("--mappo-eval-mode is only meaningful with MAPPO --eval-only")
         if args.recover_empty_run and args.resume:
             raise SystemExit("--recover-empty-run cannot be combined with --resume")
         result = train(config, resume=args.resume, recover_empty_run=args.recover_empty_run)

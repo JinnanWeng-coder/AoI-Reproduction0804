@@ -674,6 +674,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--diagnostics", action="store_true", help="record episode-aggregated actor-gradient diagnostics")
     parser.add_argument("--eval-noise", type=float, default=0.0, help="Gaussian action noise used only by --eval-only")
     parser.add_argument(
+        "--mappo-eval-mode",
+        choices=("deterministic", "stochastic"),
+        default=None,
+        help="MAPPO policy action rule used only by diagnostic --eval-only",
+    )
+    parser.add_argument(
         "--diagnostic-eval",
         action="store_true",
         help="write an eval-only artifact without claiming a validation/final-release lifecycle marker",

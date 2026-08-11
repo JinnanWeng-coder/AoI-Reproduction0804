@@ -95,3 +95,13 @@ def test_diagnostic_eval_flag_is_not_valid_for_training():
 
     with pytest.raises(SystemExit, match="only valid with --eval-only"):
         main(["--diagnostic-eval", "--dry-run"])
+
+
+def test_cli_parses_explicit_mappo_policy_eval_mode():
+    args = build_parser().parse_args([
+        "--algorithm", "mappo",
+        "--eval-only",
+        "--diagnostic-eval",
+        "--mappo-eval-mode", "deterministic",
+    ])
+    assert args.mappo_eval_mode == "deterministic"

@@ -1182,6 +1182,335 @@ def _mean_sd_ci95(values: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarra
     return means, sd, ci
 
 
+def _validate_mappo_policy_artifact(
+    policy_path: Path,
+    payload: Dict[str, Any],
+) -> Tuple[Path, ExperimentConfig, Dict[str, Any]]:
+    if policy_path.name != "policy_final.pt":
+        raise RuntimeError("MAPPO diagnostic evaluation requires policy_final.pt")
+    run_dir = policy_path.parent.resolve()
+    complete = _read_json_object(run_dir / "COMPLETE.json", "MAPPO training completion marker")
+    run_config_data = _read_json_object(run_dir / "config.resolved.json", "MAPPO training config")
+    if payload.get("artifact_type") != "policy_only" or payload.get("policy_schema_version") != "policy_artifact_v1":
+        raise RuntimeError("MAPPO evaluation requires a policy_artifact_v1 policy-only artifact")
+    if payload.get("algorithm") != "mappo" or complete.get("algorithm") != "mappo":
+        raise RuntimeError("MAPPO policy/completion algorithm metadata mismatch")
+    if complete.get("status") != "complete" or complete.get("policy_final") != policy_path.name:
+        raise RuntimeError("MAPPO policy is not bound to a complete training run")
+    try:
+        training_config = config_from_dict(payload["config"])
+        run_config = config_from_dict(run_config_data)
+    except Exception as exc:
+        raise RuntimeError(f"MAPPO policy/run config is invalid: {exc}") from exc
+    if training_config.algorithm != "mappo" or run_config.canonical_hash() != training_config.canonical_hash():
+        raise RuntimeError("MAPPO policy config does not match config.resolved.json")
+    if complete.get("config_hash") != training_config.canonical_hash():
+        raise RuntimeError("MAPPO completion marker config mismatch")
+    if int(payload.get("episode", -1)) != int(training_config.episodes):
+        raise RuntimeError("MAPPO policy episode does not match completed training")
+    actors = payload.get("actors")
+    if not isinstance(actors, list) or len(actors) != int(training_config.number_agents):
+        raise RuntimeError("MAPPO policy actor count mismatch")
+    return run_dir, training_config, complete
+
+
+def _mappo_eval_id(
+    purpose: str,
+    protocol: str,
+    warmup_episodes: int,
+    seeds: Iterable[int],
+    episodes: int,
+    action_mode: str,
+) -> str:
+    seed_token = "-".join(str(int(seed)) for seed in seeds)
+    return (
+        f"eval_{purpose}_policy_final_{action_mode}_{protocol}_"
+        f"warm{int(warmup_episodes)}_s{seed_token}_ep{int(episodes)}"
+    )
+
+
+def _evaluate_mappo_policy(
+    requested_config: ExperimentConfig,
+    policy: str,
+    eval_episodes: int,
+    eval_seeds: Optional[List[int]],
+    eval_purpose: Optional[str],
+    scope: Optional[str],
+    eval_noise: float,
+    diagnostic_eval: bool,
+    action_mode: Optional[str],
+) -> Dict[str, Any]:
+    if action_mode not in {"deterministic", "stochastic"}:
+        raise ValueError("MAPPO evaluation requires action_mode deterministic or stochastic")
+    if not diagnostic_eval:
+        raise ValueError("MAPPO policy-only evaluation is diagnostic and requires diagnostic_eval=True")
+    if float(eval_noise) != 0.0:
+        raise ValueError("MAPPO policy evaluation does not use external action noise")
+    if eval_purpose != "validation" or scope not in {None, "validation"}:
+        raise ValueError("MAPPO policy-only diagnostic evaluation currently uses the validation split")
+    scope = "validation"
+    if int(eval_episodes) < 1:
+        raise ValueError("eval_episodes must be positive")
+    if eval_seeds is None:
+        eval_seeds = list(EVAL_PURPOSE_SEEDS["validation"])
+    eval_seeds = [int(seed) for seed in eval_seeds]
+    if not eval_seeds or len(set(eval_seeds)) != len(eval_seeds):
+        raise ValueError("eval_seeds must be non-empty and unique")
+
+    policy_path = Path(policy).expanduser().resolve()
+    if not policy_path.is_file():
+        raise FileNotFoundError(policy_path)
+    requested_device = requested_config.device
+    requested_output_root = Path(requested_config.output_root).expanduser().resolve()
+    caller_rng = capture_rng_state()
+    payload = torch.load(policy_path, map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict):
+        raise RuntimeError("MAPPO policy payload must be a dictionary")
+    run_dir, training_config, complete = _validate_mappo_policy_artifact(policy_path, payload)
+    if requested_config.scenario.id != training_config.scenario.id or int(requested_config.seed) != int(training_config.seed):
+        raise RuntimeError("requested MAPPO scenario/seed does not match policy_final.pt")
+
+    runtime_config = copy.deepcopy(training_config)
+    if requested_device != "auto":
+        runtime_config.device = requested_device
+    warmup_episodes = int(runtime_config.eval_warmup_episodes)
+    eval_id = _mappo_eval_id(
+        "validation",
+        runtime_config.eval_protocol,
+        warmup_episodes,
+        eval_seeds,
+        int(eval_episodes),
+        action_mode,
+    )
+    eval_dir = requested_output_root / run_dir.name / eval_id
+    if eval_dir.exists():
+        raise FileExistsError(f"Refusing to overwrite existing MAPPO eval directory: {eval_dir}")
+
+    environment, trainer, _rollout, _metrics, device = _make_mappo_system(runtime_config)
+    for actor, state_dict in zip(trainer.actors, payload["actors"]):
+        if not isinstance(state_dict, dict):
+            raise RuntimeError("MAPPO policy actor state must be a dictionary")
+        actor.load_state_dict(state_dict, strict=True)
+    trainer.actors.eval()
+    deterministic = action_mode == "deterministic"
+    eval_dir.mkdir(parents=True, exist_ok=False)
+
+    raw_aoi = []
+    raw_success = []
+    raw_demand = []
+    raw_power = []
+    raw_rb = []
+    raw_mode = []
+    raw_action = []
+    try:
+        for seed in eval_seeds:
+            policy_seed = int(
+                np.random.SeedSequence([int(training_config.seed), int(seed), 0x4D415050])
+                .generate_state(1, dtype=np.uint32)[0]
+            )
+            torch.manual_seed(policy_seed)
+            if device.type == "cuda":
+                torch.cuda.manual_seed_all(policy_seed)
+            environment.reset_world(seed)
+            for warmup_index in range(warmup_episodes):
+                observations = environment.start_episode(warmup_index)
+                for _step in range(runtime_config.steps_per_episode):
+                    actions = trainer.act(observations, deterministic=deterministic).environment_actions
+                    observations, _rg, _t1, _t2, _done, _info = environment.step(actions)
+
+            seed_aoi = []
+            seed_success = []
+            seed_demand = []
+            seed_power = []
+            seed_rb = []
+            seed_mode = []
+            seed_action = []
+            for episode in range(int(eval_episodes)):
+                observations = environment.start_episode(warmup_episodes + episode)
+                episode_aoi = []
+                episode_success = []
+                episode_demand = []
+                episode_power = []
+                episode_rb = []
+                episode_mode = []
+                episode_action = []
+                for _step in range(runtime_config.steps_per_episode):
+                    actions = trainer.act(observations, deterministic=deterministic).environment_actions
+                    observations, _rg, _t1, _t2, _done, info = environment.step(actions)
+                    episode_action.append(actions.copy())
+                    episode_aoi.append(info["aoi_ms"])
+                    episode_success.append(info["success"])
+                    episode_demand.append(info["remaining_demand"])
+                    episode_power.append(info["power_dbm"])
+                    episode_rb.append(info["rb"])
+                    episode_mode.append(info["mode"])
+                seed_aoi.append(episode_aoi)
+                seed_success.append(episode_success)
+                seed_demand.append(episode_demand)
+                seed_power.append(episode_power)
+                seed_rb.append(episode_rb)
+                seed_mode.append(episode_mode)
+                seed_action.append(episode_action)
+            raw_aoi.append(seed_aoi)
+            raw_success.append(seed_success)
+            raw_demand.append(seed_demand)
+            raw_power.append(seed_power)
+            raw_rb.append(seed_rb)
+            raw_mode.append(seed_mode)
+            raw_action.append(seed_action)
+    finally:
+        restore_rng_state(caller_rng)
+
+    arrays = {
+        "aoi_ms": np.asarray(raw_aoi, dtype=np.float32),
+        "success": np.asarray(raw_success, dtype=np.float32),
+        "remaining_demand": np.asarray(raw_demand, dtype=np.float32),
+        "power_dbm": np.asarray(raw_power, dtype=np.float32),
+        "rb": np.asarray(raw_rb, dtype=np.int64),
+        "mode": np.asarray(raw_mode, dtype=np.int64),
+        "action_normalized": np.asarray(raw_action, dtype=np.float32),
+    }
+    np.savez_compressed(eval_dir / "metrics.npz", **arrays)
+
+    aoi_episode_seed_agent = arrays["aoi_ms"].mean(axis=2)
+    endpoint_episode_seed_agent = arrays["success"][:, :, -1, :]
+    payload_episode_seed_agent = np.clip(
+        1.0 - arrays["remaining_demand"][:, :, -1, :] / float(runtime_config.cam_bits),
+        0.0,
+        1.0,
+    )
+    per_seed_aoi_agent = aoi_episode_seed_agent.mean(axis=1)
+    per_seed_success_agent = endpoint_episode_seed_agent.mean(axis=1)
+    per_seed_payload_agent = payload_episode_seed_agent.mean(axis=1)
+    per_seed_aoi = per_seed_aoi_agent.mean(axis=1)
+    per_seed_success = per_seed_success_agent.mean(axis=1)
+    per_seed_payload = per_seed_payload_agent.mean(axis=1)
+    aggregate_aoi_agent = per_seed_aoi_agent.mean(axis=0)
+    aggregate_success_agent = per_seed_success_agent.mean(axis=0)
+    aggregate_payload_agent = per_seed_payload_agent.mean(axis=0)
+    mode = arrays["mode"]
+    rb = arrays["rb"]
+    power = arrays["power_dbm"]
+    action = arrays["action_normalized"]
+    mode_fraction_seed_agent = np.stack(
+        [(mode == value).mean(axis=(1, 2)) for value in range(runtime_config.n_modes)], axis=-1
+    )
+    rb_fraction_seed_agent = np.stack(
+        [(rb == value).mean(axis=(1, 2)) for value in range(runtime_config.n_rb)], axis=-1
+    )
+    mode_switch_seed_agent = (
+        (mode[:, :, 1:, :] != mode[:, :, :-1, :]).mean(axis=(1, 2))
+        if runtime_config.steps_per_episode > 1
+        else np.zeros((len(eval_seeds), runtime_config.number_agents))
+    )
+    rb_switch_seed_agent = (
+        (rb[:, :, 1:, :] != rb[:, :, :-1, :]).mean(axis=(1, 2))
+        if runtime_config.steps_per_episode > 1
+        else np.zeros((len(eval_seeds), runtime_config.number_agents))
+    )
+    power_tolerance = max((runtime_config.power_max_dbm - runtime_config.power_min_dbm) * 0.01, 1e-5)
+    eval_git = _git_metadata()
+    policy_reference = os.path.relpath(policy_path, eval_dir).replace(os.sep, "/")
+    summary = {
+        "algorithm": "mappo",
+        "eval_id": eval_id,
+        "eval_purpose": "validation",
+        "scope": scope,
+        "release_status": "diagnostic_evaluation",
+        "diagnostic_evaluation": True,
+        "statistics_schema_version": EVAL_STATISTICS_SCHEMA_VERSION,
+        "eval_seeds": eval_seeds,
+        "eval_episodes": int(eval_episodes),
+        "eval_protocol": runtime_config.eval_protocol,
+        "eval_warmup_episodes": warmup_episodes,
+        "eval_noise": 0.0,
+        "mappo_eval_mode": action_mode,
+        "external_action_noise_applicable": False,
+        "semantic_version": runtime_config.semantic_version,
+        "profile": runtime_config.profile,
+        "scenario": runtime_config.scenario.id,
+        "training_seed": int(runtime_config.seed),
+        "training_run_name": run_dir.name,
+        "config_hash": runtime_config.canonical_hash(),
+        "mappo_actor_lr": float(runtime_config.mappo_actor_lr),
+        "mappo_entropy_coef_rb": float(runtime_config.mappo_entropy_coef_rb),
+        "mappo_entropy_coef_mode": float(runtime_config.mappo_entropy_coef_mode),
+        "mappo_entropy_coef_power": float(runtime_config.mappo_entropy_coef_power),
+        "training_device_config": runtime_config.device,
+        "evaluation_device_requested": requested_device,
+        "evaluation_device_resolved": str(device),
+        "reproduction_git_commit": eval_git.get("reproduction_git_commit"),
+        "reproduction_git_branch": eval_git.get("reproduction_git_branch"),
+        "reproduction_git_dirty": eval_git.get("reproduction_git_dirty"),
+        "policy_artifact_type": payload.get("artifact_type"),
+        "policy_schema_version": payload.get("policy_schema_version"),
+        "policy_name": policy_path.name,
+        "policy_episode": int(payload.get("episode", -1)),
+        "policy": policy_reference,
+        "policy_path_is_relative_to_eval": True,
+        "training_complete_update_count": int(complete.get("update_count", -1)),
+        "raw_metric_axes": {
+            "aoi_ms": ["eval_seed", "scored_episode", "slot", "agent"],
+            "success": ["eval_seed", "scored_episode", "slot", "agent"],
+            "remaining_demand": ["eval_seed", "scored_episode", "slot", "agent"],
+            "action_normalized": ["eval_seed", "scored_episode", "slot", "agent", "action_dim"],
+        },
+        "mean_AoI_ms_per_seed_agent": per_seed_aoi_agent.tolist(),
+        "mean_AoI_ms_per_seed": per_seed_aoi.tolist(),
+        "CAM_success_probability_per_seed_agent": per_seed_success_agent.tolist(),
+        "CAM_success_probability_per_seed": per_seed_success.tolist(),
+        "payload_completion_per_seed_agent": per_seed_payload_agent.tolist(),
+        "payload_completion_per_seed": per_seed_payload.tolist(),
+        "mean_AoI_ms": float(per_seed_aoi.mean()),
+        "worst_agent_mean_AoI_ms": float(aggregate_aoi_agent.max()),
+        "CAM_success_probability": float(per_seed_success.mean()),
+        "worst_agent_CAM_success_probability": float(aggregate_success_agent.min()),
+        "payload_completion": float(per_seed_payload.mean()),
+        "worst_agent_payload_completion": float(aggregate_payload_agent.min()),
+        "action_diagnostics": {
+            "mode_fraction_per_seed_agent": mode_fraction_seed_agent.tolist(),
+            "rb_fraction_per_seed_agent": rb_fraction_seed_agent.tolist(),
+            "mode_entropy_normalized_per_seed_agent": MetricStore._normalized_entropy(mode_fraction_seed_agent).tolist(),
+            "rb_entropy_normalized_per_seed_agent": MetricStore._normalized_entropy(rb_fraction_seed_agent).tolist(),
+            "mode_switch_rate_per_seed_agent": mode_switch_seed_agent.tolist(),
+            "rb_switch_rate_per_seed_agent": rb_switch_seed_agent.tolist(),
+            "power_action_near_min_fraction_per_seed_agent": (action[..., 2] <= -0.95).mean(axis=(1, 2)).tolist(),
+            "power_action_near_max_fraction_per_seed_agent": (action[..., 2] >= 0.95).mean(axis=(1, 2)).tolist(),
+            "power_post_map_near_min_fraction_per_seed_agent": (
+                power <= runtime_config.power_min_dbm + power_tolerance
+            ).mean(axis=(1, 2)).tolist(),
+            "power_post_map_near_max_fraction_per_seed_agent": (
+                power >= runtime_config.power_max_dbm - power_tolerance
+            ).mean(axis=(1, 2)).tolist(),
+        },
+        "training_seed_is_inferential_unit": True,
+        "is_frozen_eval": True,
+        "status": "complete",
+        "is_formal_result": False,
+    }
+    provenance = {
+        **eval_git,
+        "algorithm": "mappo",
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "eval_id": eval_id,
+        "scenario": runtime_config.scenario.id,
+        "training_seed": int(runtime_config.seed),
+        "mappo_eval_mode": action_mode,
+        "eval_seeds": eval_seeds,
+        "eval_episodes": int(eval_episodes),
+        "eval_warmup_episodes": warmup_episodes,
+        "policy": policy_reference,
+        "policy_schema_version": payload.get("policy_schema_version"),
+        "scope": scope,
+        "release_status": "diagnostic_evaluation",
+        "diagnostic_evaluation": True,
+    }
+    _write_json(eval_dir / "provenance.json", provenance)
+    _write_json(eval_dir / "summary.json", summary)
+    _write_json(eval_dir / "EVAL_COMPLETE.json", summary)
+    return {"eval_dir": str(eval_dir), **summary}
+
+
 def evaluate_from_checkpoint(
     config: ExperimentConfig,
     checkpoint: str,
@@ -1191,9 +1520,22 @@ def evaluate_from_checkpoint(
     scope: Optional[str] = None,
     eval_noise: float = 0.0,
     diagnostic_eval: bool = False,
+    mappo_eval_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     if config.algorithm == "mappo":
-        raise ValueError("MAPPO held-out evaluation is deferred; the exploratory baseline writes policy_final.pt only")
+        return _evaluate_mappo_policy(
+            config,
+            checkpoint,
+            eval_episodes,
+            eval_seeds,
+            eval_purpose,
+            scope,
+            eval_noise,
+            diagnostic_eval,
+            mappo_eval_mode,
+        )
+    if mappo_eval_mode is not None:
+        raise ValueError("mappo_eval_mode requires algorithm=mappo")
     if eval_purpose not in EVAL_PURPOSE_SEEDS:
         raise ValueError("eval_purpose must be explicitly set to validation or final_test")
     expected_scope = SCOPE_FOR_PURPOSE[eval_purpose]

@@ -27,7 +27,12 @@ def test_active_hpc_scripts_use_the_single_baseline_and_new_package():
 
 def test_training_arrays_do_not_request_resumable_checkpoints():
     patterns = ("aoi_modified_maddpg*_array.sbatch", "aoi_mappo*_array.sbatch")
-    paths = [path for pattern in patterns for path in sorted((ROOT / "hpc").glob(pattern))]
+    paths = [
+        path
+        for pattern in patterns
+        for path in sorted((ROOT / "hpc").glob(pattern))
+        if "policy_eval" not in path.name
+    ]
     for path in paths:
         text = path.read_text(encoding="utf-8")
         assert "--checkpoint-mode resumable" not in text
@@ -86,6 +91,26 @@ def test_mappo_combined_array_has_the_six_cell_confirmation_contract():
         assert required in text
     assert "--eval-only" not in text
     assert "--checkpoint-mode resumable" not in text
+
+
+def test_mappo_policy_eval_array_has_the_48_cell_heldout_contract():
+    text = (ROOT / "hpc" / "aoi_mappo_policy_eval_array.sbatch").read_text(encoding="utf-8")
+    for required in (
+        "#SBATCH --array=0-47%8",
+        "arms=(baseline actor_lr1e4 entropy2x actor_lr1e4_entropy2x)",
+        "modes=(deterministic stochastic)",
+        'EVAL_SEEDS="201,202,203,204,205,206"',
+        "MAPPO_results/policy-eval-v1/P5_N4_gap25",
+        "MAPPO_results/default/P5_N4_gap25",
+        "MAPPO_results/stability-ablation-v1/P5_N4_gap25",
+        "MAPPO_results/combined-confirm-v1/P5_N4_gap25",
+        "--eval-episodes 100",
+        "--diagnostic-eval",
+        '--mappo-eval-mode "$mode"',
+    ):
+        assert required in text
+    assert "--checkpoint-mode resumable" not in text
+    assert "final_test" not in text
 
 
 def test_deferred_heldout_scripts_require_the_dedicated_result_root():

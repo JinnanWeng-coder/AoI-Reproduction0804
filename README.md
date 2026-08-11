@@ -65,7 +65,9 @@ the final policy.
 
 The first MAPPO policy artifact follows the same lightweight rule: it contains
 only the five actor state dictionaries, not the central critic, optimizers,
-rollout data, or RNG state. MAPPO resume and held-out evaluation are deferred.
+rollout data, or RNG state. Training resume remains deferred. The frozen actors
+can be evaluated diagnostically with explicit deterministic or stochastic
+action selection; this does not create a formal-release lifecycle marker.
 
 `--checkpoint-mode resumable` is reserved for a later, explicitly planned
 resume or held-out evaluation stage. It stores optimizer, replay, environment,

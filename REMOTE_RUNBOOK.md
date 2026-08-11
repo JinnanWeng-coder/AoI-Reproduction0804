@@ -72,6 +72,22 @@ python analysis/summarize_mappo_stability.py --baseline-root "$BASELINE_ROOT" --
 
 This stage remains training-only and adds no new scenario variable.
 
+After all four training arms are complete, evaluate their frozen final policies
+on the held-out validation split:
+
+```bash
+POLICY_EVAL_ROOT=/eeedata/sgxjw2/Parvini-TVT2023-reproduction/AoI-Reproduction-diagnostics/MAPPO_results/policy-eval-v1/P5_N4_gap25
+mkdir -p "$POLICY_EVAL_ROOT/slurm_logs"
+sbatch --array=0,1 hpc/aoi_mappo_policy_eval_array.sbatch
+# after the deterministic/stochastic seed-8 pilots pass:
+sbatch --array=2-47%8 hpc/aoi_mappo_policy_eval_array.sbatch
+python analysis/summarize_mappo_policy_eval.py --result-root "$POLICY_EVAL_ROOT"
+```
+
+This is diagnostic evaluation only. It uses the actors in `policy_final.pt`,
+does not add external action noise, and does not create validation/final-release
+lifecycle markers.
+
 ## Deferred evaluation workflow
 
 Held-out evaluation is intentionally not part of early exploration. When it is
