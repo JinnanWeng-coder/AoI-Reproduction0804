@@ -31,7 +31,7 @@ def test_training_arrays_do_not_request_resumable_checkpoints():
         path
         for pattern in patterns
         for path in sorted((ROOT / "hpc").glob(pattern))
-        if "policy_eval" not in path.name
+        if "_eval_" not in path.name
     ]
     for path in paths:
         text = path.read_text(encoding="utf-8")
@@ -111,6 +111,36 @@ def test_mappo_policy_eval_array_has_the_48_cell_heldout_contract():
         assert required in text
     assert "--checkpoint-mode resumable" not in text
     assert "final_test" not in text
+
+
+def test_mappo_tdec_ab_arrays_freeze_one_factor_and_requested_resources():
+    train = (ROOT / "hpc" / "aoi_mappo_tdec_ab_train_array.sbatch").read_text(encoding="utf-8")
+    evaluate = (ROOT / "hpc" / "aoi_mappo_tdec_ab_eval_array.sbatch").read_text(encoding="utf-8")
+    for text in (train, evaluate):
+        for required in (
+            "#SBATCH --cpus-per-task=8",
+            "#SBATCH --gres=gpu:l20:1",
+            "MAPPO_results/tdec-ab-v1/P5_N4_gap25",
+            "variants=(combined tdec)",
+            "seeds=(8 9 10 11 12 13)",
+            'actor_lr="0.0005"',
+            'entropy_rb="0.02"',
+            'entropy_mode="0.02"',
+            'entropy_power="0.002"',
+            'value_clip_mode="normalized"',
+            '--mappo-variant "$variant"',
+            '--mappo-value-clip-mode "$value_clip_mode"',
+        ):
+            assert required in text
+    assert "#SBATCH --array=0-11%12" in train
+    assert "--episodes 500" in train
+    assert "--eval-only" not in train
+    assert "#SBATCH --array=0-23%12" in evaluate
+    assert "modes=(deterministic stochastic)" in evaluate
+    assert 'EVAL_SEEDS="201,202,203,204,205,206"' in evaluate
+    assert "--eval-episodes 100" in evaluate
+    assert "--diagnostic-eval" in evaluate
+    assert "final_test" not in train and "final_test" not in evaluate
 
 
 def test_deferred_heldout_scripts_require_the_dedicated_result_root():

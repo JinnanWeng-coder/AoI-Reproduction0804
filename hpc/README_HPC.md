@@ -49,6 +49,20 @@ episodes. It reads existing `policy_final.pt` files without retraining and
 writes only under `MAPPO_results/policy-eval-v1/P5_N4_gap25`.
 `analysis/summarize_mappo_policy_eval.py` validates and compares all 48 cells.
 
+The corrected-value-clipping task-decomposition A/B uses two launchers:
+
+- `aoi_mappo_tdec_ab_train_array.sbatch`: 12 trainings, `combined` versus
+  `tdec`, paired over seeds 8--13
+- `aoi_mappo_tdec_ab_eval_array.sbatch`: 24 frozen-policy evaluations,
+  deterministic and stochastic, held-out seeds 201--206
+
+Both variants use the frozen `entropy2x` setting (actor learning rate `5e-4`),
+`mappo_value_clip_mode=normalized`, 500 training episodes, and the default
+P=5/N=4/gap=25 scenario. Each array task requests one Slurm `l20` GPU and eight
+CPUs. Results live under `MAPPO_results/tdec-ab-v1/P5_N4_gap25`, and
+`analysis/summarize_mappo_tdec_ab.py` produces the paired report after both
+arrays complete.
+
 The pilot, matrix, and audit launchers are retained for a later held-out stage.
 They explicitly use resumable checkpoints and refuse to start unless
 `AOI_RESULT_ROOT` is set to the dedicated
