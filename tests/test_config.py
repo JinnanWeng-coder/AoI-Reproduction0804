@@ -75,6 +75,7 @@ def test_cli_exposes_only_the_planned_mappo_stability_overrides():
     parser = build_parser()
     args = parser.parse_args([
         "--algorithm", "mappo",
+        "--mappo-variant", "tdec",
         "--mappo-actor-lr", "0.0001",
         "--mappo-entropy-coef-rb", "0.02",
         "--mappo-entropy-coef-mode", "0.02",
@@ -82,6 +83,7 @@ def test_cli_exposes_only_the_planned_mappo_stability_overrides():
         "--mappo-value-clip-mode", "legacy_raw",
     ])
     config = config_from_args(args)
+    assert config.mappo_variant == "tdec"
     assert config.mappo_actor_lr == pytest.approx(0.0001)
     assert config.mappo_entropy_coef_rb == pytest.approx(0.02)
     assert config.mappo_entropy_coef_mode == pytest.approx(0.02)
@@ -104,6 +106,28 @@ def test_mappo_value_clipping_defaults_to_normalized_and_unversioned_configs_rem
     reconstructed = config_from_dict(unversioned)
     assert reconstructed.mappo_value_clip_mode == "legacy_raw"
     assert reconstructed.to_dict() == unversioned
+
+
+def test_mappo_variant_defaults_to_combined_and_missing_field_preserves_historical_identity():
+    current = resolve_config(scenario="p05_n04_g25", algorithm="mappo")
+    assert current.mappo_variant == "combined"
+    assert current.to_dict()["mappo_variant"] == "combined"
+
+    historical = current.to_dict()
+    historical.pop("mappo_variant")
+    reconstructed = config_from_dict(historical)
+    assert reconstructed.mappo_variant == "combined"
+    assert reconstructed.to_dict() == historical
+
+    original_mappo = dict(historical)
+    original_mappo.pop("mappo_value_clip_mode")
+    original_reconstructed = config_from_dict(original_mappo)
+    assert original_reconstructed.mappo_variant == "combined"
+    assert original_reconstructed.mappo_value_clip_mode == "legacy_raw"
+    assert original_reconstructed.to_dict() == original_mappo
+
+    tdec = resolve_config(scenario="p05_n04_g25", algorithm="mappo", mappo_variant="tdec")
+    assert tdec.canonical_hash() != current.canonical_hash()
 
 
 def test_diagnostic_eval_flag_is_not_valid_for_training():

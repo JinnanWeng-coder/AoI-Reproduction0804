@@ -35,7 +35,7 @@ from ..config import (
 )
 from ..algorithms.modified_maddpg.learner import Global_Critic
 from ..algorithms.modified_maddpg.agent import Agent
-from ..algorithms.mappo.rollout import OnPolicyRollout
+from ..algorithms.mappo.rollout import OnPolicyRollout, TDecOnPolicyRollout
 from ..algorithms.mappo.trainer import MAPPOTrainer
 from .metrics import MetricStore
 
@@ -127,7 +127,8 @@ def _make_mappo_system(config):
     seed_everything(config.seed, device)
     environment = _make_environment(config)
     trainer = MAPPOTrainer(config, device)
-    rollout = OnPolicyRollout(config.number_agents, config.state_dim)
+    rollout_class = TDecOnPolicyRollout if config.mappo_variant == "tdec" else OnPolicyRollout
+    rollout = rollout_class(config.number_agents, config.state_dim)
     metrics = MetricStore(
         config.number_agents,
         config.steps_per_episode,
@@ -484,6 +485,12 @@ def _run_provenance(config: ExperimentConfig, git: Dict[str, Any]) -> Dict[str, 
     }
     if config.algorithm == "mappo":
         provenance["mappo_value_clip_mode"] = config.mappo_value_clip_mode
+        provenance["mappo_variant"] = config.mappo_variant
+        provenance["mappo_critic_structure"] = (
+            "joint_observation_scalar_global_plus_independent_local_task1_task2_values"
+            if config.mappo_variant == "tdec"
+            else "joint_observation_per_agent_value"
+        )
     provenance.update(git)
     return provenance
 
@@ -822,23 +829,56 @@ def _train_mappo(
             next_observations, reward_global, reward_task1, reward_task2, terminated, info = environment.step(
                 sampled.environment_actions
             )
-            next_values = (
-                np.zeros(config.number_agents, dtype=np.float32)
-                if terminated
-                else trainer.values(next_observations)
-            )
-            rollout.append(
-                observations=observations,
-                rb=sampled.rb,
-                mode=sampled.mode,
-                power=sampled.power,
-                old_log_prob=sampled.log_prob,
-                values=sampled.values,
-                rewards=trainer.combined_rewards(reward_global, reward_task1, reward_task2),
-                done=terminated,
-                next_values=next_values,
-                policy_version=trainer.policy_version,
-            )
+            if config.mappo_variant == "tdec":
+                if sampled.tdec_values is None:
+                    raise RuntimeError("TDec MAPPO policy step omitted decomposed values")
+                if terminated:
+                    next_tdec_values = {
+                        "global_next_values": np.zeros(1, dtype=np.float32),
+                        "task1_next_values": np.zeros(config.number_agents, dtype=np.float32),
+                        "task2_next_values": np.zeros(config.number_agents, dtype=np.float32),
+                    }
+                else:
+                    next_components = trainer.tdec_values(next_observations)
+                    next_tdec_values = {
+                        "global_next_values": next_components.global_value,
+                        "task1_next_values": next_components.task1_values,
+                        "task2_next_values": next_components.task2_values,
+                    }
+                rollout.append(
+                    observations=observations,
+                    rb=sampled.rb,
+                    mode=sampled.mode,
+                    power=sampled.power,
+                    old_log_prob=sampled.log_prob,
+                    global_values=sampled.tdec_values.global_value,
+                    task1_values=sampled.tdec_values.task1_values,
+                    task2_values=sampled.tdec_values.task2_values,
+                    global_rewards=np.asarray([reward_global], dtype=np.float32),
+                    task1_rewards=np.asarray(reward_task1, dtype=np.float32),
+                    task2_rewards=np.asarray(reward_task2, dtype=np.float32),
+                    done=terminated,
+                    policy_version=trainer.policy_version,
+                    **next_tdec_values,
+                )
+            else:
+                next_values = (
+                    np.zeros(config.number_agents, dtype=np.float32)
+                    if terminated
+                    else trainer.values(next_observations)
+                )
+                rollout.append(
+                    observations=observations,
+                    rb=sampled.rb,
+                    mode=sampled.mode,
+                    power=sampled.power,
+                    old_log_prob=sampled.log_prob,
+                    values=sampled.values,
+                    rewards=trainer.combined_rewards(reward_global, reward_task1, reward_task2),
+                    done=terminated,
+                    next_values=next_values,
+                    policy_version=trainer.policy_version,
+                )
             task1_steps.append(np.asarray(reward_task1, dtype=np.float32))
             task2_steps.append(np.asarray(reward_task2, dtype=np.float32))
             global_steps.append(float(reward_global))
@@ -870,6 +910,8 @@ def _train_mappo(
         "ok": True,
         "scope": "train",
         "algorithm": "mappo",
+        "mappo_variant": config.mappo_variant,
+        "mappo_critic_structure": trainer.critic_structure,
         "checkpoint_mode": config.checkpoint_mode,
         "metrics_shapes": shapes,
         "update_count": int(trainer.update_count),
@@ -881,6 +923,7 @@ def _train_mappo(
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "is_formal_result": False,
         "algorithm": "mappo",
+        "mappo_variant": config.mappo_variant,
         "profile": config.profile,
         "semantic_version": config.semantic_version,
         "mobility_revision": config.mobility_revision,
@@ -902,9 +945,18 @@ def _train_mappo(
         "update_count": int(trainer.update_count),
         "checkpoint_mode": config.checkpoint_mode,
         "policy_final": "policy_final.pt" if policy_saved else None,
-        "reward_semantics": "global_plus_per_agent_task1_plus_task2",
+        "reward_semantics": (
+            "task_decomposed_global_plus_per_agent_task1_plus_task2"
+            if config.mappo_variant == "tdec"
+            else "global_plus_per_agent_task1_plus_task2"
+        ),
         "actor_sharing": False,
-        "central_critic_output": "per_agent_state_value",
+        "central_critic_output": (
+            "scalar_global_and_independent_per_agent_task1_task2_values"
+            if config.mappo_variant == "tdec"
+            else "per_agent_state_value"
+        ),
+        "mappo_critic_structure": trainer.critic_structure,
         "power_distribution": "beta_open_unit_interval",
         "algorithm_applicability": {
             "polyak_tau_applicable": False,
@@ -1208,6 +1260,8 @@ def _validate_mappo_policy_artifact(
         raise RuntimeError("MAPPO policy config does not match config.resolved.json")
     if complete.get("config_hash") != training_config.canonical_hash():
         raise RuntimeError("MAPPO completion marker config mismatch")
+    if complete.get("mappo_variant", "combined") != training_config.mappo_variant:
+        raise RuntimeError("MAPPO completion marker variant mismatch")
     if int(payload.get("episode", -1)) != int(training_config.episodes):
         raise RuntimeError("MAPPO policy episode does not match completed training")
     actors = payload.get("actors")
@@ -1415,6 +1469,8 @@ def _evaluate_mappo_policy(
     policy_reference = os.path.relpath(policy_path, eval_dir).replace(os.sep, "/")
     summary = {
         "algorithm": "mappo",
+        "mappo_variant": runtime_config.mappo_variant,
+        "mappo_critic_structure": trainer.critic_structure,
         "eval_id": eval_id,
         "eval_purpose": "validation",
         "scope": scope,
@@ -1493,6 +1549,8 @@ def _evaluate_mappo_policy(
     provenance = {
         **eval_git,
         "algorithm": "mappo",
+        "mappo_variant": runtime_config.mappo_variant,
+        "mappo_critic_structure": trainer.critic_structure,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "eval_id": eval_id,
         "scenario": runtime_config.scenario.id,

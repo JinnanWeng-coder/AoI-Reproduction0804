@@ -1,6 +1,6 @@
-"""Vanilla hybrid-action MAPPO baseline."""
+"""Hybrid-action MAPPO combined baseline and task-decomposed variant."""
 
 from .action_adapter import encode_hybrid_actions
-from .trainer import MAPPOTrainer, PolicyStep
+from .trainer import MAPPOTrainer, PolicyStep, TDecValueStep
 
-__all__ = ["MAPPOTrainer", "PolicyStep", "encode_hybrid_actions"]
+__all__ = ["MAPPOTrainer", "PolicyStep", "TDecValueStep", "encode_hybrid_actions"]

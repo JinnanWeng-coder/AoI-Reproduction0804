@@ -25,6 +25,7 @@ DEFAULT_ALGORITHM = "modified_maddpg_tdec"
 SUPPORTED_ALGORITHMS = (DEFAULT_ALGORITHM, "modified_maddpg", "mappo")
 
 MAPPO_CONFIG_FIELDS = (
+    "mappo_variant",
     "mappo_actor_lr",
     "mappo_critic_lr",
     "mappo_rollout_episodes",
@@ -43,6 +44,7 @@ MAPPO_CONFIG_FIELDS = (
 )
 
 MAPPO_VALUE_CLIP_MODES = ("normalized", "legacy_raw")
+MAPPO_VARIANTS = ("combined", "tdec")
 
 
 DEFAULT_SCENARIOS: Dict[str, Dict[str, Any]] = {
@@ -82,6 +84,7 @@ COMMON_DEFAULTS: Dict[str, Any] = {
     "target_noise_clip": 0.5,
     "target_action_clip": 0.999,
     "global_actor_weight": 1.0,
+    "mappo_variant": "combined",
     "mappo_actor_lr": 0.0005,
     "mappo_critic_lr": 0.0005,
     "mappo_rollout_episodes": 5,
@@ -180,6 +183,7 @@ class ExperimentConfig:
     target_noise_clip: float = 0.5
     target_action_clip: float = 0.999
     global_actor_weight: float = 1.0
+    mappo_variant: str = "combined"
     mappo_actor_lr: float = 0.0005
     mappo_critic_lr: float = 0.0005
     mappo_rollout_episodes: int = 5
@@ -232,6 +236,7 @@ class ExperimentConfig:
     smoke: bool = False
     is_formal_result: bool = False
     _omit_mappo_value_clip_mode_from_serialization: bool = field(default=False, repr=False, compare=False)
+    _omit_mappo_variant_from_serialization: bool = field(default=False, repr=False, compare=False)
 
     @property
     def v2i_min_bits_per_step(self) -> float:
@@ -268,6 +273,7 @@ class ExperimentConfig:
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         omit_unversioned_clip_mode = data.pop("_omit_mappo_value_clip_mode_from_serialization", False)
+        omit_unversioned_variant = data.pop("_omit_mappo_variant_from_serialization", False)
         # The original checkpoint_v4 files predate the explicit algorithm
         # field and are unambiguously TDec.  Omitting that default preserves
         # their canonical hashes, while Algorithm 1 is always explicit.
@@ -283,11 +289,16 @@ class ExperimentConfig:
         if self.algorithm != "mappo":
             for field_name in MAPPO_CONFIG_FIELDS:
                 data.pop(field_name, None)
-        elif omit_unversioned_clip_mode:
-            # MAPPO artifacts created before this field existed used raw-space
-            # clipping.  Preserve their historical canonical hashes when they
-            # are reconstructed for read-only evaluation.
-            data.pop("mappo_value_clip_mode", None)
+        else:
+            if omit_unversioned_clip_mode:
+                # MAPPO artifacts created before this field existed used raw-space
+                # clipping.  Preserve their historical canonical hashes when they
+                # are reconstructed for read-only evaluation.
+                data.pop("mappo_value_clip_mode", None)
+            if omit_unversioned_variant:
+                # MAPPO artifacts created before variants were explicit are the
+                # original combined-reward baseline.  Preserve their identity.
+                data.pop("mappo_variant", None)
         data["scenario"] = asdict(self.scenario)
         data["derived"] = {
             "number_agents": self.number_agents,
@@ -410,8 +421,14 @@ def config_from_dict(data: Dict[str, Any]) -> ExperimentConfig:
         str(data.get("algorithm", DEFAULT_ALGORITHM)) == "mappo"
         and "mappo_value_clip_mode" not in data
     )
+    unversioned_mappo_variant = (
+        str(data.get("algorithm", DEFAULT_ALGORITHM)) == "mappo"
+        and "mappo_variant" not in data
+    )
     if unversioned_mappo_clip:
         values["mappo_value_clip_mode"] = "legacy_raw"
+    if unversioned_mappo_variant:
+        values["mappo_variant"] = "combined"
     profile = str(data.get("profile", REPRODUCTION_PROFILE))
     scenario_data = data.get("scenario")
     if profile == REPRODUCTION_PROFILE:
@@ -419,6 +436,8 @@ def config_from_dict(data: Dict[str, Any]) -> ExperimentConfig:
         config = resolve_config(scenario=str(scenario), **values)
         if unversioned_mappo_clip:
             config._omit_mappo_value_clip_mode_from_serialization = True
+        if unversioned_mappo_variant:
+            config._omit_mappo_variant_from_serialization = True
         return config
     if not isinstance(scenario_data, dict):
         raise ValueError("historical config requires an embedded scenario object")
@@ -431,6 +450,8 @@ def config_from_dict(data: Dict[str, Any]) -> ExperimentConfig:
     config = ExperimentConfig(profile=profile, scenario=scenario, **values)
     if unversioned_mappo_clip:
         config._omit_mappo_value_clip_mode_from_serialization = True
+    if unversioned_mappo_variant:
+        config._omit_mappo_variant_from_serialization = True
     return config
 
 
@@ -502,6 +523,8 @@ def validate_config(config: ExperimentConfig) -> None:
         raise ValueError("mappo_clip_param must be in (0, 1)")
     if config.mappo_value_clip_mode not in MAPPO_VALUE_CLIP_MODES:
         raise ValueError(f"mappo_value_clip_mode must be one of {MAPPO_VALUE_CLIP_MODES}")
+    if config.mappo_variant not in MAPPO_VARIANTS:
+        raise ValueError(f"mappo_variant must be one of {MAPPO_VARIANTS}")
     for name in ("mappo_value_loss_coef", "mappo_entropy_coef_rb", "mappo_entropy_coef_mode", "mappo_entropy_coef_power"):
         if not math.isfinite(float(getattr(config, name))) or float(getattr(config, name)) < 0.0:
             raise ValueError(f"{name} must be finite and non-negative")
@@ -721,6 +744,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--power-min-dbm", type=float, default=None)
     parser.add_argument("--power-max-dbm", type=float, default=None)
     parser.add_argument("--mappo-actor-lr", type=float, default=None)
+    parser.add_argument(
+        "--mappo-variant",
+        choices=MAPPO_VARIANTS,
+        default=None,
+        help="combined-reward MAPPO baseline (default) or task-decomposed MAPPO",
+    )
     parser.add_argument("--mappo-entropy-coef-rb", type=float, default=None)
     parser.add_argument("--mappo-entropy-coef-mode", type=float, default=None)
     parser.add_argument("--mappo-entropy-coef-power", type=float, default=None)
@@ -735,6 +764,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     mappo_overrides = {
+        "mappo_variant": args.mappo_variant,
         "mappo_actor_lr": args.mappo_actor_lr,
         "mappo_entropy_coef_rb": args.mappo_entropy_coef_rb,
         "mappo_entropy_coef_mode": args.mappo_entropy_coef_mode,

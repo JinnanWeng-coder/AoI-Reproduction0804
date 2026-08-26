@@ -15,7 +15,7 @@ from torch.distributions import Beta, Categorical
 def _hidden_pair(hidden: Iterable[int]) -> Tuple[int, int]:
     values = tuple(int(value) for value in hidden)
     if len(values) != 2 or any(value < 1 for value in values):
-        raise ValueError("MAPPO actor hidden sizes must contain two positive values")
+        raise ValueError("MAPPO two-layer network hidden sizes must contain two positive values")
     return values
 
 
@@ -145,8 +145,31 @@ class CentralValueCritic(nn.Module):
         return self.value(x)
 
 
+class LocalValueCritic(nn.Module):
+    """Scalar state-value network for one agent and one task reward."""
+
+    def __init__(self, obs_dim: int, hidden_dims):
+        super().__init__()
+        h1, h2 = _hidden_pair(hidden_dims)
+        self.fc1 = nn.Linear(int(obs_dim), h1)
+        self.fc2 = nn.Linear(h1, h2)
+        self.norm1 = nn.LayerNorm(h1)
+        self.norm2 = nn.LayerNorm(h2)
+        self.value = nn.Linear(h2, 1)
+        for layer in (self.fc1, self.fc2):
+            nn.init.orthogonal_(layer.weight, gain=sqrt(2.0))
+            nn.init.zeros_(layer.bias)
+        nn.init.orthogonal_(self.value.weight, gain=1.0)
+        nn.init.zeros_(self.value.bias)
+
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        x = F.relu(self.norm1(self.fc1(observations)))
+        x = F.relu(self.norm2(self.fc2(x)))
+        return self.value(x).squeeze(-1)
+
+
 class RunningValueNorm(nn.Module):
-    """Per-agent running return scale used only by the centralized critic."""
+    """Per-output running return scale used by a MAPPO value stream."""
 
     def __init__(self, number_agents: int, epsilon: float = 1e-5):
         super().__init__()

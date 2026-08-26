@@ -6,18 +6,19 @@ import pytest
 import torch
 
 from analysis.summarize_mappo_default import EXPECTED_SEEDS, summarize
-from aoi_v2x_reproduction.config import resolve_config
+from aoi_v2x_reproduction.config import config_from_dict, resolve_config
 from aoi_v2x_reproduction.runtime.runner import evaluate_from_checkpoint, train
 
 
-def _config(root: Path, checkpoint_mode: str = "policy_only"):
-    return resolve_config(
+def _config(root: Path, checkpoint_mode: str = "policy_only", **overrides):
+    values = dict(
         scenario="p05_n04_g25",
         algorithm="mappo",
         seed=71,
         episodes=2,
         steps_per_episode=3,
         actor_hidden=[16, 8],
+        local_critic_hidden=[16, 8],
         global_critic_hidden=[16, 8, 4],
         mappo_rollout_episodes=1,
         mappo_ppo_epochs=2,
@@ -27,6 +28,10 @@ def _config(root: Path, checkpoint_mode: str = "policy_only"):
         checkpoint_mode=checkpoint_mode,
         diagnostics=True,
     )
+    values.update(overrides)
+    if "mappo_variant" in overrides and "run_name" not in overrides:
+        values["run_name"] = f"mappo-{overrides['mappo_variant']}-{checkpoint_mode}"
+    return resolve_config(**values)
 
 
 def test_mappo_training_writes_metrics_completion_and_policy_only(tmp_path):
@@ -44,6 +49,11 @@ def test_mappo_training_writes_metrics_completion_and_policy_only(tmp_path):
     assert complete["algorithm"] == "mappo"
     assert resolved["mappo_value_clip_mode"] == "normalized"
     assert provenance["mappo_value_clip_mode"] == "normalized"
+    assert complete["mappo_variant"] == "combined"
+    assert resolved["mappo_variant"] == "combined"
+    assert provenance["mappo_variant"] == "combined"
+    assert complete["mappo_critic_structure"] == "joint_observation_per_agent_value"
+    assert provenance["mappo_critic_structure"] == "joint_observation_per_agent_value"
     assert complete["update_count"] == 2
     assert complete["algorithm_applicability"] == {
         "polyak_tau_applicable": False,
@@ -98,6 +108,79 @@ def test_mappo_policy_final_supports_separate_deterministic_and_stochastic_diagn
         assert 0.0 <= evaluated["CAM_success_probability"] <= 1.0
         assert 0.0 <= evaluated["payload_completion"] <= 1.0
     assert not (run_dir / "eval").exists()
+
+
+def test_tdec_lifecycle_records_structure_and_actor_only_policy_evaluates(tmp_path):
+    training_config = _config(tmp_path / "training", mappo_variant="tdec")
+    result = train(training_config)
+    run_dir = Path(result["run_dir"])
+    complete = json.loads((run_dir / "COMPLETE.json").read_text(encoding="utf-8"))
+    resolved = json.loads((run_dir / "config.resolved.json").read_text(encoding="utf-8"))
+    provenance = json.loads((run_dir / "provenance.json").read_text(encoding="utf-8"))
+    diagnostics = json.loads((run_dir / "learning_diagnostics.json").read_text(encoding="utf-8"))
+
+    assert resolved["mappo_variant"] == complete["mappo_variant"] == provenance["mappo_variant"] == "tdec"
+    expected_structure = "joint_observation_scalar_global_plus_independent_local_task1_task2_values"
+    assert complete["mappo_critic_structure"] == provenance["mappo_critic_structure"] == expected_structure
+    assert complete["reward_semantics"] == "task_decomposed_global_plus_per_agent_task1_plus_task2"
+    assert complete["central_critic_output"] == "scalar_global_and_independent_per_agent_task1_task2_values"
+    assert complete["parameter_counts"]["global_critic"] > 0
+    assert complete["parameter_counts"]["task1_critics"] > 0
+    assert complete["parameter_counts"]["task2_critics"] > 0
+    assert diagnostics and all(item["mappo_variant"] == "tdec" for item in diagnostics)
+    assert all("global_critic_loss" in item and "task1_critic_loss" in item and "task2_critic_loss" in item for item in diagnostics)
+
+    payload = torch.load(run_dir / "policy_final.pt", map_location="cpu", weights_only=False)
+    assert payload["policy_schema_version"] == "policy_artifact_v1"
+    assert "critic" not in payload and "optimizer" not in payload
+    evaluation_config = _config(tmp_path / "evaluations", mappo_variant="tdec")
+    evaluated = evaluate_from_checkpoint(
+        evaluation_config,
+        str(run_dir / "policy_final.pt"),
+        eval_episodes=1,
+        eval_seeds=[201],
+        eval_purpose="validation",
+        scope="validation",
+        diagnostic_eval=True,
+        mappo_eval_mode="deterministic",
+    )
+    assert evaluated["mappo_variant"] == "tdec"
+    assert evaluated["mappo_critic_structure"] == expected_structure
+
+
+def test_historical_combined_policy_without_variant_or_clip_mode_still_evaluates(tmp_path):
+    training_config = _config(tmp_path / "training")
+    run_dir = Path(train(training_config)["run_dir"])
+    config_path = run_dir / "config.resolved.json"
+    complete_path = run_dir / "COMPLETE.json"
+    policy_path = run_dir / "policy_final.pt"
+
+    historical_config = json.loads(config_path.read_text(encoding="utf-8"))
+    historical_config.pop("mappo_variant")
+    historical_config.pop("mappo_value_clip_mode")
+    reconstructed = config_from_dict(historical_config)
+    config_path.write_text(json.dumps(historical_config), encoding="utf-8")
+    complete = json.loads(complete_path.read_text(encoding="utf-8"))
+    complete.pop("mappo_variant")
+    complete["config_hash"] = reconstructed.canonical_hash()
+    complete_path.write_text(json.dumps(complete), encoding="utf-8")
+    payload = torch.load(policy_path, map_location="cpu", weights_only=False)
+    payload["config"].pop("mappo_variant")
+    payload["config"].pop("mappo_value_clip_mode")
+    torch.save(payload, policy_path)
+
+    evaluation_config = _config(tmp_path / "evaluations")
+    evaluated = evaluate_from_checkpoint(
+        evaluation_config,
+        str(policy_path),
+        eval_episodes=1,
+        eval_seeds=[201],
+        eval_purpose="validation",
+        scope="validation",
+        diagnostic_eval=True,
+        mappo_eval_mode="deterministic",
+    )
+    assert evaluated["mappo_variant"] == "combined"
 
 
 def test_mappo_policy_eval_requires_diagnostic_mode_and_zero_external_noise(tmp_path):
