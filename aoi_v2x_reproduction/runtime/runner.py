@@ -482,6 +482,8 @@ def _run_provenance(config: ExperimentConfig, git: Dict[str, Any]) -> Dict[str, 
             else None
         ),
     }
+    if config.algorithm == "mappo":
+        provenance["mappo_value_clip_mode"] = config.mappo_value_clip_mode
     provenance.update(git)
     return provenance
 

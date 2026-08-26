@@ -39,7 +39,11 @@ def test_mappo_training_writes_metrics_completion_and_policy_only(tmp_path):
     assert (run_dir / "learning_diagnostics.json").is_file()
     assert not (run_dir / "checkpoints").exists()
     complete = json.loads((run_dir / "COMPLETE.json").read_text(encoding="utf-8"))
+    resolved = json.loads((run_dir / "config.resolved.json").read_text(encoding="utf-8"))
+    provenance = json.loads((run_dir / "provenance.json").read_text(encoding="utf-8"))
     assert complete["algorithm"] == "mappo"
+    assert resolved["mappo_value_clip_mode"] == "normalized"
+    assert provenance["mappo_value_clip_mode"] == "normalized"
     assert complete["update_count"] == 2
     assert complete["algorithm_applicability"] == {
         "polyak_tau_applicable": False,

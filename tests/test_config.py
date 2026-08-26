@@ -6,6 +6,7 @@ from aoi_v2x_reproduction.config import (
     REPRODUCTION_PROFILE,
     all_scenarios,
     build_parser,
+    config_from_dict,
     config_from_args,
     matrix_specs,
     resolve_config,
@@ -78,16 +79,31 @@ def test_cli_exposes_only_the_planned_mappo_stability_overrides():
         "--mappo-entropy-coef-rb", "0.02",
         "--mappo-entropy-coef-mode", "0.02",
         "--mappo-entropy-coef-power", "0.002",
+        "--mappo-value-clip-mode", "legacy_raw",
     ])
     config = config_from_args(args)
     assert config.mappo_actor_lr == pytest.approx(0.0001)
     assert config.mappo_entropy_coef_rb == pytest.approx(0.02)
     assert config.mappo_entropy_coef_mode == pytest.approx(0.02)
     assert config.mappo_entropy_coef_power == pytest.approx(0.002)
+    assert config.mappo_value_clip_mode == "legacy_raw"
+    assert config.to_dict()["mappo_value_clip_mode"] == "legacy_raw"
 
     invalid = parser.parse_args(["--algorithm", "modified_maddpg", "--mappo-actor-lr", "0.0001"])
     with pytest.raises(ValueError, match="require --algorithm mappo"):
         config_from_args(invalid)
+
+
+def test_mappo_value_clipping_defaults_to_normalized_and_unversioned_configs_remain_legacy():
+    current = resolve_config(scenario="p05_n04_g25", algorithm="mappo")
+    assert current.mappo_value_clip_mode == "normalized"
+    assert current.to_dict()["mappo_value_clip_mode"] == "normalized"
+
+    unversioned = current.to_dict()
+    unversioned.pop("mappo_value_clip_mode")
+    reconstructed = config_from_dict(unversioned)
+    assert reconstructed.mappo_value_clip_mode == "legacy_raw"
+    assert reconstructed.to_dict() == unversioned
 
 
 def test_diagnostic_eval_flag_is_not_valid_for_training():

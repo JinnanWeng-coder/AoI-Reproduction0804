@@ -8,8 +8,9 @@ from aoi_v2x_reproduction.algorithms.mappo import (
     MAPPOTrainer,
     encode_hybrid_actions,
 )
-from aoi_v2x_reproduction.algorithms.mappo.networks import HybridActor
+from aoi_v2x_reproduction.algorithms.mappo.networks import HybridActor, RunningValueNorm
 from aoi_v2x_reproduction.algorithms.mappo.rollout import OnPolicyRollout, compute_gae
+from aoi_v2x_reproduction.algorithms.mappo.trainer import _value_loss_inputs
 from aoi_v2x_reproduction.config import resolve_config
 from aoi_v2x_reproduction.envs import PaperEnviron
 
@@ -104,10 +105,11 @@ def test_rollout_is_versioned_and_consumed_once():
         rollout.consume(gamma=0.99, gae_lambda=0.95, expected_policy_version=3)
 
 
-def test_mappo_update_is_finite_and_changes_each_local_policy():
+@pytest.mark.parametrize("value_clip_mode", ["normalized", "legacy_raw"])
+def test_mappo_update_is_finite_and_changes_each_local_policy(value_clip_mode):
     torch.manual_seed(9)
     np.random.seed(9)
-    config = _mappo_config()
+    config = _mappo_config(mappo_value_clip_mode=value_clip_mode)
     trainer = MAPPOTrainer(config, torch.device("cpu"))
     rollout = OnPolicyRollout(config.number_agents, config.state_dim)
     before = [[parameter.detach().clone() for parameter in actor.parameters()] for actor in trainer.actors]
@@ -138,9 +140,80 @@ def test_mappo_update_is_finite_and_changes_each_local_policy():
 
     assert diagnostics["policy_version"] == 1
     assert diagnostics["rollout_steps"] == 6
+    assert np.isfinite(diagnostics["critic_loss"])
+    assert np.isfinite(diagnostics["critic_grad_norm"])
     assert all(np.isfinite(value) for value in diagnostics["approx_kl_per_agent"])
     for actor_before, actor_after in zip(before, trainer.actors):
         assert any(not torch.equal(old, new) for old, new in zip(actor_before, actor_after.parameters()))
+
+
+def test_normalized_value_clipping_is_affine_scale_invariant():
+    returns = torch.tensor([
+        [-40.0, 10.0],
+        [-10.0, 15.0],
+        [20.0, 25.0],
+        [50.0, 30.0],
+    ])
+    old_values = returns + torch.tensor([
+        [2.0, -3.0],
+        [-4.0, 1.0],
+        [3.0, 2.0],
+        [-1.0, -2.0],
+    ])
+    predictions = old_values + torch.tensor([
+        [15.0, -8.0],
+        [-12.0, 6.0],
+        [9.0, 7.0],
+        [-11.0, -5.0],
+    ])
+
+    base_norm = RunningValueNorm(number_agents=2)
+    base_norm.update(returns)
+    base = _value_loss_inputs(
+        predictions, old_values, returns, base_norm, clip_param=0.2, clip_mode="normalized"
+    )
+    normalized_old = base_norm.normalize(old_values)
+    expected_clipped = normalized_old + torch.clamp(base[0] - normalized_old, -0.2, 0.2)
+    torch.testing.assert_close(base[1], expected_clipped)
+
+    scale = torch.tensor([3.0, 0.5])
+    shift = torch.tensor([100.0, -7.0])
+    scaled_returns = returns * scale + shift
+    scaled_norm = RunningValueNorm(number_agents=2)
+    scaled_norm.update(scaled_returns)
+    scaled = _value_loss_inputs(
+        predictions * scale + shift,
+        old_values * scale + shift,
+        scaled_returns,
+        scaled_norm,
+        clip_param=0.2,
+        clip_mode="normalized",
+    )
+
+    for base_tensor, scaled_tensor in zip(base, scaled):
+        torch.testing.assert_close(base_tensor, scaled_tensor, rtol=1e-5, atol=1e-5)
+
+
+def test_legacy_value_clipping_reproduces_raw_space_order():
+    returns = torch.tensor([[-20.0], [0.0], [20.0], [40.0]])
+    old_values = torch.tensor([[-5.0], [2.0], [12.0], [25.0]])
+    predictions = old_values + torch.tensor([[5.0], [-4.0], [3.0], [-2.0]])
+    value_norm = RunningValueNorm(number_agents=1)
+    value_norm.update(returns)
+
+    normalized_predictions, normalized_clipped, normalized_returns = _value_loss_inputs(
+        predictions,
+        old_values,
+        returns,
+        value_norm,
+        clip_param=0.2,
+        clip_mode="legacy_raw",
+    )
+    expected_raw_clipped = old_values + torch.clamp(predictions - old_values, -0.2, 0.2)
+
+    torch.testing.assert_close(normalized_predictions, value_norm.normalize(predictions))
+    torch.testing.assert_close(normalized_clipped, value_norm.normalize(expected_raw_clipped))
+    torch.testing.assert_close(normalized_returns, value_norm.normalize(returns))
 
 
 def test_actors_are_local_while_value_estimates_use_joint_observations():

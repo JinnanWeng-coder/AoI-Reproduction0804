@@ -24,6 +24,42 @@ class PolicyStep:
     environment_actions: np.ndarray
 
 
+def _value_loss_inputs(
+    predictions: torch.Tensor,
+    old_values: torch.Tensor,
+    returns: torch.Tensor,
+    value_norm: RunningValueNorm,
+    clip_param: float,
+    clip_mode: str,
+):
+    """Return normalized current, clipped, and target values for critic loss.
+
+    Rollout values and GAE remain in their raw reward scale.  The corrected
+    mode maps both value predictions to the running normalized scale before
+    applying PPO's dimensionless clipping threshold.  ``legacy_raw`` exactly
+    retains the earlier raw-space clipping order for historical replication.
+    """
+    normalized_predictions = value_norm.normalize(predictions)
+    normalized_old_values = value_norm.normalize(old_values)
+    normalized_returns = value_norm.normalize(returns)
+    if clip_mode == "normalized":
+        normalized_clipped = normalized_old_values + torch.clamp(
+            normalized_predictions - normalized_old_values,
+            -clip_param,
+            clip_param,
+        )
+    elif clip_mode == "legacy_raw":
+        clipped_raw = old_values + torch.clamp(
+            predictions - old_values,
+            -clip_param,
+            clip_param,
+        )
+        normalized_clipped = value_norm.normalize(clipped_raw)
+    else:
+        raise ValueError(f"unsupported MAPPO value clip mode: {clip_mode}")
+    return normalized_predictions, normalized_clipped, normalized_returns
+
+
 class MAPPOTrainer:
     """Separate local policies with one centralized vector-value critic."""
 
@@ -166,14 +202,14 @@ class MAPPOTrainer:
 
             joint_observations = batch.observations.reshape(batch.size, -1)
             predictions = self.critic(joint_observations)
-            clipped_predictions = batch.old_values + torch.clamp(
-                predictions - batch.old_values,
-                -clip_param,
-                clip_param,
+            normalized_predictions, normalized_clipped, normalized_returns = _value_loss_inputs(
+                predictions=predictions,
+                old_values=batch.old_values,
+                returns=batch.returns,
+                value_norm=self.value_norm,
+                clip_param=clip_param,
+                clip_mode=self.config.mappo_value_clip_mode,
             )
-            normalized_returns = self.value_norm.normalize(batch.returns)
-            normalized_predictions = self.value_norm.normalize(predictions)
-            normalized_clipped = self.value_norm.normalize(clipped_predictions)
             original_loss = F.smooth_l1_loss(
                 normalized_predictions,
                 normalized_returns,
