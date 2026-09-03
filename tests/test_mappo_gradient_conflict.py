@@ -1,5 +1,7 @@
 import copy
+import random
 
+import numpy as np
 import torch
 
 from aoi_v2x_reproduction.algorithms.mappo.gradient_conflict import (
@@ -9,7 +11,10 @@ from aoi_v2x_reproduction.algorithms.mappo.gradient_conflict import (
     common_scale_component_advantages,
     effective_clipping_mask,
     objective_actor_gradient_diagnostics,
+    pcgrad_project_objective_gradients,
+    pcgrad_projection_seed,
     pair_geometry,
+    sum_objective_gradients,
 )
 from aoi_v2x_reproduction.algorithms.mappo.networks import HybridActor
 from aoi_v2x_reproduction.algorithms.mappo.rollout import TDecRolloutBatch
@@ -119,7 +124,80 @@ def test_actor_parameter_blocks_are_complete_and_disjoint():
     assert len(indices) == len(set(indices))
 
 
-def _small_tdec_config(enabled: bool):
+def _manual_objective_gradients(actor, scales):
+    return {
+        name: tuple(torch.full_like(parameter, float(scale)) for parameter in actor.parameters())
+        for name, scale in zip(OBJECTIVES, scales)
+    }
+
+
+def test_pcgrad_no_conflict_degenerates_exactly_to_separate_gradient_sum():
+    actor = HybridActor(obs_dim=6, hidden_dims=[8, 4], n_rb=3, n_modes=2)
+    original = _manual_objective_gradients(actor, (1.0, 2.0, 3.0))
+    projected, audit = pcgrad_project_objective_gradients(actor, original, projection_seed=19)
+    assert audit["projection_count"] == {"global": 0, "task1": 0, "task2": 0}
+    assert audit["aggregate_projection_magnitude"] == 0.0
+    for name in OBJECTIVES:
+        for expected, actual in zip(original[name], projected[name]):
+            torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+    for expected, actual in zip(sum_objective_gradients(original), sum_objective_gradients(projected)):
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_pcgrad_projects_all_three_objectives_and_reports_finite_geometry():
+    actor = HybridActor(obs_dim=6, hidden_dims=[8, 4], n_rb=3, n_modes=2)
+    parameters = tuple(actor.parameters())
+    global_grad = tuple(torch.ones_like(parameter) for parameter in parameters)
+    task1_grad = tuple(-torch.ones_like(parameter) for parameter in parameters)
+    task2_grad = tuple(
+        torch.full_like(parameter, 0.5 if index % 2 == 0 else -0.25)
+        for index, parameter in enumerate(parameters)
+    )
+    original = {"global": global_grad, "task1": task1_grad, "task2": task2_grad}
+    projected, audit = pcgrad_project_objective_gradients(actor, original, projection_seed=23)
+
+    assert set(projected) == set(OBJECTIVES)
+    for name in OBJECTIVES:
+        assert set(audit["projection_order"][name]) == set(OBJECTIVES) - {name}
+    assert sum(audit["projection_count"].values()) >= 2
+    assert audit["aggregate_projection_magnitude"] > 0.0
+    for phase in ("before", "after"):
+        assert np.isfinite(audit[phase]["cancellation_ratio"])
+        assert all(np.isfinite(value) for value in audit[phase]["objective_grad_norm"].values())
+        assert all(np.isfinite(value["cosine"]) for value in audit[phase]["pairs"].values())
+    assert all(torch.isfinite(value).all() for values in projected.values() for value in values)
+
+
+def test_pcgrad_projection_order_rng_is_reproducible_and_isolated():
+    actor = HybridActor(obs_dim=6, hidden_dims=[8, 4], n_rb=3, n_modes=2)
+    gradients = _manual_objective_gradients(actor, (1.0, -1.0, 0.5))
+    random.seed(101)
+    np.random.seed(102)
+    torch.manual_seed(103)
+    python_before = random.getstate()
+    numpy_before = np.random.get_state()
+    torch_before = torch.random.get_rng_state().clone()
+    seed = pcgrad_projection_seed(8, 11, 9, 4)
+    first, first_audit = pcgrad_project_objective_gradients(actor, gradients, seed)
+    second, second_audit = pcgrad_project_objective_gradients(actor, gradients, seed)
+
+    assert first_audit["projection_order"] == second_audit["projection_order"]
+    for name in OBJECTIVES:
+        for left, right in zip(first[name], second[name]):
+            torch.testing.assert_close(left, right, rtol=0.0, atol=0.0)
+    assert random.getstate() == python_before
+    numpy_after = np.random.get_state()
+    assert numpy_after[0] == numpy_before[0]
+    np.testing.assert_array_equal(numpy_after[1], numpy_before[1])
+    assert numpy_after[2:] == numpy_before[2:]
+    torch.testing.assert_close(torch.random.get_rng_state(), torch_before, rtol=0.0, atol=0.0)
+
+
+def _small_tdec_config(
+    enabled: bool,
+    actor_update_mode: str = "composed_clip",
+    ppo_epochs: int = 2,
+):
     return resolve_config(
         scenario="p05_n04_g25",
         algorithm="mappo",
@@ -132,8 +210,9 @@ def _small_tdec_config(enabled: bool):
         device="cpu",
         mappo_variant="tdec",
         mappo_rollout_episodes=1,
-        mappo_ppo_epochs=2,
+        mappo_ppo_epochs=ppo_epochs,
         mappo_objective_gradient_diagnostics=enabled,
+        mappo_actor_update_mode=actor_update_mode,
     )
 
 
@@ -203,3 +282,46 @@ def test_enabling_diagnostics_does_not_change_tdec_update():
     assert len(objective["records"]) == 10
     for left, right in zip(_all_trainer_parameters(without), _all_trainer_parameters(with_diagnostics)):
         torch.testing.assert_close(left, right, rtol=0.0, atol=0.0)
+
+
+def test_phase2_actor_update_modes_are_finite_and_record_pcgrad_projection():
+    results = {}
+    for mode in ("composed_clip", "separate_sum_clip", "pcgrad"):
+        torch.manual_seed(211)
+        trainer = MAPPOTrainer(_small_tdec_config(True, mode), torch.device("cpu"))
+        diagnostics = trainer.update(_tdec_batch(trainer))
+        assert diagnostics["mappo_actor_update_mode"] == mode
+        values = [
+            *diagnostics["actor_loss_per_agent"],
+            *diagnostics["actor_grad_norm_per_agent"],
+            diagnostics["critic_loss"],
+        ]
+        assert np.isfinite(values).all()
+        records = diagnostics["objective_gradient_diagnostics"]["records"]
+        assert len(records) == 10
+        if mode == "pcgrad":
+            assert all(record["pcgrad_projection"]["schema_version"] == "mappo_pcgrad_projection_v1" for record in records)
+        else:
+            assert all("pcgrad_projection" not in record for record in records)
+        results[mode] = _all_trainer_parameters(trainer)
+
+    assert any(
+        not torch.equal(left, right)
+        for left, right in zip(results["composed_clip"], results["separate_sum_clip"])
+    )
+
+
+def test_separate_sum_matches_composed_update_before_ratio_can_leave_one():
+    torch.manual_seed(307)
+    composed = MAPPOTrainer(
+        _small_tdec_config(False, "composed_clip", ppo_epochs=1), torch.device("cpu")
+    )
+    torch.manual_seed(307)
+    separate = MAPPOTrainer(
+        _small_tdec_config(False, "separate_sum_clip", ppo_epochs=1), torch.device("cpu")
+    )
+    batch = _tdec_batch(composed)
+    composed.update(batch)
+    separate.update(batch)
+    for left, right in zip(_all_trainer_parameters(composed), _all_trainer_parameters(separate)):
+        torch.testing.assert_close(left, right, rtol=1e-6, atol=2e-7)

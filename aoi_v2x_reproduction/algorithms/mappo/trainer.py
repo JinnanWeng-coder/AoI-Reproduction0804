@@ -11,8 +11,14 @@ import torch.nn.functional as F
 
 from .action_adapter import encode_hybrid_actions
 from .gradient_conflict import (
+    OBJECTIVES,
     common_scale_component_advantages,
     objective_actor_gradient_diagnostics,
+    objective_policy_gradients,
+    objective_policy_losses,
+    pcgrad_project_objective_gradients,
+    pcgrad_projection_seed,
+    sum_objective_gradients,
 )
 from .networks import CentralValueCritic, HybridActor, LocalValueCritic, RunningValueNorm
 from .rollout import RolloutBatch, TDecRolloutBatch
@@ -124,6 +130,7 @@ class MAPPOTrainer:
         self.number_agents = int(config.number_agents)
         self.observation_dim = int(config.state_dim)
         self.variant = str(config.mappo_variant)
+        self.actor_update_mode = str(config.mappo_actor_update_mode)
         self.actors = torch.nn.ModuleList([
             HybridActor(config.state_dim, config.actor_hidden, config.n_rb, config.n_modes)
             for _ in range(self.number_agents)
@@ -380,9 +387,13 @@ class MAPPOTrainer:
         advantage_std = advantages.std(dim=0, unbiased=False, keepdim=True)
         normalized_advantages = (advantages - advantage_mean) / (advantage_std + 1e-8)
         objective_component_advantages = None
-        if bool(self.config.mappo_objective_gradient_diagnostics):
+        needs_objective_components = (
+            bool(self.config.mappo_objective_gradient_diagnostics)
+            or self.actor_update_mode != "composed_clip"
+        )
+        if needs_objective_components:
             if self.variant != "tdec":
-                raise RuntimeError("objective-gradient diagnostics require mappo_variant=tdec")
+                raise RuntimeError("objective-wise actor updates require mappo_variant=tdec")
             objective_component_advantages, diagnostic_composed = common_scale_component_advantages(
                 weighted_global_advantages,
                 batch.task1_advantages,
@@ -421,21 +432,58 @@ class MAPPOTrainer:
                 log_ratio = evaluated.log_prob - batch.old_log_prob[:, index]
                 ratio = torch.exp(log_ratio)
                 advantage = normalized_advantages[:, index]
-                surrogate = torch.minimum(
-                    ratio * advantage,
-                    torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage,
+                component_for_agent = (
+                    {
+                        name: objective_component_advantages[name][:, index]
+                        for name in OBJECTIVES
+                    }
+                    if objective_component_advantages is not None
+                    else None
                 )
-                policy_loss = -surrogate.mean()
-                if objective_component_advantages is not None and _epoch in {0, ppo_epochs - 1}:
+                objective_losses = None
+                objective_gradients = None
+                projection_diagnostics = None
+                if self.actor_update_mode == "composed_clip":
+                    surrogate = torch.minimum(
+                        ratio * advantage,
+                        torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage,
+                    )
+                    policy_loss = -surrogate.mean()
+                else:
+                    if component_for_agent is None:
+                        raise RuntimeError("objective-wise actor update omitted component advantages")
+                    objective_losses = objective_policy_losses(ratio, component_for_agent, clip_param)
+                    policy_loss = sum(objective_losses.values())
+                    if self.actor_update_mode == "pcgrad":
+                        objective_gradients = objective_policy_gradients(
+                            objective_losses,
+                            tuple(actor.parameters()),
+                            retain_graph=True,
+                        )
+                        objective_gradients, projection_diagnostics = pcgrad_project_objective_gradients(
+                            actor,
+                            objective_gradients,
+                            projection_seed=pcgrad_projection_seed(
+                                int(self.config.seed),
+                                int(self.update_count),
+                                int(_epoch),
+                                int(index),
+                            ),
+                        )
+                if (
+                    bool(self.config.mappo_objective_gradient_diagnostics)
+                    and _epoch in {0, ppo_epochs - 1}
+                ):
+                    if component_for_agent is None:
+                        raise RuntimeError("objective-gradient diagnostics omitted component advantages")
                     objective_record = objective_actor_gradient_diagnostics(
                         actor=actor,
                         ratio=ratio,
-                        component_advantages={
-                            name: values[:, index]
-                            for name, values in objective_component_advantages.items()
-                        },
+                        component_advantages=component_for_agent,
                         clip_param=clip_param,
                     )
+                    if projection_diagnostics is not None:
+                        objective_record["pcgrad_projection"] = projection_diagnostics
                     objective_record.update({"ppo_epoch": int(_epoch), "agent": int(index)})
                     objective_gradient_records.append(objective_record)
                 entropy_bonus = (
@@ -445,7 +493,29 @@ class MAPPOTrainer:
                 )
                 total_actor_loss = policy_loss - entropy_bonus
                 optimizer.zero_grad(set_to_none=True)
-                total_actor_loss.backward()
+                if self.actor_update_mode == "pcgrad":
+                    if objective_gradients is None:
+                        raise RuntimeError("PCGrad actor update omitted projected objective gradients")
+                    parameters = tuple(actor.parameters())
+                    entropy_gradients = torch.autograd.grad(
+                        -entropy_bonus,
+                        parameters,
+                        retain_graph=False,
+                        create_graph=False,
+                        allow_unused=True,
+                    )
+                    policy_gradients = sum_objective_gradients(objective_gradients)
+                    for parameter, policy_gradient, entropy_gradient in zip(
+                        parameters, policy_gradients, entropy_gradients
+                    ):
+                        combined_gradient = policy_gradient.clone()
+                        if entropy_gradient is not None:
+                            combined_gradient.add_(entropy_gradient.detach())
+                        if not bool(torch.isfinite(combined_gradient).all().item()):
+                            raise FloatingPointError("non-finite combined PCGrad actor gradient")
+                        parameter.grad = combined_gradient
+                else:
+                    total_actor_loss.backward()
                 grad_norm = torch.nn.utils.clip_grad_norm_(actor.parameters(), float(self.config.mappo_max_grad_norm))
                 optimizer.step()
 
@@ -560,6 +630,7 @@ class MAPPOTrainer:
         diagnostics: Dict[str, object] = {
             "algorithm": "mappo",
             "mappo_variant": self.variant,
+            "mappo_actor_update_mode": self.actor_update_mode,
             "update": int(self.update_count),
             "policy_version": int(self.policy_version),
             "rollout_steps": int(batch.size),
@@ -595,7 +666,7 @@ class MAPPOTrainer:
             **critic_diagnostics,
             **component_diagnostics,
         }
-        if objective_component_advantages is not None:
+        if bool(self.config.mappo_objective_gradient_diagnostics):
             expected_records = self.number_agents * len({0, ppo_epochs - 1})
             if len(objective_gradient_records) != expected_records:
                 raise RuntimeError("objective-gradient diagnostics have incomplete epoch/agent coverage")
@@ -606,7 +677,8 @@ class MAPPOTrainer:
                 "common_scale": "component_centered_divided_by_composed_per_agent_std",
                 "joint_policy_ratio": True,
                 "entropy_excluded": True,
-                "training_update_unchanged": True,
+                "training_update_unchanged": self.actor_update_mode == "composed_clip",
+                "actor_update_mode": self.actor_update_mode,
                 "records": objective_gradient_records,
             }
         numeric = [

@@ -167,6 +167,51 @@ def test_mappo_gradient_conflict_audit_has_the_diagnostic_only_contract():
     assert "final_test" not in text
 
 
+def test_mappo_gradient_conflict_phase2_arrays_have_exact_contract_and_resources():
+    train = (ROOT / "hpc" / "aoi_mappo_gradient_conflict_phase2_train_array.sbatch").read_text(encoding="utf-8")
+    evaluate = (ROOT / "hpc" / "aoi_mappo_gradient_conflict_phase2_eval_array.sbatch").read_text(encoding="utf-8")
+    for text in (train, evaluate):
+        for required in (
+            "#SBATCH --cpus-per-task=4",
+            "#SBATCH --gres=gpu:l20:1",
+            "MAPPO_results/gradient-conflict-phase2-v1/P5_N4_gap25",
+            "arms=(composed_clip separate_sum_clip pcgrad)",
+            "seeds=(8 9 10 11 12 13)",
+            'actor_lr="0.0005"',
+            'entropy_rb="0.02"',
+            'entropy_mode="0.02"',
+            'entropy_power="0.002"',
+            'value_clip_mode="normalized"',
+            "--mappo-variant tdec",
+            '--mappo-actor-update-mode "$arm"',
+            "--mappo-objective-gradient-diagnostics",
+        ):
+            assert required in text
+        assert "final_test" not in text
+        assert "--checkpoint-mode resumable" not in text
+    assert "#SBATCH --array=0-17%6" in train
+    assert "--episodes 500" in train
+    assert "--checkpoint-mode policy_only" in train
+    assert "--eval-only" not in train
+    assert "#SBATCH --array=0-35%12" in evaluate
+    assert "modes=(deterministic stochastic)" in evaluate
+    assert 'EVAL_SEEDS="201,202,203,204,205,206"' in evaluate
+    assert "--eval-episodes 100" in evaluate
+    assert "--diagnostic-eval" in evaluate
+    assert '--mappo-eval-mode "$mode"' in evaluate
+
+
+def test_phase2_task_mapping_places_seed8_pilots_at_0_6_12():
+    arms = ("composed_clip", "separate_sum_clip", "pcgrad")
+    seeds = (8, 9, 10, 11, 12, 13)
+    mapping = {
+        task: (arms[task // 6], seeds[task % 6])
+        for task in range(18)
+    }
+    assert {task for task, (_arm, seed) in mapping.items() if seed == 8} == {0, 6, 12}
+    assert len(set(mapping.values())) == 18
+
+
 def test_deferred_heldout_scripts_require_the_dedicated_result_root():
     for name in (
         "aoi_pilot_1gpu.sbatch",

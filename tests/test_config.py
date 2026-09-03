@@ -118,6 +118,36 @@ def test_cli_exposes_tdec_objective_gradient_diagnostics_and_defaults_off():
         config_from_args(invalid_variant)
 
 
+def test_cli_exposes_phase2_actor_update_modes_and_restricts_objective_modes_to_tdec():
+    default = resolve_config(scenario="p05_n04_g25", algorithm="mappo", mappo_variant="tdec")
+    assert default.mappo_actor_update_mode == "composed_clip"
+
+    for mode in ("composed_clip", "separate_sum_clip", "pcgrad"):
+        args = build_parser().parse_args([
+            "--algorithm", "mappo",
+            "--mappo-variant", "tdec",
+            "--mappo-actor-update-mode", mode,
+        ])
+        assert config_from_args(args).mappo_actor_update_mode == mode
+
+    invalid = build_parser().parse_args([
+        "--algorithm", "mappo",
+        "--mappo-variant", "combined",
+        "--mappo-actor-update-mode", "pcgrad",
+    ])
+    with pytest.raises(ValueError, match="objective-wise MAPPO actor updates"):
+        config_from_args(invalid)
+
+
+def test_missing_actor_update_mode_preserves_historical_mappo_identity():
+    current = resolve_config(scenario="p05_n04_g25", algorithm="mappo", mappo_variant="tdec")
+    historical = current.to_dict()
+    historical.pop("mappo_actor_update_mode")
+    reconstructed = config_from_dict(historical)
+    assert reconstructed.mappo_actor_update_mode == "composed_clip"
+    assert reconstructed.to_dict() == historical
+
+
 def test_mappo_value_clipping_defaults_to_normalized_and_unversioned_configs_remain_legacy():
     current = resolve_config(scenario="p05_n04_g25", algorithm="mappo")
     assert current.mappo_value_clip_mode == "normalized"

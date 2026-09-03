@@ -26,6 +26,7 @@ SUPPORTED_ALGORITHMS = (DEFAULT_ALGORITHM, "modified_maddpg", "mappo")
 
 MAPPO_CONFIG_FIELDS = (
     "mappo_variant",
+    "mappo_actor_update_mode",
     "mappo_actor_lr",
     "mappo_critic_lr",
     "mappo_rollout_episodes",
@@ -46,6 +47,7 @@ MAPPO_CONFIG_FIELDS = (
 
 MAPPO_VALUE_CLIP_MODES = ("normalized", "legacy_raw")
 MAPPO_VARIANTS = ("combined", "tdec")
+MAPPO_ACTOR_UPDATE_MODES = ("composed_clip", "separate_sum_clip", "pcgrad")
 
 
 DEFAULT_SCENARIOS: Dict[str, Dict[str, Any]] = {
@@ -86,6 +88,7 @@ COMMON_DEFAULTS: Dict[str, Any] = {
     "target_action_clip": 0.999,
     "global_actor_weight": 1.0,
     "mappo_variant": "combined",
+    "mappo_actor_update_mode": "composed_clip",
     "mappo_actor_lr": 0.0005,
     "mappo_critic_lr": 0.0005,
     "mappo_rollout_episodes": 5,
@@ -186,6 +189,7 @@ class ExperimentConfig:
     target_action_clip: float = 0.999
     global_actor_weight: float = 1.0
     mappo_variant: str = "combined"
+    mappo_actor_update_mode: str = "composed_clip"
     mappo_actor_lr: float = 0.0005
     mappo_critic_lr: float = 0.0005
     mappo_rollout_episodes: int = 5
@@ -240,6 +244,7 @@ class ExperimentConfig:
     is_formal_result: bool = False
     _omit_mappo_value_clip_mode_from_serialization: bool = field(default=False, repr=False, compare=False)
     _omit_mappo_variant_from_serialization: bool = field(default=False, repr=False, compare=False)
+    _omit_mappo_actor_update_mode_from_serialization: bool = field(default=False, repr=False, compare=False)
     _omit_mappo_objective_gradient_diagnostics_from_serialization: bool = field(default=False, repr=False, compare=False)
 
     @property
@@ -278,6 +283,9 @@ class ExperimentConfig:
         data = asdict(self)
         omit_unversioned_clip_mode = data.pop("_omit_mappo_value_clip_mode_from_serialization", False)
         omit_unversioned_variant = data.pop("_omit_mappo_variant_from_serialization", False)
+        omit_unversioned_actor_update_mode = data.pop(
+            "_omit_mappo_actor_update_mode_from_serialization", False
+        )
         omit_unversioned_objective_diagnostics = data.pop(
             "_omit_mappo_objective_gradient_diagnostics_from_serialization", False
         )
@@ -306,6 +314,10 @@ class ExperimentConfig:
                 # MAPPO artifacts created before variants were explicit are the
                 # original combined-reward baseline.  Preserve their identity.
                 data.pop("mappo_variant", None)
+            if omit_unversioned_actor_update_mode:
+                # MAPPO artifacts created before Phase 2 used composed clipping.
+                # Preserve their historical config hashes during read-only use.
+                data.pop("mappo_actor_update_mode", None)
             if omit_unversioned_objective_diagnostics:
                 data.pop("mappo_objective_gradient_diagnostics", None)
         data["scenario"] = asdict(self.scenario)
@@ -434,6 +446,10 @@ def config_from_dict(data: Dict[str, Any]) -> ExperimentConfig:
         str(data.get("algorithm", DEFAULT_ALGORITHM)) == "mappo"
         and "mappo_variant" not in data
     )
+    unversioned_mappo_actor_update_mode = (
+        str(data.get("algorithm", DEFAULT_ALGORITHM)) == "mappo"
+        and "mappo_actor_update_mode" not in data
+    )
     unversioned_mappo_objective_diagnostics = (
         str(data.get("algorithm", DEFAULT_ALGORITHM)) == "mappo"
         and "mappo_objective_gradient_diagnostics" not in data
@@ -451,6 +467,8 @@ def config_from_dict(data: Dict[str, Any]) -> ExperimentConfig:
             config._omit_mappo_value_clip_mode_from_serialization = True
         if unversioned_mappo_variant:
             config._omit_mappo_variant_from_serialization = True
+        if unversioned_mappo_actor_update_mode:
+            config._omit_mappo_actor_update_mode_from_serialization = True
         if unversioned_mappo_objective_diagnostics:
             config._omit_mappo_objective_gradient_diagnostics_from_serialization = True
         return config
@@ -467,6 +485,8 @@ def config_from_dict(data: Dict[str, Any]) -> ExperimentConfig:
         config._omit_mappo_value_clip_mode_from_serialization = True
     if unversioned_mappo_variant:
         config._omit_mappo_variant_from_serialization = True
+    if unversioned_mappo_actor_update_mode:
+        config._omit_mappo_actor_update_mode_from_serialization = True
     if unversioned_mappo_objective_diagnostics:
         config._omit_mappo_objective_gradient_diagnostics_from_serialization = True
     return config
@@ -542,6 +562,12 @@ def validate_config(config: ExperimentConfig) -> None:
         raise ValueError(f"mappo_value_clip_mode must be one of {MAPPO_VALUE_CLIP_MODES}")
     if config.mappo_variant not in MAPPO_VARIANTS:
         raise ValueError(f"mappo_variant must be one of {MAPPO_VARIANTS}")
+    if config.mappo_actor_update_mode not in MAPPO_ACTOR_UPDATE_MODES:
+        raise ValueError(f"mappo_actor_update_mode must be one of {MAPPO_ACTOR_UPDATE_MODES}")
+    if config.mappo_actor_update_mode != "composed_clip" and (
+        config.algorithm != "mappo" or config.mappo_variant != "tdec"
+    ):
+        raise ValueError("objective-wise MAPPO actor updates require algorithm=mappo and mappo_variant=tdec")
     if config.mappo_objective_gradient_diagnostics and (
         config.algorithm != "mappo" or config.mappo_variant != "tdec"
     ):
@@ -771,6 +797,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="combined-reward MAPPO baseline (default) or task-decomposed MAPPO",
     )
+    parser.add_argument(
+        "--mappo-actor-update-mode",
+        choices=MAPPO_ACTOR_UPDATE_MODES,
+        default=None,
+        help="composed clipping, separate objective clipping, or three-objective PCGrad",
+    )
     parser.add_argument("--mappo-entropy-coef-rb", type=float, default=None)
     parser.add_argument("--mappo-entropy-coef-mode", type=float, default=None)
     parser.add_argument("--mappo-entropy-coef-power", type=float, default=None)
@@ -792,6 +824,7 @@ def build_parser() -> argparse.ArgumentParser:
 def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     mappo_overrides = {
         "mappo_variant": args.mappo_variant,
+        "mappo_actor_update_mode": args.mappo_actor_update_mode,
         "mappo_actor_lr": args.mappo_actor_lr,
         "mappo_entropy_coef_rb": args.mappo_entropy_coef_rb,
         "mappo_entropy_coef_mode": args.mappo_entropy_coef_mode,

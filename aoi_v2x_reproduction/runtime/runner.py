@@ -486,6 +486,7 @@ def _run_provenance(config: ExperimentConfig, git: Dict[str, Any]) -> Dict[str, 
     if config.algorithm == "mappo":
         provenance["mappo_value_clip_mode"] = config.mappo_value_clip_mode
         provenance["mappo_variant"] = config.mappo_variant
+        provenance["mappo_actor_update_mode"] = config.mappo_actor_update_mode
         provenance["mappo_critic_structure"] = (
             "joint_observation_scalar_global_plus_independent_local_task1_task2_values"
             if config.mappo_variant == "tdec"
@@ -911,6 +912,7 @@ def _train_mappo(
         "scope": "train",
         "algorithm": "mappo",
         "mappo_variant": config.mappo_variant,
+        "mappo_actor_update_mode": config.mappo_actor_update_mode,
         "mappo_critic_structure": trainer.critic_structure,
         "checkpoint_mode": config.checkpoint_mode,
         "metrics_shapes": shapes,
@@ -924,6 +926,7 @@ def _train_mappo(
         "is_formal_result": False,
         "algorithm": "mappo",
         "mappo_variant": config.mappo_variant,
+        "mappo_actor_update_mode": config.mappo_actor_update_mode,
         "profile": config.profile,
         "semantic_version": config.semantic_version,
         "mobility_revision": config.mobility_revision,
@@ -1470,6 +1473,7 @@ def _evaluate_mappo_policy(
     summary = {
         "algorithm": "mappo",
         "mappo_variant": runtime_config.mappo_variant,
+        "mappo_actor_update_mode": runtime_config.mappo_actor_update_mode,
         "mappo_critic_structure": trainer.critic_structure,
         "eval_id": eval_id,
         "eval_purpose": "validation",
@@ -1550,6 +1554,7 @@ def _evaluate_mappo_policy(
         **eval_git,
         "algorithm": "mappo",
         "mappo_variant": runtime_config.mappo_variant,
+        "mappo_actor_update_mode": runtime_config.mappo_actor_update_mode,
         "mappo_critic_structure": trainer.critic_structure,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "eval_id": eval_id,
