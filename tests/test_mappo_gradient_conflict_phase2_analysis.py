@@ -7,6 +7,7 @@ from analysis.summarize_mappo_gradient_conflict_phase2 import (
     _format_optional,
     _gradient_rows,
     _gradient_summary,
+    _paired,
 )
 
 
@@ -82,3 +83,36 @@ def test_phase2_gradient_analysis_keeps_pre_and_post_projection_separate():
 def test_phase2_report_formats_undefined_tiny_gradient_geometry_as_na():
     assert _format_optional(None, 3) == "NA"
     assert _format_optional(0.125, 3) == "0.125"
+
+
+def test_phase2_paired_rows_isolate_clipping_and_projection_effects():
+    training = []
+    evaluations = []
+    for arm_index, arm in enumerate(("composed_clip", "separate_sum_clip", "pcgrad")):
+        for seed in range(8, 14):
+            training.append({
+                "arm": arm,
+                "seed": seed,
+                "mean_aoi_ms": 10.0 - arm_index,
+                "mean_binary_cam": 0.8 + 0.01 * arm_index,
+            })
+            for mode in ("deterministic", "stochastic"):
+                evaluations.append({
+                    "arm": arm,
+                    "mode": mode,
+                    "training_seed": seed,
+                    "mean_aoi_ms": 11.0 - arm_index,
+                    "mean_binary_cam": 0.7 + 0.01 * arm_index,
+                })
+
+    rows = _paired(training, evaluations)
+    assert len(rows) == 9
+    assert {
+        (row["challenger"], row["reference"])
+        for row in rows
+    } == {
+        ("separate_sum_clip", "composed_clip"),
+        ("pcgrad", "composed_clip"),
+        ("pcgrad", "separate_sum_clip"),
+    }
+    assert all(row["aoi_wins"] == 6 and row["binary_cam_wins"] == 6 for row in rows)

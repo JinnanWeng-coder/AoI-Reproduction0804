@@ -304,22 +304,27 @@ def _paired(training, evaluations):
     rows = []
     train_index = {(row["arm"], row["seed"]): row for row in training}
     eval_index = {(row["arm"], row["mode"], row["training_seed"]): row for row in evaluations}
-    for challenger in ARMS[1:]:
+    comparisons_by_arm = (
+        ("separate_sum_clip", "composed_clip"),
+        ("pcgrad", "composed_clip"),
+        ("pcgrad", "separate_sum_clip"),
+    )
+    for challenger, reference in comparisons_by_arm:
         comparisons = [("training", "last100", train_index)]
         for mode in MODES:
             comparisons.append(("heldout", mode, eval_index))
         for phase, mode, index in comparisons:
             if phase == "training":
                 left = [index[(challenger, seed)] for seed in SEEDS]
-                right = [index[("composed_clip", seed)] for seed in SEEDS]
+                right = [index[(reference, seed)] for seed in SEEDS]
             else:
                 left = [index[(challenger, mode, seed)] for seed in SEEDS]
-                right = [index[("composed_clip", mode, seed)] for seed in SEEDS]
+                right = [index[(reference, mode, seed)] for seed in SEEDS]
             delta_aoi = np.asarray([a["mean_aoi_ms"] - b["mean_aoi_ms"] for a, b in zip(left, right)])
             delta_cam = np.asarray([a["mean_binary_cam"] - b["mean_binary_cam"] for a, b in zip(left, right)])
             rows.append({
                 "challenger": challenger,
-                "reference": "composed_clip",
+                "reference": reference,
                 "phase": phase,
                 "mode": mode,
                 "mean_delta_aoi_ms": float(delta_aoi.mean()),
@@ -424,13 +429,13 @@ def _write_markdown(path: Path, report) -> None:
             f"| {_format_optional(row['aggregate_projection_magnitude'], 4)} |"
         )
     lines.extend([
-        "", "Paired deltas are challenger minus composed_clip; negative AoI and positive CAM favor the challenger.", "",
-        "| challenger | phase/mode | ΔAoI | AoI wins | Δbinary CAM | CAM wins |",
+        "", "Paired deltas are challenger minus reference; negative AoI and positive CAM favor the challenger.", "",
+        "| challenger vs reference | phase/mode | ΔAoI | AoI wins | Δbinary CAM | CAM wins |",
         "|---|---|---:|---:|---:|---:|",
     ])
     for row in report["paired_vs_composed"]:
         lines.append(
-            f"| {row['challenger']} | {row['phase']}/{row['mode']} | {row['mean_delta_aoi_ms']:+.3f} "
+            f"| {row['challenger']} vs {row['reference']} | {row['phase']}/{row['mode']} | {row['mean_delta_aoi_ms']:+.3f} "
             f"| {row['aoi_wins']}/6 | {row['mean_delta_binary_cam']:+.4f} | {row['binary_cam_wins']}/6 |"
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
