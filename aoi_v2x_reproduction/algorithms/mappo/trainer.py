@@ -10,6 +10,10 @@ import torch
 import torch.nn.functional as F
 
 from .action_adapter import encode_hybrid_actions
+from .gradient_conflict import (
+    common_scale_component_advantages,
+    objective_actor_gradient_diagnostics,
+)
 from .networks import CentralValueCritic, HybridActor, LocalValueCritic, RunningValueNorm
 from .rollout import RolloutBatch, TDecRolloutBatch
 
@@ -375,6 +379,17 @@ class MAPPOTrainer:
         advantage_mean = advantages.mean(dim=0, keepdim=True)
         advantage_std = advantages.std(dim=0, unbiased=False, keepdim=True)
         normalized_advantages = (advantages - advantage_mean) / (advantage_std + 1e-8)
+        objective_component_advantages = None
+        if bool(self.config.mappo_objective_gradient_diagnostics):
+            if self.variant != "tdec":
+                raise RuntimeError("objective-gradient diagnostics require mappo_variant=tdec")
+            objective_component_advantages, diagnostic_composed = common_scale_component_advantages(
+                weighted_global_advantages,
+                batch.task1_advantages,
+                batch.task2_advantages,
+            )
+            if not torch.allclose(diagnostic_composed, normalized_advantages, rtol=2e-5, atol=2e-6):
+                raise RuntimeError("diagnostic advantages do not reproduce the actor update advantage")
 
         actor_loss_records: List[List[float]] = [[] for _ in range(self.number_agents)]
         entropy_rb_records: List[List[float]] = [[] for _ in range(self.number_agents)]
@@ -391,9 +406,11 @@ class MAPPOTrainer:
         global_critic_grad_records: List[float] = []
         task1_critic_grad_records: List[float] = []
         task2_critic_grad_records: List[float] = []
+        objective_gradient_records: List[Dict[str, object]] = []
         clip_param = float(self.config.mappo_clip_param)
+        ppo_epochs = int(self.config.mappo_ppo_epochs)
 
-        for _epoch in range(int(self.config.mappo_ppo_epochs)):
+        for _epoch in range(ppo_epochs):
             for index, (actor, optimizer) in enumerate(zip(self.actors, self.actor_optimizers)):
                 evaluated = actor.evaluate_actions(
                     batch.observations[:, index, :],
@@ -409,6 +426,18 @@ class MAPPOTrainer:
                     torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage,
                 )
                 policy_loss = -surrogate.mean()
+                if objective_component_advantages is not None and _epoch in {0, ppo_epochs - 1}:
+                    objective_record = objective_actor_gradient_diagnostics(
+                        actor=actor,
+                        ratio=ratio,
+                        component_advantages={
+                            name: values[:, index]
+                            for name, values in objective_component_advantages.items()
+                        },
+                        clip_param=clip_param,
+                    )
+                    objective_record.update({"ppo_epoch": int(_epoch), "agent": int(index)})
+                    objective_gradient_records.append(objective_record)
                 entropy_bonus = (
                     float(self.config.mappo_entropy_coef_rb) * evaluated.entropy_rb.mean()
                     + float(self.config.mappo_entropy_coef_mode) * evaluated.entropy_mode.mean()
@@ -566,6 +595,20 @@ class MAPPOTrainer:
             **critic_diagnostics,
             **component_diagnostics,
         }
+        if objective_component_advantages is not None:
+            expected_records = self.number_agents * len({0, ppo_epochs - 1})
+            if len(objective_gradient_records) != expected_records:
+                raise RuntimeError("objective-gradient diagnostics have incomplete epoch/agent coverage")
+            diagnostics["objective_gradient_diagnostics"] = {
+                "schema_version": "mappo_objective_gradient_v1",
+                "objective_names": ["global", "task1", "task2"],
+                "ppo_epochs_recorded": sorted({0, ppo_epochs - 1}),
+                "common_scale": "component_centered_divided_by_composed_per_agent_std",
+                "joint_policy_ratio": True,
+                "entropy_excluded": True,
+                "training_update_unchanged": True,
+                "records": objective_gradient_records,
+            }
         numeric = [
             value
             for key, value in diagnostics.items()

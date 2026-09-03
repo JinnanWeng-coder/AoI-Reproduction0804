@@ -143,6 +143,30 @@ def test_mappo_tdec_ab_arrays_freeze_one_factor_and_requested_resources():
     assert "final_test" not in train and "final_test" not in evaluate
 
 
+def test_mappo_gradient_conflict_audit_has_the_diagnostic_only_contract():
+    text = (ROOT / "hpc" / "aoi_mappo_gradient_conflict_audit_array.sbatch").read_text(encoding="utf-8")
+    for required in (
+        "#SBATCH --cpus-per-task=4",
+        "#SBATCH --gres=gpu:l20:1",
+        "#SBATCH --array=0-5%6",
+        'SCENARIO="p05_n04_g25"',
+        "seeds=(8 9 10 11 12 13)",
+        'actor_lr="0.0005"',
+        'entropy_rb="0.02"',
+        'entropy_mode="0.02"',
+        'entropy_power="0.002"',
+        'value_clip_mode="normalized"',
+        "MAPPO_results/gradient-conflict-audit-v1/P5_N4_gap25",
+        "--episodes 500",
+        "--checkpoint-mode none",
+        "--mappo-variant tdec",
+        "--mappo-objective-gradient-diagnostics",
+    ):
+        assert required in text
+    assert "--eval-only" not in text
+    assert "final_test" not in text
+
+
 def test_deferred_heldout_scripts_require_the_dedicated_result_root():
     for name in (
         "aoi_pilot_1gpu.sbatch",

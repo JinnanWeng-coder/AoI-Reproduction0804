@@ -41,6 +41,7 @@ MAPPO_CONFIG_FIELDS = (
     "mappo_adam_eps",
     "mappo_huber_delta",
     "mappo_value_clip_mode",
+    "mappo_objective_gradient_diagnostics",
 )
 
 MAPPO_VALUE_CLIP_MODES = ("normalized", "legacy_raw")
@@ -100,6 +101,7 @@ COMMON_DEFAULTS: Dict[str, Any] = {
     "mappo_adam_eps": 0.00001,
     "mappo_huber_delta": 10.0,
     "mappo_value_clip_mode": "normalized",
+    "mappo_objective_gradient_diagnostics": False,
     "actor_hidden": [1024, 512],
     "local_critic_hidden": [512, 256],
     "global_critic_hidden": [1024, 512, 256],
@@ -199,6 +201,7 @@ class ExperimentConfig:
     mappo_adam_eps: float = 0.00001
     mappo_huber_delta: float = 10.0
     mappo_value_clip_mode: str = "normalized"
+    mappo_objective_gradient_diagnostics: bool = False
     actor_hidden: List[int] = field(default_factory=lambda: [1024, 512])
     local_critic_hidden: List[int] = field(default_factory=lambda: [512, 256])
     global_critic_hidden: List[int] = field(default_factory=lambda: [1024, 512, 256])
@@ -237,6 +240,7 @@ class ExperimentConfig:
     is_formal_result: bool = False
     _omit_mappo_value_clip_mode_from_serialization: bool = field(default=False, repr=False, compare=False)
     _omit_mappo_variant_from_serialization: bool = field(default=False, repr=False, compare=False)
+    _omit_mappo_objective_gradient_diagnostics_from_serialization: bool = field(default=False, repr=False, compare=False)
 
     @property
     def v2i_min_bits_per_step(self) -> float:
@@ -274,6 +278,9 @@ class ExperimentConfig:
         data = asdict(self)
         omit_unversioned_clip_mode = data.pop("_omit_mappo_value_clip_mode_from_serialization", False)
         omit_unversioned_variant = data.pop("_omit_mappo_variant_from_serialization", False)
+        omit_unversioned_objective_diagnostics = data.pop(
+            "_omit_mappo_objective_gradient_diagnostics_from_serialization", False
+        )
         # The original checkpoint_v4 files predate the explicit algorithm
         # field and are unambiguously TDec.  Omitting that default preserves
         # their canonical hashes, while Algorithm 1 is always explicit.
@@ -299,6 +306,8 @@ class ExperimentConfig:
                 # MAPPO artifacts created before variants were explicit are the
                 # original combined-reward baseline.  Preserve their identity.
                 data.pop("mappo_variant", None)
+            if omit_unversioned_objective_diagnostics:
+                data.pop("mappo_objective_gradient_diagnostics", None)
         data["scenario"] = asdict(self.scenario)
         data["derived"] = {
             "number_agents": self.number_agents,
@@ -425,6 +434,10 @@ def config_from_dict(data: Dict[str, Any]) -> ExperimentConfig:
         str(data.get("algorithm", DEFAULT_ALGORITHM)) == "mappo"
         and "mappo_variant" not in data
     )
+    unversioned_mappo_objective_diagnostics = (
+        str(data.get("algorithm", DEFAULT_ALGORITHM)) == "mappo"
+        and "mappo_objective_gradient_diagnostics" not in data
+    )
     if unversioned_mappo_clip:
         values["mappo_value_clip_mode"] = "legacy_raw"
     if unversioned_mappo_variant:
@@ -438,6 +451,8 @@ def config_from_dict(data: Dict[str, Any]) -> ExperimentConfig:
             config._omit_mappo_value_clip_mode_from_serialization = True
         if unversioned_mappo_variant:
             config._omit_mappo_variant_from_serialization = True
+        if unversioned_mappo_objective_diagnostics:
+            config._omit_mappo_objective_gradient_diagnostics_from_serialization = True
         return config
     if not isinstance(scenario_data, dict):
         raise ValueError("historical config requires an embedded scenario object")
@@ -452,6 +467,8 @@ def config_from_dict(data: Dict[str, Any]) -> ExperimentConfig:
         config._omit_mappo_value_clip_mode_from_serialization = True
     if unversioned_mappo_variant:
         config._omit_mappo_variant_from_serialization = True
+    if unversioned_mappo_objective_diagnostics:
+        config._omit_mappo_objective_gradient_diagnostics_from_serialization = True
     return config
 
 
@@ -525,6 +542,10 @@ def validate_config(config: ExperimentConfig) -> None:
         raise ValueError(f"mappo_value_clip_mode must be one of {MAPPO_VALUE_CLIP_MODES}")
     if config.mappo_variant not in MAPPO_VARIANTS:
         raise ValueError(f"mappo_variant must be one of {MAPPO_VARIANTS}")
+    if config.mappo_objective_gradient_diagnostics and (
+        config.algorithm != "mappo" or config.mappo_variant != "tdec"
+    ):
+        raise ValueError("mappo_objective_gradient_diagnostics requires algorithm=mappo and mappo_variant=tdec")
     for name in ("mappo_value_loss_coef", "mappo_entropy_coef_rb", "mappo_entropy_coef_mode", "mappo_entropy_coef_power"):
         if not math.isfinite(float(getattr(config, name))) or float(getattr(config, name)) < 0.0:
             raise ValueError(f"{name} must be finite and non-negative")
@@ -759,6 +780,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="clip critic value changes in normalized space (default) or reproduce legacy raw-space clipping",
     )
+    parser.add_argument(
+        "--mappo-objective-gradient-diagnostics",
+        action="store_true",
+        default=None,
+        help="measure TDec objective actor gradients without changing the PPO update",
+    )
     return parser
 
 
@@ -770,6 +797,7 @@ def config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         "mappo_entropy_coef_mode": args.mappo_entropy_coef_mode,
         "mappo_entropy_coef_power": args.mappo_entropy_coef_power,
         "mappo_value_clip_mode": args.mappo_value_clip_mode,
+        "mappo_objective_gradient_diagnostics": args.mappo_objective_gradient_diagnostics,
     }
     if args.algorithm != "mappo" and any(value is not None for value in mappo_overrides.values()):
         raise ValueError("MAPPO hyperparameter overrides require --algorithm mappo")

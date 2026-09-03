@@ -96,6 +96,28 @@ def test_cli_exposes_only_the_planned_mappo_stability_overrides():
         config_from_args(invalid)
 
 
+def test_cli_exposes_tdec_objective_gradient_diagnostics_and_defaults_off():
+    default = resolve_config(scenario="p05_n04_g25", algorithm="mappo", mappo_variant="tdec")
+    assert default.mappo_objective_gradient_diagnostics is False
+    assert default.to_dict()["mappo_objective_gradient_diagnostics"] is False
+
+    args = build_parser().parse_args([
+        "--algorithm", "mappo",
+        "--mappo-variant", "tdec",
+        "--mappo-objective-gradient-diagnostics",
+    ])
+    enabled = config_from_args(args)
+    assert enabled.mappo_objective_gradient_diagnostics is True
+    assert enabled.to_dict()["mappo_objective_gradient_diagnostics"] is True
+
+    invalid_variant = build_parser().parse_args([
+        "--algorithm", "mappo",
+        "--mappo-objective-gradient-diagnostics",
+    ])
+    with pytest.raises(ValueError, match="requires algorithm=mappo and mappo_variant=tdec"):
+        config_from_args(invalid_variant)
+
+
 def test_mappo_value_clipping_defaults_to_normalized_and_unversioned_configs_remain_legacy():
     current = resolve_config(scenario="p05_n04_g25", algorithm="mappo")
     assert current.mappo_value_clip_mode == "normalized"
@@ -128,6 +150,15 @@ def test_mappo_variant_defaults_to_combined_and_missing_field_preserves_historic
 
     tdec = resolve_config(scenario="p05_n04_g25", algorithm="mappo", mappo_variant="tdec")
     assert tdec.canonical_hash() != current.canonical_hash()
+
+
+def test_missing_objective_gradient_field_preserves_historical_mappo_identity():
+    current = resolve_config(scenario="p05_n04_g25", algorithm="mappo", mappo_variant="tdec")
+    historical = current.to_dict()
+    historical.pop("mappo_objective_gradient_diagnostics")
+    reconstructed = config_from_dict(historical)
+    assert reconstructed.mappo_objective_gradient_diagnostics is False
+    assert reconstructed.to_dict() == historical
 
 
 def test_diagnostic_eval_flag_is_not_valid_for_training():
