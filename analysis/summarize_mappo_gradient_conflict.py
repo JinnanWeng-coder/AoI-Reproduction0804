@@ -135,6 +135,26 @@ def _summarize_seed(seed: int, rows, train_summary) -> Dict[str, object]:
             result[f"{block}_{pair}_mean_cosine"] = _mean_valid(
                 rows, f"{block}_{pair}_cosine", f"{block}_{pair}_valid"
             )
+    for epoch in (0, 9):
+        selected = [row for row in rows if row["ppo_epoch"] == epoch]
+        if not selected:
+            raise ValueError(f"seed {seed}: missing PPO epoch {epoch} diagnostics")
+        prefix = f"epoch{epoch}"
+        result[f"{prefix}_mean_cancellation_ratio"] = _mean_valid(
+            selected, "cancellation_ratio", "cancellation_valid"
+        )
+        for objective in OBJECTIVES:
+            result[f"{prefix}_mean_{objective}_effective_clip_fraction"] = float(
+                np.mean([row[f"{objective}_effective_clip_fraction"] for row in selected])
+            )
+        for pair in PAIRS:
+            result[f"{prefix}_{pair}_valid_fraction"] = float(
+                np.mean([row[f"{pair}_valid"] for row in selected])
+            )
+            result[f"{prefix}_{pair}_mean_cosine"] = _mean_valid(
+                selected, f"{pair}_cosine", f"{pair}_valid"
+            )
+            result[f"{prefix}_{pair}_conflict_rate"] = _conflict_rate(selected, pair)
     return result
 
 
@@ -182,6 +202,31 @@ def summarize(result_root: Path) -> Dict[str, object]:
         cohort[f"{pair}_seeds_majority_conflict"] = int(
             sum(row[f"{pair}_conflict_rate"] > 0.5 for row in per_seed)
         )
+    cohort["by_ppo_epoch"] = []
+    for epoch in (0, 9):
+        prefix = f"epoch{epoch}"
+        epoch_row: Dict[str, object] = {
+            "ppo_epoch": epoch,
+            "position": "first" if epoch == 0 else "last",
+            "mean_seed_cancellation_ratio": float(np.mean([
+                row[f"{prefix}_mean_cancellation_ratio"] for row in per_seed
+            ])),
+        }
+        for objective in OBJECTIVES:
+            epoch_row[f"mean_seed_{objective}_effective_clip_fraction"] = float(np.mean([
+                row[f"{prefix}_mean_{objective}_effective_clip_fraction"] for row in per_seed
+            ]))
+        for pair in PAIRS:
+            epoch_row[f"mean_seed_{pair}_cosine"] = float(np.mean([
+                row[f"{prefix}_{pair}_mean_cosine"] for row in per_seed
+            ]))
+            epoch_row[f"mean_seed_{pair}_conflict_rate"] = float(np.mean([
+                row[f"{prefix}_{pair}_conflict_rate"] for row in per_seed
+            ]))
+            epoch_row[f"seeds_majority_{pair}_conflict"] = int(sum(
+                row[f"{prefix}_{pair}_conflict_rate"] > 0.5 for row in per_seed
+            ))
+        cohort["by_ppo_epoch"].append(epoch_row)
     return {
         "contract": {
             "algorithm": "mappo",
@@ -242,7 +287,22 @@ def write_report(result_root: Path, report: Dict[str, object]) -> Path:
         f"- Mean last-100 AoI/CAM: {cohort['mean_last100_aoi_ms']:.3f}/{cohort['mean_last100_binary_cam']:.4f}",
         f"- Mean per-seed cancellation ratio: {cohort['mean_cancellation_ratio']:.3f}",
         "- Conflict/performance associations are descriptive and do not by themselves establish causality.",
+        "",
+        "## First versus last PPO epoch",
+        "",
+        "| position | epoch | cancellation | g-task1 conflict | g-task2 conflict | task1-task2 conflict | global clip | task1 clip | task2 clip |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ])
+    for row in cohort["by_ppo_epoch"]:
+        lines.append(
+            f"| {row['position']} | {row['ppo_epoch']} | {row['mean_seed_cancellation_ratio']:.3f} "
+            f"| {row['mean_seed_global_task1_conflict_rate']:.3f} "
+            f"| {row['mean_seed_global_task2_conflict_rate']:.3f} "
+            f"| {row['mean_seed_task1_task2_conflict_rate']:.3f} "
+            f"| {row['mean_seed_global_effective_clip_fraction']:.3f} "
+            f"| {row['mean_seed_task1_effective_clip_fraction']:.3f} "
+            f"| {row['mean_seed_task2_effective_clip_fraction']:.3f} |"
+        )
     (output / "gradient_conflict_audit.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return output
 

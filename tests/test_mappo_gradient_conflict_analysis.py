@@ -1,5 +1,7 @@
 import json
 
+import numpy as np
+
 from analysis.summarize_mappo_gradient_conflict import SEEDS, summarize, write_report
 
 
@@ -74,6 +76,12 @@ def test_gradient_conflict_analysis_writes_the_four_core_artifacts(tmp_path):
     assert report["cohort"]["seeds_complete"] == 6
     assert report["cohort"]["diagnostic_rows"] == 6000
     assert report["cohort"]["global_task1_seeds_majority_conflict"] == 6
+    by_epoch = report["cohort"]["by_ppo_epoch"]
+    assert [row["ppo_epoch"] for row in by_epoch] == [0, 9]
+    assert all(row["mean_seed_global_task1_conflict_rate"] == 1.0 for row in by_epoch)
+    assert all(np.isclose(row["mean_seed_global_effective_clip_fraction"], 0.1) for row in by_epoch)
+    assert report["per_seed"][0]["epoch0_global_task1_conflict_rate"] == 1.0
+    assert np.isclose(report["per_seed"][0]["epoch9_mean_task2_effective_clip_fraction"], 0.3)
     for name in (
         "gradient_conflict_per_update.csv",
         "gradient_conflict_per_seed.csv",
@@ -81,3 +89,6 @@ def test_gradient_conflict_analysis_writes_the_four_core_artifacts(tmp_path):
         "gradient_conflict_audit.md",
     ):
         assert (output / name).is_file()
+    markdown = (output / "gradient_conflict_audit.md").read_text(encoding="utf-8")
+    assert "First versus last PPO epoch" in markdown
+    assert "| first | 0 |" in markdown and "| last | 9 |" in markdown
