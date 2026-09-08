@@ -70,6 +70,15 @@ compact reductions under `MAPPO_results/service-power-audit-v1/P5_N4_gap25`.
 Missing source files fail the inventory gate; the launcher never trains or
 evaluates a policy.
 
+The frozen-policy mode/power diagnostic uses
+`aoi_mappo_mode_power_intervention_eval_array.sbatch` for 18 stochastic cells:
+baseline, V2I +3 dB, and V2V -3 dB over TDec training seeds 8--13. Every cell
+uses four CPUs and one L20; no learning occurs. Submit array tasks `0,6,12` as
+the three-arm seed-8 pilot, then `1-5,7-11,13-17` for the remaining cells.
+After all cells complete, run `aoi_mappo_mode_power_intervention_analyze.sbatch`
+to compare the rerun baseline with the original TDec stochastic arrays and
+write compact paired reductions under `MAPPO_results/mode-power-intervention-v1/P5_N4_gap25`.
+
 The pilot, matrix, and audit launchers are retained for a later held-out stage.
 They explicitly use resumable checkpoints and refuse to start unless
 `AOI_RESULT_ROOT` is set to the dedicated
