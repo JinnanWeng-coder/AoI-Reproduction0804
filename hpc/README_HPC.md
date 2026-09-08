@@ -63,6 +63,13 @@ CPUs. Results live under `MAPPO_results/tdec-ab-v1/P5_N4_gap25`, and
 `analysis/summarize_mappo_tdec_ab.py` produces the paired report after both
 arrays complete.
 
+The read-only service/power audit uses
+`aoi_mappo_service_power_audit_cpu.sbatch`. It requests four CPUs and no GPU,
+requires all 12 training and 24 held-out `tdec-ab-v1` NPZ files, and writes only
+compact reductions under `MAPPO_results/service-power-audit-v1/P5_N4_gap25`.
+Missing source files fail the inventory gate; the launcher never trains or
+evaluates a policy.
+
 The pilot, matrix, and audit launchers are retained for a later held-out stage.
 They explicitly use resumable checkpoints and refuse to start unless
 `AOI_RESULT_ROOT` is set to the dedicated
