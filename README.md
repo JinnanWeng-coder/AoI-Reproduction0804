@@ -48,13 +48,15 @@ Algorithm 1 is selected with `--algorithm modified_maddpg`; Algorithm 2 with
 task decomposition is the default `modified_maddpg_tdec`. The exploratory
 extension is selected with `--algorithm mappo`.
 
-The first MAPPO implementation keeps one actor per platoon, uses categorical
-RB and transmission-mode heads, a Beta power head, and a centralized critic
-that predicts one state value per agent. It uses the same per-agent reward
-decomposition and unchanged V2X environment. Its first confirmation wave is
-training-only at P=5, N=4, gap=25 with seeds 8--13. Polyak tau, external action
-noise, and the MADDPG global-actor update mode do not apply to MAPPO; `tau=0.005`
-is retained only in the shared resolved-config baseline metadata.
+MAPPO uses categorical RB and transmission-mode heads, a Beta power head, and
+the existing combined or task-decomposed critics. Independent actors remain
+the default. `--mappo-actor-sharing shared` instead uses one actor for all
+platoons without adding an agent ID; each platoon still supplies its own
+observation and action sample, and the actor is updated once per PPO epoch from
+the mean of the per-platoon PPO losses. The reward decomposition and V2X
+environment are unchanged. Polyak tau, external action noise, and the MADDPG
+global-actor update mode do not apply to MAPPO; `tau=0.005` is retained only in
+the shared resolved-config baseline metadata.
 
 ## Artifact policy
 
@@ -63,11 +65,12 @@ and one final actor-only `policy_final.pt`. It does not create replay snapshots
 or periodic/best/latest checkpoints. Use `--checkpoint-mode none` to omit even
 the final policy.
 
-The first MAPPO policy artifact follows the same lightweight rule: it contains
-only the five actor state dictionaries, not the central critic, optimizers,
-rollout data, or RNG state. Training resume remains deferred. The frozen actors
-can be evaluated diagnostically with explicit deterministic or stochastic
-action selection; this does not create a formal-release lifecycle marker.
+The MAPPO policy artifact follows the same lightweight rule: it contains five
+actor state dictionaries for the default independent configuration or one for
+the shared configuration, but no critics, optimizers, rollout data, or RNG
+state. Training resume remains deferred. The frozen actors can be evaluated
+diagnostically with explicit deterministic or stochastic action selection;
+this does not create a formal-release lifecycle marker.
 
 `--checkpoint-mode resumable` is reserved for a later, explicitly planned
 resume or held-out evaluation stage. It stores optimizer, replay, environment,

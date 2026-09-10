@@ -104,6 +104,7 @@ def build_policy_payload(config, policy_source, episode: int) -> Dict[str, Any]:
         "actors": actors,
     }
     if config.algorithm == "mappo":
+        payload["actor_sharing"] = bool(config.mappo_actor_sharing)
         payload["algorithm_applicability"] = {
             "polyak_tau_applicable": False,
             "external_action_noise_applicable": False,

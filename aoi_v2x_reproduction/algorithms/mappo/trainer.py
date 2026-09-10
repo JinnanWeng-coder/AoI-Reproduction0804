@@ -112,7 +112,7 @@ def _mean_joint_gradient_rss(*stream_records: List[float]) -> float:
 
 
 class MAPPOTrainer:
-    """Separate local policies with combined or task-decomposed value critics."""
+    """Independent or shared local policy with unchanged centralized/TDec critics."""
 
     def __init__(self, config, device: torch.device):
         self.config = config
@@ -120,9 +120,11 @@ class MAPPOTrainer:
         self.number_agents = int(config.number_agents)
         self.observation_dim = int(config.state_dim)
         self.variant = str(config.mappo_variant)
+        self.actor_sharing = bool(config.mappo_actor_sharing)
+        actor_network_count = 1 if self.actor_sharing else self.number_agents
         self.actors = torch.nn.ModuleList([
             HybridActor(config.state_dim, config.actor_hidden, config.n_rb, config.n_modes)
-            for _ in range(self.number_agents)
+            for _ in range(actor_network_count)
         ]).to(self.device)
         self.actor_optimizers = [
             torch.optim.Adam(actor.parameters(), lr=float(config.mappo_actor_lr), eps=float(config.mappo_adam_eps))
@@ -181,6 +183,13 @@ class MAPPOTrainer:
         self.policy_version = 0
         self.environment_steps = 0
         self.update_count = 0
+        self.actor_optimizer_step_count = 0
+
+    def actor_for_agent(self, index: int) -> HybridActor:
+        index = int(index)
+        if index < 0 or index >= self.number_agents:
+            raise IndexError("MAPPO agent index is out of range")
+        return self.actors[0] if self.actor_sharing else self.actors[index]
 
     def _observations_tensor(self, observations) -> torch.Tensor:
         tensor = torch.as_tensor(np.asarray(observations, dtype=np.float32), device=self.device)
@@ -196,7 +205,8 @@ class MAPPOTrainer:
         mode_values: List[torch.Tensor] = []
         power_values: List[torch.Tensor] = []
         log_probs: List[torch.Tensor] = []
-        for index, actor in enumerate(self.actors):
+        for index in range(self.number_agents):
+            actor = self.actor_for_agent(index)
             sample = actor.sample(observation_tensor[index:index + 1], deterministic=deterministic)
             rb_values.append(sample.rb.squeeze(0))
             mode_values.append(sample.mode.squeeze(0))
@@ -392,43 +402,91 @@ class MAPPOTrainer:
         task1_critic_grad_records: List[float] = []
         task2_critic_grad_records: List[float] = []
         clip_param = float(self.config.mappo_clip_param)
+        actor_optimizer_steps_before = self.actor_optimizer_step_count
 
         for _epoch in range(int(self.config.mappo_ppo_epochs)):
-            for index, (actor, optimizer) in enumerate(zip(self.actors, self.actor_optimizers)):
-                evaluated = actor.evaluate_actions(
-                    batch.observations[:, index, :],
-                    batch.rb[:, index],
-                    batch.mode[:, index],
-                    batch.power[:, index],
-                )
-                log_ratio = evaluated.log_prob - batch.old_log_prob[:, index]
-                ratio = torch.exp(log_ratio)
-                advantage = normalized_advantages[:, index]
-                surrogate = torch.minimum(
-                    ratio * advantage,
-                    torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage,
-                )
-                policy_loss = -surrogate.mean()
-                entropy_bonus = (
-                    float(self.config.mappo_entropy_coef_rb) * evaluated.entropy_rb.mean()
-                    + float(self.config.mappo_entropy_coef_mode) * evaluated.entropy_mode.mean()
-                    + float(self.config.mappo_entropy_coef_power) * evaluated.entropy_power.mean()
-                )
-                total_actor_loss = policy_loss - entropy_bonus
+            if self.actor_sharing:
+                actor = self.actors[0]
+                optimizer = self.actor_optimizers[0]
+                total_actor_losses = []
+                for index in range(self.number_agents):
+                    evaluated = actor.evaluate_actions(
+                        batch.observations[:, index, :],
+                        batch.rb[:, index],
+                        batch.mode[:, index],
+                        batch.power[:, index],
+                    )
+                    log_ratio = evaluated.log_prob - batch.old_log_prob[:, index]
+                    ratio = torch.exp(log_ratio)
+                    advantage = normalized_advantages[:, index]
+                    surrogate = torch.minimum(
+                        ratio * advantage,
+                        torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage,
+                    )
+                    policy_loss = -surrogate.mean()
+                    entropy_bonus = (
+                        float(self.config.mappo_entropy_coef_rb) * evaluated.entropy_rb.mean()
+                        + float(self.config.mappo_entropy_coef_mode) * evaluated.entropy_mode.mean()
+                        + float(self.config.mappo_entropy_coef_power) * evaluated.entropy_power.mean()
+                    )
+                    total_actor_losses.append(policy_loss - entropy_bonus)
+                    approximate_kl = ((ratio - 1.0) - log_ratio).mean()
+                    clip_fraction = (torch.abs(ratio - 1.0) > clip_param).float().mean()
+                    actor_loss_records[index].append(float(policy_loss.detach().cpu()))
+                    entropy_rb_records[index].append(float(evaluated.entropy_rb.mean().detach().cpu()))
+                    entropy_mode_records[index].append(float(evaluated.entropy_mode.mean().detach().cpu()))
+                    entropy_power_records[index].append(float(evaluated.entropy_power.mean().detach().cpu()))
+                    kl_records[index].append(float(approximate_kl.detach().cpu()))
+                    clip_records[index].append(float(clip_fraction.detach().cpu()))
                 optimizer.zero_grad(set_to_none=True)
-                total_actor_loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(actor.parameters(), float(self.config.mappo_max_grad_norm))
+                torch.stack(total_actor_losses).mean().backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    actor.parameters(), float(self.config.mappo_max_grad_norm)
+                )
                 optimizer.step()
+                self.actor_optimizer_step_count += 1
+                shared_grad_norm = float(torch.as_tensor(grad_norm).detach().cpu())
+                for index in range(self.number_agents):
+                    actor_grad_records[index].append(shared_grad_norm)
+            else:
+                for index, (actor, optimizer) in enumerate(zip(self.actors, self.actor_optimizers)):
+                    evaluated = actor.evaluate_actions(
+                        batch.observations[:, index, :],
+                        batch.rb[:, index],
+                        batch.mode[:, index],
+                        batch.power[:, index],
+                    )
+                    log_ratio = evaluated.log_prob - batch.old_log_prob[:, index]
+                    ratio = torch.exp(log_ratio)
+                    advantage = normalized_advantages[:, index]
+                    surrogate = torch.minimum(
+                        ratio * advantage,
+                        torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage,
+                    )
+                    policy_loss = -surrogate.mean()
+                    entropy_bonus = (
+                        float(self.config.mappo_entropy_coef_rb) * evaluated.entropy_rb.mean()
+                        + float(self.config.mappo_entropy_coef_mode) * evaluated.entropy_mode.mean()
+                        + float(self.config.mappo_entropy_coef_power) * evaluated.entropy_power.mean()
+                    )
+                    total_actor_loss = policy_loss - entropy_bonus
+                    optimizer.zero_grad(set_to_none=True)
+                    total_actor_loss.backward()
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        actor.parameters(), float(self.config.mappo_max_grad_norm)
+                    )
+                    optimizer.step()
+                    self.actor_optimizer_step_count += 1
 
-                approximate_kl = ((ratio - 1.0) - log_ratio).mean()
-                clip_fraction = (torch.abs(ratio - 1.0) > clip_param).float().mean()
-                actor_loss_records[index].append(float(policy_loss.detach().cpu()))
-                entropy_rb_records[index].append(float(evaluated.entropy_rb.mean().detach().cpu()))
-                entropy_mode_records[index].append(float(evaluated.entropy_mode.mean().detach().cpu()))
-                entropy_power_records[index].append(float(evaluated.entropy_power.mean().detach().cpu()))
-                kl_records[index].append(float(approximate_kl.detach().cpu()))
-                clip_records[index].append(float(clip_fraction.detach().cpu()))
-                actor_grad_records[index].append(float(torch.as_tensor(grad_norm).detach().cpu()))
+                    approximate_kl = ((ratio - 1.0) - log_ratio).mean()
+                    clip_fraction = (torch.abs(ratio - 1.0) > clip_param).float().mean()
+                    actor_loss_records[index].append(float(policy_loss.detach().cpu()))
+                    entropy_rb_records[index].append(float(evaluated.entropy_rb.mean().detach().cpu()))
+                    entropy_mode_records[index].append(float(evaluated.entropy_mode.mean().detach().cpu()))
+                    entropy_power_records[index].append(float(evaluated.entropy_power.mean().detach().cpu()))
+                    kl_records[index].append(float(approximate_kl.detach().cpu()))
+                    clip_records[index].append(float(clip_fraction.detach().cpu()))
+                    actor_grad_records[index].append(float(torch.as_tensor(grad_norm).detach().cpu()))
 
             joint_observations = batch.observations.reshape(batch.size, -1)
             if self.variant == "combined":
@@ -531,6 +589,22 @@ class MAPPOTrainer:
         diagnostics: Dict[str, object] = {
             "algorithm": "mappo",
             "mappo_variant": self.variant,
+            "actor_sharing": self.actor_sharing,
+            "actor_network_count": len(self.actors),
+            "actor_optimizer_steps_this_update": (
+                self.actor_optimizer_step_count - actor_optimizer_steps_before
+            ),
+            "actor_optimizer_step_count": self.actor_optimizer_step_count,
+            "actor_loss_aggregation": (
+                "mean_over_agent_losses_then_one_shared_step_per_epoch"
+                if self.actor_sharing
+                else "one_independent_actor_step_per_agent_per_epoch"
+            ),
+            "actor_grad_norm_per_agent_semantics": (
+                "shared_aggregate_grad_norm_repeated_for_shape_compatibility"
+                if self.actor_sharing
+                else "independent_actor_grad_norm"
+            ),
             "update": int(self.update_count),
             "policy_version": int(self.policy_version),
             "rollout_steps": int(batch.size),
@@ -589,10 +663,13 @@ class MAPPOTrainer:
 
     def parameter_counts(self) -> Dict[str, int]:
         actor_count = sum(parameter.numel() for actor in self.actors for parameter in actor.parameters())
+        per_actor_count = sum(parameter.numel() for parameter in self.actors[0].parameters())
         if self.variant == "combined":
             critic_count = sum(parameter.numel() for parameter in self.critic.parameters())
             return {
                 "actors": int(actor_count),
+                "actor_network_count": len(self.actors),
+                "actor_parameters_per_network": int(per_actor_count),
                 "critic": int(critic_count),
                 "total": int(actor_count + critic_count),
             }
@@ -602,6 +679,8 @@ class MAPPOTrainer:
         critic_count = global_count + task1_count + task2_count
         return {
             "actors": int(actor_count),
+            "actor_network_count": len(self.actors),
+            "actor_parameters_per_network": int(per_actor_count),
             "critic": int(critic_count),
             "global_critic": int(global_count),
             "task1_critics": int(task1_count),

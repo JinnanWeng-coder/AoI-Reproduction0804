@@ -486,6 +486,7 @@ def _run_provenance(config: ExperimentConfig, git: Dict[str, Any]) -> Dict[str, 
     if config.algorithm == "mappo":
         provenance["mappo_value_clip_mode"] = config.mappo_value_clip_mode
         provenance["mappo_variant"] = config.mappo_variant
+        provenance["actor_sharing"] = bool(config.mappo_actor_sharing)
         provenance["mappo_critic_structure"] = (
             "joint_observation_scalar_global_plus_independent_local_task1_task2_values"
             if config.mappo_variant == "tdec"
@@ -911,6 +912,7 @@ def _train_mappo(
         "scope": "train",
         "algorithm": "mappo",
         "mappo_variant": config.mappo_variant,
+        "actor_sharing": bool(config.mappo_actor_sharing),
         "mappo_critic_structure": trainer.critic_structure,
         "checkpoint_mode": config.checkpoint_mode,
         "metrics_shapes": shapes,
@@ -950,7 +952,9 @@ def _train_mappo(
             if config.mappo_variant == "tdec"
             else "global_plus_per_agent_task1_plus_task2"
         ),
-        "actor_sharing": False,
+        "actor_sharing": bool(config.mappo_actor_sharing),
+        "actor_network_count": len(trainer.actors),
+        "actor_optimizer_step_count": int(trainer.actor_optimizer_step_count),
         "central_critic_output": (
             "scalar_global_and_independent_per_agent_task1_task2_values"
             if config.mappo_variant == "tdec"
@@ -1262,10 +1266,16 @@ def _validate_mappo_policy_artifact(
         raise RuntimeError("MAPPO completion marker config mismatch")
     if complete.get("mappo_variant", "combined") != training_config.mappo_variant:
         raise RuntimeError("MAPPO completion marker variant mismatch")
+    configured_sharing = bool(training_config.mappo_actor_sharing)
+    if bool(complete.get("actor_sharing", False)) != configured_sharing:
+        raise RuntimeError("MAPPO completion marker actor-sharing mismatch")
+    if bool(payload.get("actor_sharing", False)) != configured_sharing:
+        raise RuntimeError("MAPPO policy actor-sharing metadata mismatch")
     if int(payload.get("episode", -1)) != int(training_config.episodes):
         raise RuntimeError("MAPPO policy episode does not match completed training")
     actors = payload.get("actors")
-    if not isinstance(actors, list) or len(actors) != int(training_config.number_agents):
+    expected_actor_count = 1 if configured_sharing else int(training_config.number_agents)
+    if not isinstance(actors, list) or len(actors) != expected_actor_count:
         raise RuntimeError("MAPPO policy actor count mismatch")
     return run_dir, training_config, complete
 
@@ -1470,6 +1480,8 @@ def _evaluate_mappo_policy(
     summary = {
         "algorithm": "mappo",
         "mappo_variant": runtime_config.mappo_variant,
+        "actor_sharing": bool(runtime_config.mappo_actor_sharing),
+        "actor_network_count": len(trainer.actors),
         "mappo_critic_structure": trainer.critic_structure,
         "eval_id": eval_id,
         "eval_purpose": "validation",
@@ -1550,6 +1562,8 @@ def _evaluate_mappo_policy(
         **eval_git,
         "algorithm": "mappo",
         "mappo_variant": runtime_config.mappo_variant,
+        "actor_sharing": bool(runtime_config.mappo_actor_sharing),
+        "actor_network_count": len(trainer.actors),
         "mappo_critic_structure": trainer.critic_structure,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "eval_id": eval_id,

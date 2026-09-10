@@ -372,6 +372,8 @@ def evaluate_rb_intervention(
         "status": "complete",
         "algorithm": "mappo",
         "mappo_variant": "tdec",
+        "actor_sharing": bool(runtime_config.mappo_actor_sharing),
+        "actor_network_count": len(trainer.actors),
         "intervention_arm": arm,
         "intervention_semantics": (
             "centralized 3^5 joint-RB oracle; apply only when instantaneous V2I success count strictly increases"
@@ -429,6 +431,8 @@ def evaluate_rb_intervention(
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "algorithm": "mappo",
         "mappo_variant": "tdec",
+        "actor_sharing": bool(runtime_config.mappo_actor_sharing),
+        "actor_network_count": len(trainer.actors),
         "intervention_arm": arm,
         "training_seed": int(training_config.seed),
         "training_source_commit": training_complete.get("reproduction_git_commit"),
