@@ -616,39 +616,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-
-def write_report(result_root: Path, report: Mapping) -> Path:
-    output = result_root.expanduser().resolve() / "analysis"
-    output.mkdir(parents=True, exist_ok=True)
-    _write_csv(output / "shared_actor_training_per_seed.csv", report["training_per_seed"])
-    _write_csv(output / "shared_actor_training_per_episode.csv", report["training_per_episode"])
-    _write_csv(output / "shared_actor_eval_per_seed.csv", report["evaluation_per_seed"])
-    _write_csv(output / "shared_actor_eval_world_agent.csv", report["eval_world_agent"])
-    _write_csv(output / "shared_actor_paired_per_seed.csv", report["paired_per_seed"])
-    _write_csv(output / "shared_actor_paired_eval_world_agent.csv", report["paired_eval_world_agent"])
-    compact = {key: value for key, value in report.items() if key not in {"training_per_episode", "eval_world_agent", "paired_eval_world_agent"}}
-    (output / "shared_actor_summary.json").write_text(json.dumps(compact, indent=2) + "\n", encoding="utf-8")
-    _write_markdown(output / "shared_actor_comparison.md", report)
-    return output
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--independent-root", required=True, type=Path)
-    parser.add_argument("--result-root", required=True, type=Path)
-    args = parser.parse_args()
-    report = summarize(args.independent_root, args.result_root)
-    output = write_report(args.result_root, report)
-    print(json.dumps({
-        "status": report["status"],
-        "output": str(output),
-        "training_summary": report["training_summary"],
-        "evaluation_summary": report["evaluation_summary"],
-        "paired_per_seed": report["paired_per_seed"],
-    }, indent=2))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
