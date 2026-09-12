@@ -1,4 +1,4 @@
-"""Frozen TDec MAPPO feasibility and reward-ledger evaluation.
+"""Frozen MAPPO feasibility and reward-ledger evaluation.
 
 The diagnostic is deliberately read-only with respect to the policy and the
 environment implementation.  Feasibility is reconstructed from the current
@@ -482,7 +482,7 @@ def evaluate_feasibility_reward(
     eval_episodes: int = 100,
     reference_metrics: Path | None = None,
 ) -> dict:
-    """Evaluate one frozen TDec policy under one V2I power-offset arm."""
+    """Evaluate one frozen combined/TDec MAPPO policy under one power arm."""
 
     if arm not in ARMS:
         raise ValueError(f"unsupported feasibility arm: {arm}")
@@ -497,8 +497,10 @@ def evaluate_feasibility_reward(
         if not isinstance(payload, dict):
             raise RuntimeError("MAPPO policy payload must be a dictionary")
         run_dir, training_config, training_complete = _validate_mappo_policy_artifact(policy_path, payload)
-        if training_config.algorithm != "mappo" or training_config.mappo_variant != "tdec":
-            raise RuntimeError("feasibility-reward audit requires a TDec MAPPO policy")
+        if training_config.algorithm != "mappo" or training_config.mappo_variant not in {"combined", "tdec"}:
+            raise RuntimeError("feasibility-reward audit requires a combined or TDec MAPPO policy")
+        if training_config.mappo_variant == "combined" and arm != "baseline":
+            raise RuntimeError("combined MAPPO support is limited to the no-intervention baseline evaluation")
         if not training_config.power_continuous:
             raise RuntimeError("feasibility-reward audit requires continuous dBm power mapping")
         runtime_config = copy.deepcopy(training_config)
@@ -607,7 +609,7 @@ def evaluate_feasibility_reward(
         **_summary(arrays, runtime_config.cam_bits),
         "status": "complete",
         "algorithm": "mappo",
-        "mappo_variant": "tdec",
+        "mappo_variant": runtime_config.mappo_variant,
         "actor_sharing": bool(runtime_config.mappo_actor_sharing),
         "actor_network_count": len(trainer.actors),
         "intervention_arm": arm,
@@ -670,7 +672,7 @@ def evaluate_feasibility_reward(
         **git_metadata,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "algorithm": "mappo",
-        "mappo_variant": "tdec",
+        "mappo_variant": runtime_config.mappo_variant,
         "actor_sharing": bool(runtime_config.mappo_actor_sharing),
         "actor_network_count": len(trainer.actors),
         "intervention_arm": arm,
