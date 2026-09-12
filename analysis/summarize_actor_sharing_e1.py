@@ -214,9 +214,11 @@ def _maddpg_cell(e1_root: Path, diagnostics_root: Path, algorithm: str, noise: f
         "run_name": run_name,
         "data_role": "new",
         "source_root": str(Path(complete["source_run_dir"]).resolve()),
+        "training_root": str(Path(complete["source_run_dir"]).resolve()),
         "evaluation_commit": complete.get("reproduction_git_commit"),
         "evaluation_branch": complete.get("reproduction_git_branch"),
         "evaluation_dirty": complete.get("reproduction_git_dirty"),
+        "training_commit": complete.get("reproduction_git_commit"),
         "checkpoint_episode": CHECKPOINT_EPISODE,
     }
     row = {**extra, **metrics, "phase": "heldout_stochastic"}
@@ -275,6 +277,8 @@ def _mappo_cell(diagnostics_root: Path, structure: str, variant: str, seed: int)
         "source_root": str(eval_root),
         "training_root": training["run_dir"],
         "evaluation_commit": complete.get("reproduction_git_commit"),
+        "evaluation_branch": complete.get("reproduction_git_branch"),
+        "evaluation_dirty": complete.get("reproduction_git_dirty"),
         "training_commit": training["training_commit"],
         "checkpoint_episode": CHECKPOINT_EPISODE,
     }
