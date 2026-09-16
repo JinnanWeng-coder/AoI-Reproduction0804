@@ -190,6 +190,11 @@ def flow_statistics(reset: np.ndarray) -> tuple[dict, Counter[int], list[int]]:
     return row, freq, [int(p) for p in positions[:3]]
 
 
+def _index_example(identity: dict, positions: list[int]) -> dict:
+    return {**identity, "first_reset_flat_slot_indices_zero_based": positions,
+            "first_complete_lengths": [int(length) for length in np.diff(positions)]}
+
+
 def _cv2(count: int, sum_l: int, sum_l2: int) -> float | None:
     if not count:
         return None
@@ -434,8 +439,7 @@ def run(study_root: Path, preflight_only: bool = False) -> dict:
                     frequency_rows.extend({**identity, "length_L": length, "frequency": count}
                                           for length, count in sorted(freq.items()))
                     if len(examples) < 8:
-                        examples.append({**identity, "first_reset_flat_slot_indices_zero_based": positions,
-                                         "first_complete_lengths": list(np.diff(positions))})
+                        examples.append(_index_example(identity, positions))
     _require(len(inventory), 24, "evaluation cell count")
     _require(len(source_paths), 24, "unique source count")
     _csv(output / "source_inventory.csv", inventory)
@@ -550,7 +554,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         result = run(args.study_root, args.preflight_only)
-    except (OSError, KeyError, ValueError, AssertionError) as error:
+    except (OSError, KeyError, ValueError, TypeError, AssertionError) as error:
         failure = {"status": "FAIL", "stage": "preflight" if args.preflight_only else "analysis",
                    "error": str(error)}
         output = args.study_root.resolve() / "W1-service-intervals" / "P5_N4_gap25"

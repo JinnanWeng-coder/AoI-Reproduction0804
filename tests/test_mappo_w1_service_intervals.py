@@ -108,6 +108,14 @@ def test_historical_reconciliation_path_includes_scenario(tmp_path):
     )
 
 
+def test_index_example_is_json_serializable():
+    positions = [int(value) for value in np.flatnonzero(_resets(10, [1, 3, 7]))]
+    example = w1._index_example({"training_seed": 8}, positions)
+    encoded = json.loads(json.dumps(example, allow_nan=False))
+    assert encoded["first_reset_flat_slot_indices_zero_based"] == [1, 3, 7]
+    assert encoded["first_complete_lengths"] == [2, 4]
+
+
 def test_source_metadata_and_shape_rejected(tmp_path):
     root = tmp_path / "study"
     train = root / "train"
