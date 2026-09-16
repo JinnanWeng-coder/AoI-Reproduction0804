@@ -101,6 +101,13 @@ def test_invalid_flow_shape_or_dtype():
         flow_statistics(np.zeros(5, dtype=float))
 
 
+def test_historical_reconciliation_path_includes_scenario(tmp_path):
+    assert w1._historical_dir(tmp_path) == (
+        tmp_path / "existing-evidence" / "zero-shot-v1" / "P5_N4_gap25"
+        / "analysis" / "service_regularity"
+    )
+
+
 def test_source_metadata_and_shape_rejected(tmp_path):
     root = tmp_path / "study"
     train = root / "train"

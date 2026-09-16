@@ -6,7 +6,7 @@
 
 默认项目 checkout：`/eeedata/sgxjw2/Parvini-TVT2023-reproduction/AoI-Reproduction0804`。研究根：`/eeedata/sgxjw2/Parvini-TVT2023-reproduction/AoI-Reproduction-diagnostics/actor-sharing-study`。输出仅在研究根下 `W1-service-intervals/P5_N4_gap25`。该路径以外的 existing-evidence、E5、N1、MAPPO_results、源 NPZ/元数据均只读。
 
-combined 两臂开发评估在 `E5-sharing-critic/P5_N4_gap25/evaluations`；TDec 两臂开发评估在 `existing-evidence/shared-actor-v1/P5_N4_gap25/evaluations`。独立 TDec 的训练 config 在 `existing-evidence/tdec-ab-v1/P5_N4_gap25/training/runs`，与开发评估根不同。TDec 历史对账表在 `existing-evidence/zero-shot-v1/analysis/service_regularity`，不算新增轨迹。
+combined 两臂开发评估在 `E5-sharing-critic/P5_N4_gap25/evaluations`；TDec 两臂开发评估在 `existing-evidence/shared-actor-v1/P5_N4_gap25/evaluations`。独立 TDec 的训练 config 在 `existing-evidence/tdec-ab-v1/P5_N4_gap25/training/runs`，与开发评估根不同。TDec 历史对账表在 `existing-evidence/zero-shot-v1/P5_N4_gap25/analysis/service_regularity`，不算新增轨迹。
 
 协议要求 policy_final episode 500、P5/N4/gap25、n_rb=3、stochastic/baseline/sequential_warm、每世界冷启动一次、5 warmup + 100 scored episodes、100 slots/episode、5 agents。源 `metrics.npz` 中 `scored_episode` 轴已排除 warmup，形状 `(6,100,100,5)`，不得再删前五集。event 优先 `reset_event`；如缺失，只有逐槽 post-step `aoi_ms≈1` 才可替代，并记录 event_source。两者都有时必须逐元素一致。只从 NPZ 解压所需事件字段。
 

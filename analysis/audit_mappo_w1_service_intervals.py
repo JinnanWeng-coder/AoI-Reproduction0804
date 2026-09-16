@@ -305,6 +305,11 @@ def _summary_rows(seed_rows: list[dict]) -> tuple[list[dict], list[dict], list[d
     return conditions, effects, effect_summary
 
 
+def _historical_dir(study_root: Path) -> Path:
+    return (study_root / "existing-evidence" / "zero-shot-v1" / "P5_N4_gap25"
+            / "analysis" / "service_regularity")
+
+
 def _ccdf_summaries(ccdf_rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     indexed = {(row["actor_structure"], row["value_configuration"], row["training_seed"],
                 row["threshold_L"]): row for row in ccdf_rows}
@@ -343,7 +348,7 @@ def _ccdf_summaries(ccdf_rows: list[dict]) -> tuple[list[dict], list[dict], list
 
 
 def _historical_check(study_root: Path, flow_rows: list[dict], seed_rows: list[dict]) -> dict:
-    directory = study_root / "existing-evidence" / "zero-shot-v1" / "analysis" / "service_regularity"
+    directory = _historical_dir(study_root)
     with (directory / "service_regularity_world_agent.csv").open(newline="", encoding="utf-8") as handle:
         old_rows = list(csv.DictReader(handle))
     with (directory / "service_regularity_summary.csv").open(newline="", encoding="utf-8") as handle:
@@ -399,7 +404,7 @@ def run(study_root: Path, preflight_only: bool = False) -> dict:
     if not output.resolve().is_relative_to(study_root):
         raise ValueError(f"output escapes study root: {output}")
     output.mkdir(parents=True, exist_ok=True)
-    historical_dir = study_root / "existing-evidence" / "zero-shot-v1" / "analysis" / "service_regularity"
+    historical_dir = _historical_dir(study_root)
     for name in ("service_regularity_world_agent.csv", "service_regularity_summary.csv"):
         if not (historical_dir / name).is_file():
             raise ValueError(f"missing historical reconciliation input: {historical_dir / name}")
