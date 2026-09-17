@@ -1,0 +1,301 @@
+{
+  "experiment": "E3-locked-test",
+  "version": 1,
+  "status": "candidate_requires_HPC_history_audit",
+  "candidate_worlds": [
+    301,
+    302,
+    303,
+    304,
+    305,
+    306
+  ],
+  "training_seeds": [
+    8,
+    9,
+    10,
+    11,
+    12,
+    13
+  ],
+  "scenario": "p05_n04_g25",
+  "n_rb": 3,
+  "evaluation": {
+    "mode": "stochastic",
+    "arm": "baseline",
+    "protocol": "sequential_warm",
+    "warmup_episodes": 5,
+    "scored_episodes": 100,
+    "slots_per_episode": 100,
+    "agents": 5,
+    "policy_rng_tag": 1296126032,
+    "world_reset": "once_per_world",
+    "external_action_noise": 0,
+    "projection": false
+  },
+  "statistics": {
+    "primary": [
+      "worst_agent_aoi_ms",
+      "worst_agent_binary_cam"
+    ],
+    "long_threshold_strict_gt": 100,
+    "description_thresholds": [
+      5,
+      50,
+      100
+    ],
+    "ccdf_grid": "0,5,50,100 plus every observed complete interval length; same grid for all 24 cells",
+    "unit": "training_seed",
+    "training_seed_count": 6,
+    "interval_weighting": [
+      "pooled_events",
+      "equal_eligible_flows"
+    ],
+    "confidence_interval": "descriptive_t_df5_2.570581835636314",
+    "boundaries": "visible_wait_only; no-reset one unique window",
+    "missing": "null plus effective denominator; retain zero/one reset flows"
+  },
+  "output_relative": "E3-locked-test/P5_N4_gap25",
+  "policies": [
+    {
+      "cell_id": 0,
+      "actor_structure": "independent",
+      "value_configuration": "combined",
+      "training_seed": 8,
+      "training_run_name": "mappo_tdec_ab_combined_p05_n04_g25_seed08",
+      "training_root": "existing-evidence/tdec-ab-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 1,
+      "actor_structure": "independent",
+      "value_configuration": "combined",
+      "training_seed": 9,
+      "training_run_name": "mappo_tdec_ab_combined_p05_n04_g25_seed09",
+      "training_root": "existing-evidence/tdec-ab-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 2,
+      "actor_structure": "independent",
+      "value_configuration": "combined",
+      "training_seed": 10,
+      "training_run_name": "mappo_tdec_ab_combined_p05_n04_g25_seed10",
+      "training_root": "existing-evidence/tdec-ab-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 3,
+      "actor_structure": "independent",
+      "value_configuration": "combined",
+      "training_seed": 11,
+      "training_run_name": "mappo_tdec_ab_combined_p05_n04_g25_seed11",
+      "training_root": "existing-evidence/tdec-ab-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 4,
+      "actor_structure": "independent",
+      "value_configuration": "combined",
+      "training_seed": 12,
+      "training_run_name": "mappo_tdec_ab_combined_p05_n04_g25_seed12",
+      "training_root": "existing-evidence/tdec-ab-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 5,
+      "actor_structure": "independent",
+      "value_configuration": "combined",
+      "training_seed": 13,
+      "training_run_name": "mappo_tdec_ab_combined_p05_n04_g25_seed13",
+      "training_root": "existing-evidence/tdec-ab-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 6,
+      "actor_structure": "shared",
+      "value_configuration": "combined",
+      "training_seed": 8,
+      "training_run_name": "mappo_e5_shared_combined_p05_n04_g25_seed08",
+      "training_root": "E5-sharing-critic/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 7,
+      "actor_structure": "shared",
+      "value_configuration": "combined",
+      "training_seed": 9,
+      "training_run_name": "mappo_e5_shared_combined_p05_n04_g25_seed09",
+      "training_root": "E5-sharing-critic/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 8,
+      "actor_structure": "shared",
+      "value_configuration": "combined",
+      "training_seed": 10,
+      "training_run_name": "mappo_e5_shared_combined_p05_n04_g25_seed10",
+      "training_root": "E5-sharing-critic/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 9,
+      "actor_structure": "shared",
+      "value_configuration": "combined",
+      "training_seed": 11,
+      "training_run_name": "mappo_e5_shared_combined_p05_n04_g25_seed11",
+      "training_root": "E5-sharing-critic/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 10,
+      "actor_structure": "shared",
+      "value_configuration": "combined",
+      "training_seed": 12,
+      "training_run_name": "mappo_e5_shared_combined_p05_n04_g25_seed12",
+      "training_root": "E5-sharing-critic/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 11,
+      "actor_structure": "shared",
+      "value_configuration": "combined",
+      "training_seed": 13,
+      "training_run_name": "mappo_e5_shared_combined_p05_n04_g25_seed13",
+      "training_root": "E5-sharing-critic/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 12,
+      "actor_structure": "independent",
+      "value_configuration": "tdec",
+      "training_seed": 8,
+      "training_run_name": "mappo_tdec_ab_tdec_p05_n04_g25_seed08",
+      "training_root": "existing-evidence/tdec-ab-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 13,
+      "actor_structure": "independent",
+      "value_configuration": "tdec",
+      "training_seed": 9,
+      "training_run_name": "mappo_tdec_ab_tdec_p05_n04_g25_seed09",
+      "training_root": "existing-evidence/tdec-ab-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 14,
+      "actor_structure": "independent",
+      "value_configuration": "tdec",
+      "training_seed": 10,
+      "training_run_name": "mappo_tdec_ab_tdec_p05_n04_g25_seed10",
+      "training_root": "existing-evidence/tdec-ab-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 15,
+      "actor_structure": "independent",
+      "value_configuration": "tdec",
+      "training_seed": 11,
+      "training_run_name": "mappo_tdec_ab_tdec_p05_n04_g25_seed11",
+      "training_root": "existing-evidence/tdec-ab-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 16,
+      "actor_structure": "independent",
+      "value_configuration": "tdec",
+      "training_seed": 12,
+      "training_run_name": "mappo_tdec_ab_tdec_p05_n04_g25_seed12",
+      "training_root": "existing-evidence/tdec-ab-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 17,
+      "actor_structure": "independent",
+      "value_configuration": "tdec",
+      "training_seed": 13,
+      "training_run_name": "mappo_tdec_ab_tdec_p05_n04_g25_seed13",
+      "training_root": "existing-evidence/tdec-ab-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 18,
+      "actor_structure": "shared",
+      "value_configuration": "tdec",
+      "training_seed": 8,
+      "training_run_name": "mappo_shared_actor_tdec_p05_n04_g25_seed08",
+      "training_root": "existing-evidence/shared-actor-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 19,
+      "actor_structure": "shared",
+      "value_configuration": "tdec",
+      "training_seed": 9,
+      "training_run_name": "mappo_shared_actor_tdec_p05_n04_g25_seed09",
+      "training_root": "existing-evidence/shared-actor-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 20,
+      "actor_structure": "shared",
+      "value_configuration": "tdec",
+      "training_seed": 10,
+      "training_run_name": "mappo_shared_actor_tdec_p05_n04_g25_seed10",
+      "training_root": "existing-evidence/shared-actor-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 21,
+      "actor_structure": "shared",
+      "value_configuration": "tdec",
+      "training_seed": 11,
+      "training_run_name": "mappo_shared_actor_tdec_p05_n04_g25_seed11",
+      "training_root": "existing-evidence/shared-actor-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 22,
+      "actor_structure": "shared",
+      "value_configuration": "tdec",
+      "training_seed": 12,
+      "training_run_name": "mappo_shared_actor_tdec_p05_n04_g25_seed12",
+      "training_root": "existing-evidence/shared-actor-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    },
+    {
+      "cell_id": 23,
+      "actor_structure": "shared",
+      "value_configuration": "tdec",
+      "training_seed": 13,
+      "training_run_name": "mappo_shared_actor_tdec_p05_n04_g25_seed13",
+      "training_root": "existing-evidence/shared-actor-v1/P5_N4_gap25",
+      "policy_name": "policy_final.pt",
+      "policy_episode": 500
+    }
+  ]
+}
