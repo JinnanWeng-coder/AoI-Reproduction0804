@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from analysis import audit_mappo_w1_service_intervals as w1
-from analysis.mappo_e3_contract import ARRAY_FIELDS, cell, protocol, result_root, eval_dir, validate_cell, validate_lock
+from analysis.mappo_e3_contract import ARRAY_FIELDS, cell, protocol, result_root, eval_dir, validate_cell, validate_lock, current_commit
 
 CONDITIONS = (("independent", "combined"), ("shared", "combined"),
               ("independent", "tdec"), ("shared", "tdec"))
@@ -156,7 +156,7 @@ def analyze(study_root: Path) -> dict:
         c1_rows.extend(world_agent_rows(arrays, complete, item))
         inventory.append({"cell_id": cell_id, "actor_structure": item["actor_structure"],
                           "value_configuration": item["value_configuration"], "training_seed": item["training_seed"],
-                          "training_commit": marker["training_commit"], "evaluation_commit": marker["implementation_commit"],
+                          "training_commit": marker["training_commit"], "evaluation_commit": marker["evaluation_commit"],
                           "evaluation_dir": str(directory), "worlds": ",".join(map(str, marker["worlds"])),
                           "policy_episode": 500, "event_source": "reset_event"})
         for wi, world in enumerate(protocol()["candidate_worlds"]):
@@ -272,6 +272,8 @@ def analyze(study_root: Path) -> dict:
     report.append("")
     (output / "report_cn.md").write_text("\n".join(report), encoding="utf-8")
     verification = {"status": "PASS", "scope": "technical_only", "implementation_commit": locked["implementation_commit"],
+                    "validation_commit": current_commit(),
+                    "evaluation_commits": sorted({row["evaluation_commit"] for row in inventory}),
                     "locked_at_utc": locked["locked_at_utc"], "worlds": protocol()["candidate_worlds"],
                     "evaluation_cells": 24, "policy_world_runs": 144, "world_agent_flows": 720,
                     "scored_agent_slots": 7200000, "cam_agent_episode_events": 72000,

@@ -201,7 +201,7 @@ def test_completed_cell_marker_revalidates_for_skip(tmp_path, monkeypatch):
                 "reproduction_git_dirty": False, "eval_id": e3.eval_id(),
                 "policy_path_is_relative_to_eval": True, "external_action_noise_applicable": False,
                 "intervention_db": 0.0, "aoi_cap_ms": 100.0, "policy": relpolicy,
-                "training_source_commit": "training-commit", "raw_metric_axes": {}}
+                "raw_metric_axes": {}}
     arrays = {}
     for name in e3.ARRAY_FIELDS:
         shape = (6, 100, 100) if name == "reward_global" else e3.AGENT_SHAPE
@@ -217,9 +217,72 @@ def test_completed_cell_marker_revalidates_for_skip(tmp_path, monkeypatch):
         "reproduction_git_dirty": False, "created_at_utc": "2026-09-17T00:01:00+00:00"})
     np.savez_compressed(directory / "metrics.npz", **arrays)
     marker = e3.validate_cell(study, 0, write_marker=True)
+    assert marker["training_commit"] == "training-commit"
+    assert marker["evaluation_commit"] == "c" * 40
     assert e3.validate_cell(study, 0) == marker
     with pytest.raises(FileExistsError):
         e3.validate_cell(study, 0, write_marker=True)
+    (directory / "E3_COMPLETE.json").unlink()
+    recovered = e3.validate_cell(study, 0, write_marker=True, source_array_job_id="307326")
+    assert recovered["slurm_array_job_id"] == "307326" and recovered["slurm_array_task_id"] == "0"
+    # The evaluator puts this field in provenance, not EVAL_COMPLETE.
+    provenance_path = directory / "provenance.json"
+    provenance = e3._json(provenance_path)
+    provenance["training_source_commit"] = "wrong-training"
+    e3._write(provenance_path, provenance)
+    with pytest.raises(ValueError, match="training commit"):
+        e3.validate_cell(study, 0)
+    provenance["training_source_commit"] = "training-commit"
+    e3._write(provenance_path, provenance)
+    complete["training_source_commit"] = "wrong-training"
+    e3._write(directory / "EVAL_COMPLETE.json", complete)
+    with pytest.raises(ValueError, match="evaluation training commit"):
+        e3.validate_cell(study, 0)
+    complete.pop("training_source_commit")
+    # A later technical-only checkout may validate a newly evaluated cell while
+    # retaining the original protocol lock and the earlier pilot's eval commit.
+    provenance["training_source_commit"] = "training-commit"
+    provenance["reproduction_git_commit"] = "d" * 40
+    e3._write(provenance_path, provenance)
+    complete["reproduction_git_commit"] = "d" * 40
+    e3._write(directory / "EVAL_COMPLETE.json", complete)
+    monkeypatch.setattr(e3, "LOCKED_E3_COMMIT", "c" * 40)
+    monkeypatch.setattr(e3, "current_commit", lambda: "d" * 40)
+    monkeypatch.setattr(e3, "_repair_diff_paths", lambda *_args: sorted(e3.REPAIR_ALLOWED_PATHS))
+    e3._write(root / "lock_technical_repair.json", {
+        "status": "TECHNICAL_REPAIR", "original_lock_commit": "c" * 40,
+        "repair_commit": "d" * 40, "original_locked_at_utc": locked["locked_at_utc"],
+        "changed_paths": sorted(e3.REPAIR_ALLOWED_PATHS)})
+    (directory / "E3_COMPLETE.json").unlink()
+    repaired = e3.validate_cell(study, 0, write_marker=True)
+    assert repaired["implementation_commit"] == "c" * 40
+    assert repaired["evaluation_commit"] == "d" * 40
+    assert repaired["validation_commit"] == "d" * 40
+
+
+def test_technical_repair_preserves_original_lock_and_accepts_both_eval_commits(tmp_path, monkeypatch):
+    old, new = e3.LOCKED_E3_COMMIT, "d" * 40
+    monkeypatch.setattr(e3, "current_commit", lambda: new)
+    monkeypatch.setattr(e3, "_repair_diff_paths", lambda *_args: sorted(e3.REPAIR_ALLOWED_PATHS))
+    study = tmp_path / "study"
+    output = e3.result_root(study)
+    output.mkdir(parents=True)
+    locked = {"status": "LOCKED", "locked_at_utc": "2026-09-17T07:36:06+00:00",
+              "implementation_commit": old, "protocol": e3.protocol()}
+    e3._write(output / "lock.json", locked)
+    with pytest.raises(FileNotFoundError):
+        e3.validate_lock(study)
+    e3._write(output / "world_use_audit.json", {"commit": old})
+    e3._write(output / "source_inventory.json", {"commit": old})
+    original_check_output = e3.subprocess.check_output
+    monkeypatch.setattr(e3.subprocess, "check_output", lambda args, **kwargs:
+                        "" if args[:2] == ["git", "status"] else original_check_output(args, **kwargs))
+    amendment = e3.amend_lock_for_technical_repair(study, True)
+    assert amendment["original_lock_commit"] == old and amendment["repair_commit"] == new
+    assert e3._json(output / "lock.json") == locked
+    assert e3.validate_lock(study) == locked
+    with pytest.raises(FileExistsError):
+        e3.amend_lock_for_technical_repair(study, True)
 
 
 def test_full_synthetic_analysis_retains_all_no_reset_flows(tmp_path, monkeypatch):
@@ -227,8 +290,10 @@ def test_full_synthetic_analysis_retains_all_no_reset_flows(tmp_path, monkeypatc
     locked = {"status": "LOCKED", "locked_at_utc": "2026-09-17T00:00:00+00:00",
               "implementation_commit": "d" * 40, "protocol": e3.protocol()}
     monkeypatch.setattr(summary, "validate_lock", lambda _root: locked)
+    monkeypatch.setattr(summary, "current_commit", lambda: "d" * 40)
     monkeypatch.setattr(summary, "validate_cell", lambda _root, i: {
         "training_commit": f"training-{i}", "implementation_commit": "d" * 40,
+        "evaluation_commit": "d" * 40,
         "worlds": e3.protocol()["candidate_worlds"]})
     arrays = {}
     for name in e3.ARRAY_FIELDS:

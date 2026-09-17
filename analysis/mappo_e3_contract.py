@@ -20,6 +20,9 @@ PROTOCOL_FILE = Path(__file__).resolve().parents[1] / "hpc" / "e3_locked_test_pr
 AGENT_SHAPE = (6, 100, 100, 5)
 ARRAY_FIELDS = ("aoi_ms", "success", "remaining_demand", "reset_event",
                 "executed_power_dbm", "reward_global", "reward_task1", "reward_task2")
+LOCKED_E3_COMMIT = "c56425776ca6b4e71d0002f6192900e1475b5693"
+REPAIR_ALLOWED_PATHS = {"analysis/mappo_e3_contract.py", "analysis/summarize_mappo_e3_locked_test.py",
+                        "tests/test_mappo_e3_locked_test.py", "hpc/README_E3_LOCKED_TEST.md"}
 
 
 def protocol() -> dict:
@@ -295,15 +298,58 @@ def create_lock(study_root: Path, confirm_reviewed: bool) -> dict:
     return {k: locked[k] for k in ("status", "locked_at_utc", "implementation_commit")}
 
 
+def _repair_diff_paths(locked_commit: str, repair_commit: str) -> list[str]:
+    subprocess.run(["git", "merge-base", "--is-ancestor", locked_commit, repair_commit], check=True)
+    paths = subprocess.check_output(["git", "diff", "--name-only", f"{locked_commit}..{repair_commit}"],
+                                    text=True).splitlines()
+    if not paths or not set(paths).issubset(REPAIR_ALLOWED_PATHS):
+        raise ValueError(f"E3 repair contains unexpected changes: {paths}")
+    return paths
+
+
+def amend_lock_for_technical_repair(study_root: Path, confirm: bool) -> dict:
+    if not confirm:
+        raise ValueError("explicit technical-repair confirmation required")
+    output = result_root(study_root)
+    locked = _json(output / "lock.json")
+    _require(locked.get("status"), "LOCKED", "E3 lock status")
+    _require(locked.get("protocol"), protocol(), "E3 protocol drift")
+    _require(locked.get("implementation_commit"), LOCKED_E3_COMMIT, "original E3 lock commit")
+    _require(_json(output / "world_use_audit.json").get("commit"), LOCKED_E3_COMMIT, "history audit commit")
+    _require(_json(output / "source_inventory.json").get("commit"), LOCKED_E3_COMMIT, "source audit commit")
+    repair_commit = current_commit()
+    if repair_commit == LOCKED_E3_COMMIT:
+        raise ValueError("repair checkout is still the original E3 commit")
+    if subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=all"], text=True).strip():
+        raise ValueError("repair checkout must be clean")
+    paths = _repair_diff_paths(LOCKED_E3_COMMIT, repair_commit)
+    path = output / "lock_technical_repair.json"
+    if path.exists():
+        raise FileExistsError(f"preserve existing E3 technical repair amendment: {path}")
+    amendment = {"status": "TECHNICAL_REPAIR", "original_lock_commit": LOCKED_E3_COMMIT,
+                 "repair_commit": repair_commit, "original_locked_at_utc": locked["locked_at_utc"],
+                 "created_at_utc": datetime.now(timezone.utc).isoformat(), "changed_paths": paths,
+                 "reason": "Read training_source_commit from validated provenance; preserve existing pilot evaluations and original protocol lock"}
+    _write(path, amendment)
+    return amendment
+
+
 def validate_lock(study_root: Path) -> dict:
     locked = _json(result_root(study_root) / "lock.json")
     _require(locked.get("status"), "LOCKED", "E3 lock status")
     _require(locked.get("protocol"), protocol(), "E3 protocol drift")
-    _require(locked.get("implementation_commit"), current_commit(), "E3 implementation commit")
+    if locked.get("implementation_commit") != current_commit():
+        _require(locked.get("implementation_commit"), LOCKED_E3_COMMIT, "original E3 lock commit")
+        amendment = _json(result_root(study_root) / "lock_technical_repair.json")
+        for key, value in {"status": "TECHNICAL_REPAIR", "original_lock_commit": LOCKED_E3_COMMIT,
+                           "repair_commit": current_commit(), "original_locked_at_utc": locked["locked_at_utc"],
+                           "changed_paths": _repair_diff_paths(LOCKED_E3_COMMIT, current_commit())}.items():
+            _require(amendment.get(key), value, f"E3 repair/{key}")
     return locked
 
 
-def validate_cell(study_root: Path, cell_id: int, write_marker: bool = False) -> dict:
+def validate_cell(study_root: Path, cell_id: int, write_marker: bool = False,
+                  source_array_job_id: str | None = None) -> dict:
     locked = validate_lock(study_root)
     item = cell(cell_id)
     source = _assert_source(study_root, item, check_payload=False)
@@ -318,12 +364,15 @@ def validate_cell(study_root: Path, cell_id: int, write_marker: bool = False) ->
                 "eval_warmup_episodes": 5, "eval_protocol": "sequential_warm",
                 "mappo_eval_mode": "stochastic", "intervention_arm": "baseline",
                 "is_frozen_eval": True, "policy_parameters_unchanged": True,
-                "reproduction_git_commit": locked["implementation_commit"], "reproduction_git_dirty": False,
+                "reproduction_git_dirty": False,
                 "eval_id": eval_id(), "policy_path_is_relative_to_eval": True,
                 "external_action_noise_applicable": False, "intervention_db": 0.0,
                 "aoi_cap_ms": 100.0}
     for key, value in expected.items():
         _require(complete.get(key), value, f"{directory}/EVAL_COMPLETE/{key}")
+    evaluation_commit = complete.get("reproduction_git_commit")
+    if evaluation_commit not in {locked["implementation_commit"], current_commit()}:
+        raise ValueError(f"{directory}: evaluation commit not original lock or approved repair: {evaluation_commit!r}")
     _require((directory / complete["policy"]).resolve(), Path(source["policy"]).resolve(), "policy reference")
     for key, value in {"algorithm": "mappo", "mappo_variant": item["value_configuration"],
                        "actor_sharing": item["actor_structure"] == "shared",
@@ -331,13 +380,14 @@ def validate_cell(study_root: Path, cell_id: int, write_marker: bool = False) ->
                        "eval_episodes": 100, "eval_warmup_episodes": 5,
                        "mappo_eval_mode": "stochastic", "intervention_arm": "baseline",
                        "policy": complete["policy"],
-                       "reproduction_git_commit": locked["implementation_commit"],
+                       "reproduction_git_commit": evaluation_commit,
                        "reproduction_git_dirty": False}.items():
         _require(provenance.get(key), value, f"{directory}/provenance/{key}")
     if not isinstance(provenance.get("created_at_utc"), str) or not provenance["created_at_utc"]:
         raise ValueError(f"{directory}: missing evaluation creation timestamp")
     _require(provenance.get("training_source_commit"), source["training_commit"], "training commit")
-    _require(complete.get("training_source_commit"), source["training_commit"], "evaluation training commit")
+    if "training_source_commit" in complete:
+        _require(complete["training_source_commit"], source["training_commit"], "evaluation training commit")
     arrays = {}
     with np.load(directory / "metrics.npz", allow_pickle=False) as npz:
         for name in ARRAY_FIELDS:
@@ -361,6 +411,7 @@ def validate_cell(study_root: Path, cell_id: int, write_marker: bool = False) ->
         raise ValueError(f"{directory}: non-binary endpoint CAM")
     marker = {"status": "complete", "experiment": "E3-locked-test", "cell_id": cell_id,
               "locked_at_utc": locked["locked_at_utc"], "implementation_commit": locked["implementation_commit"],
+              "validation_commit": current_commit(),
               "evaluation_commit": complete["reproduction_git_commit"],
               "training_commit": source["training_commit"], "training_seed": item["training_seed"],
               "actor_structure": item["actor_structure"], "value_configuration": item["value_configuration"],
@@ -374,8 +425,8 @@ def validate_cell(study_root: Path, cell_id: int, write_marker: bool = False) ->
         if path.exists():
             raise FileExistsError(path)
         marker.update({"evaluation_created_at_utc": provenance.get("created_at_utc"),
-                       "slurm_array_job_id": os.environ.get("SLURM_ARRAY_JOB_ID"),
-                       "slurm_array_task_id": os.environ.get("SLURM_ARRAY_TASK_ID")})
+                       "slurm_array_job_id": source_array_job_id or os.environ.get("SLURM_ARRAY_JOB_ID"),
+                       "slurm_array_task_id": str(cell_id) if source_array_job_id else os.environ.get("SLURM_ARRAY_TASK_ID")})
         _write(path, marker)
     else:
         existing = _json(path)
@@ -389,11 +440,14 @@ def validate_cell(study_root: Path, cell_id: int, write_marker: bool = False) ->
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("history-audit", "source-preflight", "lock", "check-lock", "check-cell", "mark-cell"))
+    parser.add_argument("command", choices=("history-audit", "source-preflight", "lock", "amend-lock",
+                                            "check-lock", "check-cell", "mark-cell"))
     parser.add_argument("--study-root", type=Path, required=True)
     parser.add_argument("--cell-id", type=int)
     parser.add_argument("--confirm-reviewed", action="store_true")
     parser.add_argument("--supersede-blocked-audit", action="store_true")
+    parser.add_argument("--confirm-technical-repair", action="store_true")
+    parser.add_argument("--source-array-job-id")
     args = parser.parse_args()
     if args.command == "history-audit":
         result = history_audit(args.study_root, args.supersede_blocked_audit)
@@ -401,13 +455,18 @@ def main() -> int:
         result = source_preflight(args.study_root)
     elif args.command == "lock":
         result = create_lock(args.study_root, args.confirm_reviewed)
+    elif args.command == "amend-lock":
+        result = amend_lock_for_technical_repair(args.study_root, args.confirm_technical_repair)
     elif args.command == "check-lock":
         locked = validate_lock(args.study_root)
         result = {k: locked[k] for k in ("status", "locked_at_utc", "implementation_commit")}
     else:
         if args.cell_id is None:
             parser.error("--cell-id required")
-        result = validate_cell(args.study_root, args.cell_id, args.command == "mark-cell")
+        if args.source_array_job_id is not None and (args.command != "mark-cell" or not args.source_array_job_id.isdecimal()):
+            parser.error("--source-array-job-id requires mark-cell and a numeric Slurm array job id")
+        result = validate_cell(args.study_root, args.cell_id, args.command == "mark-cell",
+                               args.source_array_job_id)
     print(json.dumps(result, ensure_ascii=False, allow_nan=False))
     return 2 if args.command == "history-audit" and result["status"] != "CANDIDATE_CLEAR_REQUIRES_MANUAL_REVIEW" else 0
 

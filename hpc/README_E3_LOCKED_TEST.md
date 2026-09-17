@@ -18,6 +18,12 @@ v1 候选 301–306 的锁定前审计被阻止：301/302 出现在全部源训�
 4. `bash -n` 两个 sbatch 后，先提交 `--array=0,6,12,18%4` 四个完整 cell pilot，每个含全部六世界。技术校验通过后提交 `--array=1-5,7-11,13-17,19-23%6` 余下20 cell。pilot 是正式24 cell的组成部分，不能重复或剔除。完整且合同一致的 E3_COMPLETE 由 `check-cell` 验证后跳过；不完整/冲突目录必须保留并报告，禁止静默覆盖或从多次结果择优。技术失败记录作业ID、错误、目录状态；不得按效果决定续跑。
 5. 24个 cell 均 `check-cell` 通过后，提交 CPU `hpc/aoi_mappo_e3_locked_analyze.sbatch`。技术验收不以共享效应方向决定。分析结果仅写 E3 根的 `analysis/`；现有来源不回写。
 
+## 已锁定 pilot 的技术修复（307326）
+
+原锁定于 `c56425776ca6b4e71d0002f6192900e1475b5693`，世界/来源/协议不可改。pilot 0/6/12/18 的冻结评估本身已写 `EVAL_COMPLETE.json`、`provenance.json`、`metrics.npz`，但旧 `mark-cell` 错向 `EVAL_COMPLETE.json` 索取只写在 `provenance.json` 的 `training_source_commit`。本修复只改后处理合同，不改评估器或评估参数；逐项核对 provenance 中的训练 commit 与真实来源，若 `EVAL_COMPLETE` 也带该字段则要求一致，不编辑已有文件。原始 `lock.json` 保留原样，以独立 `lock_technical_repair.json` 明确记录新验收代码 commit，且程序核查两 commit 间仅有白名单内的合同、汇总、测试和说明变更。不能通过覆盖 lock 或重跑 pilot 解决。
+
+HPC 快进到修复提交、确认工作树干净和四个旧评估目录均完整后，执行 `python -m analysis.mappo_e3_contract amend-lock --study-root "$STUDY_ROOT" --confirm-technical-repair`，再用 `python -m analysis.mappo_e3_contract check-lock --study-root "$STUDY_ROOT"`。附记只允许创建一次。逐个运行 `python -m analysis.mappo_e3_contract mark-cell --study-root "$STUDY_ROOT" --cell-id <0/6/12/18> --source-array-job-id 307326`，该操作只写缺失的 `E3_COMPLETE.json`，会验证 NPZ、元数据和来源，不覆盖原始三文件。随后对四个 cell 运行 `check-cell`，核对 E3_COMPLETE 中 `evaluation_commit` 为原锁 commit、`validation_commit` 为修复 commit、Slurm 数组 job 为 307326。若任何目录缺失/冲突，停止而不重评估。四个 pilot 技术通过后，才按上节提交其余20 cell，并以修复 commit 作为 sbatch 的 `AOI_EXPECTED_COMMIT`。后续 cell 的评估 commit 为修复提交，汇总 inventory/verification 分列原锁、修复验收及实际评估 commit。精简证据包须另含 `lock_technical_repair.json`。
+
 ## 统计与证据
 
 C1 主指标为每seed的 worst-agent mean AoI（较低有利）和 worst-agent binary CAM（较高有利）。先按同 agent 汇总六世界，再取五 agent 的 max/min，不先逐世界取最差。CAM是每scored episode终点事件，总计72,000 agent-episode，不以7,200,000 agent-slots作分母。辅助报告 mean AoI、AoI>50、at-cap、mean/worst payload、mean CAM、combined reward、线性mW功率。保留逐world×agent精确 sum/count。
@@ -26,4 +32,4 @@ C2从同一批NPZ复用 W1 的 reset/完整间隔函数：world内连接scored e
 
 预期规模：0新训练，24新评估cell，144策略×世界运行，720条流，7,200,000 scored agent-slots，72,000 CAM截止期事件，24条condition×seed摘要。完整间隔有效流数不预设。`analysis/verification.json` technical PASS 仅表示来源、协议、完整性和计算正确，不表示C1/C2得到新世界支持。
 
-精简包 `E3-locked-test/P5_N4_gap25/core_evidence.tar.zst` 仅纳入 `hpc/e3_locked_test_protocol.json` 的副本（打包时从仓库以 `tar -C` 添加）、E3根 `lock.json`、新旧 `world_use_audit*.json`、`source_inventory.json`、24个 `E3_COMPLETE.json`、`analysis/*.csv`、`analysis/verification.json`、`analysis/index_examples.json`、`analysis/fields_and_boundaries.md`、`analysis/report_cn.md`。不要打包NPZ、policy、checkpoint、完整轨迹、缓存、完整日志或SHA256清单。训练commit与评估commit分列，不互相冒充。
+精简包 `E3-locked-test/P5_N4_gap25/core_evidence.tar.zst` 仅纳入 `hpc/e3_locked_test_protocol.json` 的副本（打包时从仓库以 `tar -C` 添加）、E3根 `lock.json`、`lock_technical_repair.json`、新旧 `world_use_audit*.json`、`source_inventory.json`、24个 `E3_COMPLETE.json`、`analysis/*.csv`、`analysis/verification.json`、`analysis/index_examples.json`、`analysis/fields_and_boundaries.md`、`analysis/report_cn.md`。不要打包NPZ、policy、checkpoint、完整轨迹、缓存、完整日志或SHA256清单。训练commit与评估commit分列，不互相冒充。
