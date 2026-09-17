@@ -13,20 +13,21 @@ from analysis.audit_mappo_w1_service_intervals import _ccdf, flow_statistics
 
 def test_24_cell_mapping_sources_and_world_lock():
     p = e3.protocol()
-    assert p["candidate_worlds"] == [301, 302, 303, 304, 305, 306]
+    assert p["candidate_worlds"] == [303, 304, 305, 306, 307, 308]
+    assert set(p["candidate_worlds"]).isdisjoint({301, 302})
     assert len(p["policies"]) == 24
     assert [e3.cell(i)["training_seed"] for i in (0, 6, 12, 18)] == [8] * 4
     assert e3.cell(0)["training_root"].startswith("existing-evidence/tdec-ab-v1")
     assert e3.cell(6)["training_root"].startswith("E5-sharing-critic")
     assert e3.cell(12)["training_root"].startswith("existing-evidence/tdec-ab-v1")
     assert e3.cell(18)["training_root"].startswith("existing-evidence/shared-actor-v1")
-    assert "s301-302-303-304-305-306_ep100" in e3.eval_id()
+    assert "s303-304-305-306-307-308_ep100" in e3.eval_id()
 
 
 def test_protocol_mismatch_and_lock_refusal(tmp_path, monkeypatch):
     source = e3.protocol()
     changed = json.loads(json.dumps(source))
-    changed["candidate_worlds"] = [301, 302, 303, 304, 305, 305]
+    changed["candidate_worlds"] = [303, 304, 305, 306, 307, 307]
     file = tmp_path / "protocol.json"
     file.write_text(json.dumps(changed), encoding="utf-8")
     monkeypatch.setattr(e3, "PROTOCOL_FILE", file)
@@ -39,7 +40,8 @@ def test_protocol_mismatch_and_lock_refusal(tmp_path, monkeypatch):
     out.mkdir(parents=True)
     e3._write(out / "world_use_audit.json", {
         "status": "CANDIDATE_CLEAR_REQUIRES_MANUAL_REVIEW", "candidate_worlds": source["candidate_worlds"],
-        "candidate_hits": [], "scan_errors": [], "commit": "a" * 40})
+        "candidate_hits": [], "scan_errors": [], "commit": "a" * 40,
+        "scan_roots": [str(root.resolve()), str(root.resolve().parent / "MAPPO_results")]})
     e3._write(out / "source_inventory.json", {
         "policy_count": 24, "all_payloads_checked": True, "sources": [
             {key: item[key] for key in ("cell_id", "actor_structure", "value_configuration",
@@ -58,24 +60,48 @@ def test_history_audit_distinguishes_world_fields_from_plain_numbers(tmp_path, m
     monkeypatch.setattr(e3, "current_commit", lambda: "b" * 40)
     study = tmp_path / "project" / "AoI-Reproduction-diagnostics" / "actor-sharing-study"
     study.mkdir(parents=True)
-    (study / "plan.json").write_text(json.dumps({"note": "301 was only proposed"}), encoding="utf-8")
-    (study / "actual.json").write_text(json.dumps({"eval_seeds": [213, 301]}), encoding="utf-8")
-    directory = study / "old-run" / "evaluations" / "run" / "eval_validation_s302-303_ep100"
+    diagnostic_mappo = study.parent / "MAPPO_results"
+    diagnostic_mappo.mkdir()
+    (study / "plan.json").write_text(json.dumps({"note": "303 was only proposed"}), encoding="utf-8")
+    (study / "reserved.json").write_text(json.dumps({"selection_validation_seeds": [301, 302]}), encoding="utf-8")
+    (study / "actual.json").write_text(json.dumps({"eval_seeds": [213, 303]}), encoding="utf-8")
+    directory = study / "old-run" / "evaluations" / "run" / "eval_validation_s304-305_ep100"
     directory.mkdir(parents=True)
     logs = study / "old-run" / "slurm_logs"
     logs.mkdir(parents=True)
-    (logs / "job.out").write_text("eval_world=304\n", encoding="utf-8")
+    (logs / "job.out").write_text("eval_world=306\n", encoding="utf-8")
+    (diagnostic_mappo / "eval.csv").write_text("eval_seed\n307\n", encoding="utf-8")
     report = e3.history_audit(study)
     assert report["status"] == "BLOCKED"
-    assert {world for hit in report["candidate_hits"] for world in hit["candidate_worlds"]} == {301, 302, 303, 304}
+    assert {world for hit in report["candidate_hits"] for world in hit["candidate_worlds"]} == {303, 304, 305, 306, 307}
+    assert str(diagnostic_mappo) in report["scan_roots"]
+
+
+def test_supersede_preserves_old_blocked_audit_before_new_lock(tmp_path, monkeypatch):
+    monkeypatch.setattr(e3, "current_commit", lambda: "b" * 40)
+    study = tmp_path / "project" / "AoI-Reproduction-diagnostics" / "actor-sharing-study"
+    study.mkdir(parents=True)
+    (study.parent / "MAPPO_results").mkdir()
+    output = e3.result_root(study)
+    output.mkdir(parents=True)
+    old = {"status": "BLOCKED", "candidate_worlds": [301, 302, 303, 304, 305, 306],
+           "commit": "a" * 40, "candidate_hits": [{"candidate_worlds": [301, 302]}]}
+    e3._write(output / "world_use_audit.json", old)
+    with pytest.raises(ValueError, match="explicit supersede"):
+        e3.history_audit(study)
+    new = e3.history_audit(study, supersede_blocked_audit=True)
+    assert new["status"] == "CANDIDATE_CLEAR_REQUIRES_MANUAL_REVIEW"
+    assert new["candidate_worlds"] == [303, 304, 305, 306, 307, 308]
+    assert e3._json(output / "world_use_audit_previous_aaaaaaa.json") == old
+    assert len(new["scan_roots"]) == 2
 
 
 def _c1_rows_for_one_seed():
     rows = []
     for world in e3.protocol()["candidate_worlds"]:
         for agent in range(5):
-            aoi = (100 if world == 301 else 0) if agent == 0 else 20 if agent == 1 else 5
-            cam = (0 if world == 301 else 100) if agent == 0 else 75 if agent == 1 else 100
+            aoi = (100 if world == 303 else 0) if agent == 0 else 20 if agent == 1 else 5
+            cam = (0 if world == 303 else 100) if agent == 0 else 75 if agent == 1 else 100
             rows.append({"world": world, "agent": agent, "aoi_sum_ms": aoi * 10000,
                          "aoi_slot_count": 10000, "aoi_gt50_count": 0, "aoi_at_cap_count": 0,
                          "binary_cam_success_count": cam, "binary_cam_episode_count": 100,
@@ -129,8 +155,8 @@ def test_interval_weights_boundaries_ccdf_and_json_indices():
     rows, freqs = [], {}
     for agent, reset in enumerate((reset_a, reset_b)):
         row, freq, positions = flow_statistics(reset)
-        rows.append({"world": 301, "agent": agent, **row})
-        freqs[key + (301, agent)] = freq
+        rows.append({"world": 303, "agent": agent, **row})
+        freqs[key + (303, agent)] = freq
         json.dumps({"index": positions, "example": [int(x) for x in np.diff(positions)]})
     empty, _, _ = flow_statistics(np.zeros((2, 5), dtype=bool))
     once = np.zeros((2, 5), dtype=bool); once[0, 3] = True
@@ -140,7 +166,7 @@ def test_interval_weights_boundaries_ccdf_and_json_indices():
     ccdf = _ccdf(rows, freqs, key, [0, 1, 4, 9])
     assert ccdf[1]["event_ccdf_P_L_gt_threshold"] == pytest.approx(2 / 3)
     assert ccdf[1]["flow_equal_ccdf_P_L_gt_threshold"] == pytest.approx(0.75)
-    assert freqs[key + (301, 0)] == Counter({1: 1, 4: 1})
+    assert freqs[key + (303, 0)] == Counter({1: 1, 4: 1})
 
 
 def test_empty_interval_frequency_is_valid_header_only(tmp_path):

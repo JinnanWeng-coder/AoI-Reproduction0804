@@ -1,15 +1,17 @@
 {
   "experiment": "E3-locked-test",
-  "version": 1,
+  "version": 2,
   "status": "candidate_requires_HPC_history_audit",
+  "candidate_revision_note": "Before any lock or pilot, replace v1 301-306 with 303-308 because 301/302 are reserved in all source selection_validation_seeds; prior blocked audit is preserved.",
   "candidate_worlds": [
-    301,
-    302,
     303,
     304,
     305,
-    306
+    306,
+    307,
+    308
   ],
+  "excluded_known_or_reserved_worlds": [8, 9, 10, 11, 12, 13, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 301, 302],
   "training_seeds": [
     8,
     9,

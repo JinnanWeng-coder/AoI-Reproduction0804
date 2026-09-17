@@ -288,7 +288,7 @@ def analyze(study_root: Path) -> dict:
 
 FIELD_NOTES = """# E3 字段与统计合同
 
-- 新世界 301–306 为预先固定候选，只有 `lock.json` 完成历史使用核查后才生效。训练独立重复仍仅 seeds 8–13（n=6）。combined/TDec 是两种价值学习配置。
+- 新世界 303–308 为修订后预先固定候选，排除源配置预留的301/302；只有 `lock.json` 完成历史使用核查后才生效。训练独立重复仍仅 seeds 8–13（n=6）。combined/TDec 是两种价值学习配置。
 - C1 `c1_world_agent.csv` 保存逐世界逐agent精确 sum/count。AoI为100×100槽；binary CAM与payload为每个scored episode末的100个agent-episode事件。每seed同agent先合并六世界，再取最差AoI最大值和CAM最小值。功率先逐槽从dBm转线性mW。
 - C2复用W1完整间隔定义；`reset_event`优先且与逐槽post-step AoI≈1逐元素核对。episode间连续、world间不连接、不滤V2V。连续复位 L=1；AoI cap不截断L。首次/末次复位外仅边界可见等待，不当完整间隔。无复位流只计一个M=10000观察窗；单复位无完整间隔，NA不填0。
 - 严格主阈值 L>100。报告原始长间隔计数、每万agent-slots频度、完整间隔占比以及流等权超阈值比例。完整间隔频数与共同CCDF阈值网格（0、5、50、100及全部观测L）可精确重建。事件加权按完整间隔合并；流等权先逐有完整间隔流算再等权，覆盖分母始终显式报告。两者均仅为有限窗内完整间隔分布。

@@ -7,6 +7,7 @@ import csv
 import json
 import os
 import re
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +26,7 @@ def protocol() -> dict:
     data = json.loads(PROTOCOL_FILE.read_text(encoding="utf-8"))
     assert data["experiment"] == "E3-locked-test" and len(data["policies"]) == 24
     assert len(data["candidate_worlds"]) == len(set(data["candidate_worlds"])) == 6
-    assert set(data["candidate_worlds"]).isdisjoint(set(range(8, 14)) | set(range(213, 219)))
+    assert set(data["candidate_worlds"]).isdisjoint(set(data["excluded_known_or_reserved_worlds"]))
     for i, cell in enumerate(data["policies"]):
         structure, variant, seed = cell["actor_structure"], cell["value_configuration"], cell["training_seed"]
         assert cell["cell_id"] == i and seed == data["training_seeds"][i % 6]
@@ -47,7 +48,9 @@ def result_root(study_root: Path) -> Path:
 def _prelock_directory_check(output: Path) -> None:
     if output.exists():
         allowed = {"world_use_audit.json", "source_inventory.json", "slurm_logs", "tmp", "cache"}
-        unexpected = sorted(path.name for path in output.iterdir() if path.name not in allowed)
+        unexpected = sorted(path.name for path in output.iterdir()
+                            if path.name not in allowed and not re.fullmatch(
+                                r"world_use_audit_previous_[0-9a-f]{7}\.json", path.name))
         if unexpected:
             raise ValueError(f"E3 root has existing unreviewed content: {unexpected}")
 
@@ -104,6 +107,9 @@ def _assert_source(study_root: Path, item: dict, check_payload: bool) -> dict:
         _require(config.get(key), value, f"{run}/{key}")
     _require(config.get("scenario", {}).get("id"), "p05_n04_g25", f"{run}/scenario")
     _require(config.get("mappo_variant", "combined"), item["value_configuration"], f"{run}/variant")
+    selection_worlds = [int(world) for world in config.get("selection_validation_seeds", [])]
+    if set(selection_worlds) & set(protocol()["candidate_worlds"]):
+        raise ValueError(f"{run}: candidate worlds overlap source selection_validation_seeds")
     sharing = item["actor_structure"] == "shared"
     _require(bool(config.get("mappo_actor_sharing", False)), sharing, f"{run}/sharing")
     for key, value in {"status": "complete", "algorithm": "mappo", "policy_final": "policy_final.pt"}.items():
@@ -129,6 +135,7 @@ def _assert_source(study_root: Path, item: dict, check_payload: bool) -> dict:
             "training_run_name": item["training_run_name"], "training_dir": str(run),
             "policy": str(policy), "policy_episode": 500,
             "training_commit": complete.get("reproduction_git_commit"),
+            "selection_validation_seeds": selection_worlds,
             "source_config_hash": complete.get("config_hash"),
             "payload_checked": check_payload}
 
@@ -162,13 +169,27 @@ def _world_values(value) -> set[int]:
     return set()
 
 
-def history_audit(study_root: Path) -> dict:
+def history_audit(study_root: Path, supersede_blocked_audit: bool = False) -> dict:
     """Structured evidence inventory; human must also review execution records."""
     output = result_root(study_root)
     _prelock_directory_check(output)
+    prior_path = output / "world_use_audit.json"
+    if prior_path.exists():
+        prior = _json(prior_path)
+        if not supersede_blocked_audit:
+            raise ValueError("existing world-use audit; explicit supersede of blocked prelock audit required")
+        if prior.get("status") != "BLOCKED" or prior.get("candidate_worlds") == protocol()["candidate_worlds"]:
+            raise ValueError("only a blocked audit for a different prelock candidate list may be superseded")
+        previous_commit = prior.get("commit")
+        if not isinstance(previous_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", previous_commit):
+            raise ValueError("prior audit has no valid commit identity")
+        backup = output / f"world_use_audit_previous_{previous_commit[:7]}.json"
+        if backup.exists():
+            raise FileExistsError(f"refusing to overwrite prior audit backup: {backup}")
+        shutil.copy2(prior_path, backup)
     candidates = set(protocol()["candidate_worlds"])
     study = Path(study_root).resolve()
-    roots = [study]
+    roots = [study, study.parent / "MAPPO_results"]
     roots += [candidate for candidate in (study.parents[1] / "MAPPO_results",
                                           study.parents[1] / "AoI-Reproduction0804" / "MAPPO_results")
               if candidate.exists()]
@@ -252,6 +273,10 @@ def create_lock(study_root: Path, confirm_reviewed: bool) -> dict:
     _require(audit.get("candidate_worlds"), protocol()["candidate_worlds"], "history world list")
     _require(audit.get("candidate_hits"), [], "history candidate hits")
     _require(audit.get("scan_errors"), [], "history scan errors")
+    study = Path(study_root).resolve()
+    required_roots = {str(study), str(study.parent / "MAPPO_results")}
+    if not required_roots.issubset(set(audit.get("scan_roots", []))):
+        raise ValueError("history audit did not cover study and diagnostic MAPPO_results roots")
     _require(sources.get("policy_count"), 24, "source policy count")
     _require(sources.get("all_payloads_checked"), True, "policy payload validation")
     if len(sources.get("sources", [])) != 24:
@@ -368,9 +393,10 @@ def main() -> int:
     parser.add_argument("--study-root", type=Path, required=True)
     parser.add_argument("--cell-id", type=int)
     parser.add_argument("--confirm-reviewed", action="store_true")
+    parser.add_argument("--supersede-blocked-audit", action="store_true")
     args = parser.parse_args()
     if args.command == "history-audit":
-        result = history_audit(args.study_root)
+        result = history_audit(args.study_root, args.supersede_blocked_audit)
     elif args.command == "source-preflight":
         result = source_preflight(args.study_root)
     elif args.command == "lock":
