@@ -108,7 +108,7 @@ class FrozenActorPolicy:
         )
 
     @torch.no_grad()
-    def act(self, observations: np.ndarray) -> np.ndarray:
+    def act(self, observations: np.ndarray, deterministic: bool = False) -> np.ndarray:
         observations = np.asarray(observations, dtype=np.float32)
         if observations.ndim != 2 or observations.shape[1] != int(self.source_config.state_dim):
             raise ValueError(
@@ -121,7 +121,7 @@ class FrozenActorPolicy:
         rb, mode, power = [], [], []
         for index in range(target_agents):
             actor = self.actors[0] if self.actor_sharing else self.actors[index]
-            sample = actor.sample(tensor[index:index + 1], deterministic=False)
+            sample = actor.sample(tensor[index:index + 1], deterministic=deterministic)
             rb.append(sample.rb.squeeze(0))
             mode.append(sample.mode.squeeze(0))
             power.append(sample.power.squeeze(0))
@@ -205,7 +205,19 @@ def evaluate_zero_shot(
     eval_seeds: Iterable[int] = DEFAULT_EVAL_SEEDS,
     eval_episodes: int = 100,
     reference_metrics: Path | None = None,
+    *,
+    action_repeat: int = 0,
+    deterministic: bool = False,
+    deployment: bool = False,
+    world_role: str | None = None,
 ) -> dict:
+    from analysis.deployment_rng import policy_seed, action_seed_words, exogenous_probe
+    if action_repeat < 0:
+        raise ValueError("action_repeat must be non-negative")
+    if world_role not in {None, "locked_new_worlds", "reused_development_worlds"}:
+        raise ValueError("invalid deployment world role")
+    if not deployment and (action_repeat != 0 or deterministic or world_role is not None):
+        raise ValueError("non-default execution requires deployment=True for unambiguous output identity")
     eval_seeds = tuple(int(seed) for seed in eval_seeds)
     if not eval_seeds or len(eval_seeds) != len(set(eval_seeds)) or int(eval_episodes) < 1:
         raise ValueError("eval_seeds must be unique and eval_episodes must be positive")
@@ -217,7 +229,8 @@ def evaluate_zero_shot(
         if not isinstance(payload, dict):
             raise RuntimeError("MAPPO policy payload must be a dictionary")
         run_dir, source_config, source_complete = _validate_mappo_policy_artifact(policy_path, payload)
-        if source_config.algorithm != "mappo" or source_config.mappo_variant != "tdec":
+        allowed_variants = {"tdec", "combined"} if deployment else {"tdec"}
+        if source_config.algorithm != "mappo" or source_config.mappo_variant not in allowed_variants:
             raise RuntimeError("zero-shot evaluation requires a TDec MAPPO policy")
         target_config = build_target_config(source_config, target_scenario, device)
         if target_scenario not in TARGETS and target_scenario != source_config.scenario.id:
@@ -228,6 +241,8 @@ def evaluate_zero_shot(
         eval_name = zero_shot_eval_id(
             target_config.scenario.id, eval_seeds, int(eval_episodes), int(target_config.eval_warmup_episodes)
         )
+        if deployment:
+            eval_name += f"_deployment_{'deterministic' if deterministic else 'stochastic'}_r{action_repeat}"
         eval_dir = output_root / target_config.scenario.id / structure / run_dir.name / eval_name
         if eval_dir.exists():
             raise FileExistsError(f"refusing to overwrite zero-shot evaluation: {eval_dir}")
@@ -240,29 +255,32 @@ def evaluate_zero_shot(
         snapshot = frozen.snapshot()
         eval_dir.mkdir(parents=True, exist_ok=False)
         raw_by_seed = []
+        exogenous = []
         for heldout_seed in eval_seeds:
-            policy_seed = int(np.random.SeedSequence([
-                int(source_config.seed), int(heldout_seed), POLICY_SEED_TAG
-            ]).generate_state(1, dtype=np.uint32)[0])
-            torch.manual_seed(policy_seed)
+            sampling_seed = policy_seed(int(source_config.seed), int(heldout_seed), action_repeat)
+            torch.manual_seed(sampling_seed)
             if resolved_device.type == "cuda":
-                torch.cuda.manual_seed_all(policy_seed)
+                torch.cuda.manual_seed_all(sampling_seed)
             environment.reset_world(heldout_seed)
+            initial_probe = exogenous_probe(environment) if deployment else None
             for warmup_index in range(int(target_config.eval_warmup_episodes)):
                 observations = environment.start_episode(warmup_index)
                 for _slot in range(target_config.steps_per_episode):
-                    actions = frozen.act(observations)
+                    actions = frozen.act(observations, deterministic=deterministic)
                     observations, _rg, _t1, _t2, _done, _info = environment.step(actions)
             seed_records = []
             for episode in range(int(eval_episodes)):
                 observations = environment.start_episode(int(target_config.eval_warmup_episodes) + episode)
                 episode_records = []
                 for _slot in range(target_config.steps_per_episode):
-                    actions = frozen.act(observations)
+                    actions = frozen.act(observations, deterministic=deterministic)
                     observations, rg, t1, t2, _done, info = environment.step(actions)
                     episode_records.append(_step_record(info, actions, rg, t1, t2, target_config))
                 seed_records.append(episode_records)
             raw_by_seed.append(seed_records)
+            if deployment:
+                exogenous.append({"world": heldout_seed, "initial": initial_probe,
+                                  "final": exogenous_probe(environment)})
         if not frozen.unchanged(snapshot):
             raise RuntimeError("frozen zero-shot evaluation modified actor parameters")
     finally:
@@ -288,7 +306,7 @@ def evaluate_zero_shot(
         **summarize_arrays(arrays, target_config.cam_bits),
         "status": "complete",
         "algorithm": "mappo",
-        "mappo_variant": "tdec",
+        "mappo_variant": source_config.mappo_variant,
         "actor_sharing": bool(source_config.mappo_actor_sharing),
         "actor_structure": structure,
         "actor_network_count": len(frozen.actors),
@@ -307,7 +325,14 @@ def evaluate_zero_shot(
         "policy_schema_version": payload.get("policy_schema_version"),
         "policy_episode": int(payload.get("episode", -1)),
         "training_source_commit": source_complete.get("reproduction_git_commit"),
-        "mappo_eval_mode": "stochastic",
+        "mappo_eval_mode": "deterministic" if deterministic else "stochastic",
+        "action_repeat": int(action_repeat),
+        "action_seed_words": [action_seed_words(source_config.seed, w, action_repeat, "mappo") for w in eval_seeds],
+        "policy_sampling_seeds": [policy_seed(source_config.seed, w, action_repeat) for w in eval_seeds],
+        "environment_seeds": list(eval_seeds),
+        "exogenous_probes": exogenous if deployment else None,
+        "event_source": "post_step_aoi_ms_isclose_1_verified_env_step",
+        "v2i_min": float(environment.v2i_min) if deployment else None,
         "external_action_noise_applicable": False,
         "eval_protocol": "sequential_warm",
         "eval_warmup_episodes": int(target_config.eval_warmup_episodes),
@@ -320,7 +345,9 @@ def evaluate_zero_shot(
         "action_intervention": "none",
         "diagnostic_evaluation": True,
         "is_formal_result": False,
-        "world_reuse_note": "worlds 213-218 are reused diagnostic worlds; this is not a new-world confirmation",
+        "world_role": world_role if deployment else "reused_development_worlds",
+        "world_reuse_note": ("D1: world role and any new-world lock are defined by the fixed batch manifest"
+                             if deployment else "worlds 213-218 are reused diagnostic worlds; this is not a new-world confirmation"),
         "cam_bits": float(target_config.cam_bits),
         "global_actor_weight": float(target_config.global_actor_weight),
         "raw_metric_axes": {

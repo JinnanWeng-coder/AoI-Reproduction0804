@@ -188,7 +188,20 @@ def evaluate_maddpg_e1(
     eval_episodes: int = EVAL_EPISODES,
     warmup_episodes: int = EVAL_WARMUP,
     expected_episode: int = CHECKPOINT_EPISODE,
+    *,
+    action_repeat: int = 0,
+    target_scenario: str | None = None,
+    source_override: dict | None = None,
+    deployment: bool = False,
+    world_role: str | None = None,
 ) -> dict[str, Any]:
+    from analysis.deployment_rng import action_seed_words, exogenous_probe
+    if action_repeat < 0:
+        raise ValueError("action_repeat must be non-negative")
+    if world_role not in {None, "locked_new_worlds", "reused_development_worlds"}:
+        raise ValueError("invalid deployment world role")
+    if not deployment and (action_repeat != 0 or target_scenario is not None or source_override is not None or world_role is not None):
+        raise ValueError("non-default execution requires deployment=True for unambiguous output identity")
     if algorithm not in ALGORITHMS:
         raise ValueError(f"unsupported MADDPG algorithm: {algorithm}")
     noise = float(noise)
@@ -202,14 +215,16 @@ def evaluate_maddpg_e1(
     if int(eval_episodes) < 1 or int(warmup_episodes) < 0:
         raise ValueError("eval_episodes must be positive")
 
-    source = resolve_maddpg_source_run(diagnostics_root, algorithm, seed)
+    source = source_override or resolve_maddpg_source_run(diagnostics_root, algorithm, seed)
     output_root = Path(output_root).resolve()
     eval_name = maddpg_eval_id(noise) if tuple(eval_seeds) == EVAL_SEEDS and int(eval_episodes) == EVAL_EPISODES and int(warmup_episodes) == EVAL_WARMUP else (
         f"eval_e1_latest{int(expected_episode)}_noise{'0p0' if noise == 0.0 else '0p3'}_"
         f"sequential_warm_warm{int(warmup_episodes)}_s{'-'.join(str(v) for v in eval_seeds)}_ep{int(eval_episodes)}"
     )
+    if deployment:
+        eval_name += f"_deployment_{target_scenario or SCENARIO}_r{action_repeat}"
     eval_dir = output_root / "evaluations" / source["canonical_run_name"] / eval_name
-    if eval_dir.exists() and (eval_dir / "EVAL_COMPLETE.json").is_file():
+    if not deployment and eval_dir.exists() and (eval_dir / "EVAL_COMPLETE.json").is_file():
         existing = json.loads((eval_dir / "EVAL_COMPLETE.json").read_text(encoding="utf-8"))
         if existing.get("status") == "complete" and existing.get("training_seed") == int(seed):
             existing["skipped_complete"] = True
@@ -237,6 +252,11 @@ def evaluate_maddpg_e1(
             raise ValueError("checkpoint config hash does not match reconstructed config")
 
         runtime_config = copy.deepcopy(training_config)
+        if target_scenario is not None:
+            from analysis.evaluate_mappo_zero_shot import build_target_config
+            if target_scenario not in {"p05_n04_g05", "p05_n04_g25", "p05_n04_g35"}:
+                raise ValueError("deployment supports P5 gaps 5/25/35 only")
+            runtime_config = build_target_config(training_config, target_scenario, device)
         runtime_config.device = str(device)
         runtime_config.is_formal_result = False
         environment, agents, learner, _replay, _metrics, resolved_device = _make_system(runtime_config)
@@ -252,10 +272,12 @@ def evaluate_maddpg_e1(
         eval_dir.parent.mkdir(parents=True, exist_ok=True)
         eval_dir.mkdir(parents=False, exist_ok=False)
         raw_records = []
+        exogenous = []
         for world in eval_seeds:
             environment.reset_world(int(world))
+            initial_probe = exogenous_probe(environment) if deployment else None
             action_noise_rng = np.random.default_rng(
-                np.random.SeedSequence([int(seed), int(world), ACTION_NOISE_TAG])
+                np.random.SeedSequence(action_seed_words(seed, world, action_repeat, "maddpg"))
             )
             for warmup_index in range(int(warmup_episodes)):
                 observations = environment.start_episode(warmup_index)
@@ -303,10 +325,14 @@ def evaluate_maddpg_e1(
                             "reward_global": np.float32(reward_global),
                             "reward_task1": np.asarray(reward_task1, dtype=np.float32),
                             "reward_task2": np.asarray(reward_task2, dtype=np.float32),
+                            **({"v2i_rate": np.asarray(info["v2i_rate"], dtype=np.float32)} if deployment else {}),
                         }
                     )
                 world_records.append(episode_records)
             raw_records.append(world_records)
+            if deployment:
+                exogenous.append({"world": world, "initial": initial_probe,
+                                  "final": exogenous_probe(environment)})
         if not _parameters_unchanged(agents, learner, snapshot):
             raise RuntimeError("MADDPG parameters or optimizer state changed during frozen evaluation")
     finally:
@@ -327,6 +353,10 @@ def evaluate_maddpg_e1(
         "reward_task1": _stack(raw_records, "reward_task1", np.float32),
         "reward_task2": _stack(raw_records, "reward_task2", np.float32),
     }
+    if deployment:
+        arrays["v2i_rate"] = _stack(raw_records, "v2i_rate", np.float32)
+        arrays["reset_event"] = np.isclose(arrays["aoi_ms"], 1.0, rtol=0.0, atol=1e-6)
+        arrays["v2i_attempt"] = arrays["mode"] == 0
     metrics = reduce_heldout_metrics(
         aoi=arrays["aoi_ms"],
         success=arrays["success"],
@@ -355,6 +385,16 @@ def evaluate_maddpg_e1(
         "checkpoint_episode": int(payload.get("episode", -1)),
         "checkpoint_completed": True,
         "noise_std": noise,
+        "action_repeat": int(action_repeat),
+        "action_seed_words": [action_seed_words(seed, w, action_repeat, "maddpg") for w in eval_seeds],
+        "environment_seeds": list(eval_seeds),
+        "exogenous_probes": exogenous if deployment else None,
+        "event_source": "post_step_aoi_ms_isclose_1_verified_env_step" if deployment else None,
+        "v2i_min": float(environment.v2i_min) if deployment else None,
+        "target_scenario": runtime_config.scenario.id,
+        "source_scenario": training_config.scenario.id,
+        "source_config_hash": training_config.canonical_hash(),
+        "training_source_commit": source["complete"].get("reproduction_git_commit"),
         "explore": False,
         "eval_protocol": "sequential_warm",
         "eval_seeds": list(eval_seeds),
@@ -371,7 +411,8 @@ def evaluate_maddpg_e1(
         "normalization_updated": False,
         "wrote_to_source_run": False,
         "data_role": "new",
-        "worlds_are_reused_development_worlds": True,
+        "world_role": world_role if deployment else "reused_development_worlds",
+        "worlds_are_reused_development_worlds": (world_role == "reused_development_worlds" if world_role else None) if deployment else True,
         "reproduction_git_commit": git.get("reproduction_git_commit"),
         "reproduction_git_branch": git.get("reproduction_git_branch"),
         "reproduction_git_dirty": git.get("reproduction_git_dirty"),
