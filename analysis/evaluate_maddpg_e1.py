@@ -29,7 +29,7 @@ from analysis.e1_contract import (
     resolve_maddpg_source_run,
     validate_latest500_payload,
 )
-from aoi_v2x_reproduction.config import config_from_dict
+from aoi_v2x_reproduction.config import config_from_dict, load_scenario
 from aoi_v2x_reproduction.runtime.checkpointing import capture_rng_state, restore_rng_state
 from aoi_v2x_reproduction.runtime.runner import _git_metadata, _make_system, _write_json
 
@@ -152,6 +152,30 @@ def _source_fingerprint(run_dir: Path) -> dict[str, Any]:
     return fingerprint
 
 
+def build_frozen_maddpg_target_config(source_config, target_scenario: str, device: str):
+    """Retarget an already validated frozen checkpoint, not a new training run.
+
+    Historical paper_faithful payloads are intentionally read-only compatible.
+    Do not relabel their profile or apply the active-training validator here.
+    The caller validates latest500/source identity/hash before using this copy.
+    """
+    if source_config.algorithm not in ALGORITHMS:
+        raise ValueError("frozen MADDPG target requires a MADDPG source")
+    if target_scenario not in {"p05_n04_g05", "p05_n04_g25", "p05_n04_g35"}:
+        raise ValueError("deployment supports P5 gaps 5/25/35 only")
+    target = copy.deepcopy(source_config)
+    target.scenario = load_scenario(target_scenario)
+    target.device = str(device)
+    target.is_formal_result = False
+    mismatches = [field for field in (
+        "state_dim", "action_dim", "number_agents", "n_rb", "n_modes",
+        "power_min_dbm", "power_max_dbm", "power_continuous",
+    ) if getattr(source_config, field) != getattr(target, field)]
+    if mismatches:
+        raise ValueError("source MADDPG and target spaces are incompatible: " + ", ".join(mismatches))
+    return target
+
+
 def evaluate_maddpg_e1_cell(
     cell_id: int,
     diagnostics_root: Path,
@@ -253,10 +277,7 @@ def evaluate_maddpg_e1(
 
         runtime_config = copy.deepcopy(training_config)
         if target_scenario is not None:
-            from analysis.evaluate_mappo_zero_shot import build_target_config
-            if target_scenario not in {"p05_n04_g05", "p05_n04_g25", "p05_n04_g35"}:
-                raise ValueError("deployment supports P5 gaps 5/25/35 only")
-            runtime_config = build_target_config(training_config, target_scenario, device)
+            runtime_config = build_frozen_maddpg_target_config(training_config, target_scenario, device)
         runtime_config.device = str(device)
         runtime_config.is_formal_result = False
         environment, agents, learner, _replay, _metrics, resolved_device = _make_system(runtime_config)

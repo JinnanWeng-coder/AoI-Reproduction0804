@@ -13,7 +13,7 @@ from analysis import evaluate_frozen_deployment as ev
 from analysis import summarize_frozen_deployment as su
 from analysis.deployment_rng import action_seed_words, policy_seed, exogenous_probe
 from analysis.submit_deployment import chunks, command
-from aoi_v2x_reproduction.config import resolve_config
+from aoi_v2x_reproduction.config import config_from_dict, resolve_config, validate_config
 from aoi_v2x_reproduction.envs.platoon import power_penalty
 
 
@@ -112,6 +112,12 @@ def test_batch_init_metadata_preflight_and_refuse_overwrite(tmp_path, monkeypatc
     for model in dc.MODELS:
         for seed in dc.SEEDS:
             src, _ = source(tmp_path / "sources", model, seed)
+            if model == "algorithm2":
+                # Match the actual historical source metadata, not just current defaults.
+                path = Path(src["run_dir"]) / "config.resolved.json"
+                raw = dc.read(path)
+                raw.update(profile="paper_faithful", semantic_version="paper_faithful_v4", mappo_actor_sharing=None)
+                dump(path, raw)
             supplied.append({"model_id": model, "training_seed": seed, "checkpoint": src["checkpoint"]["path"]})
     models = tmp_path / "models.json"
     dump(models, supplied)
@@ -120,7 +126,9 @@ def test_batch_init_metadata_preflight_and_refuse_overwrite(tmp_path, monkeypatc
     batch = Path(result["batch_root"])
     manifest, sources = dc.load_batch(batch)
     assert len(sources) == 24 and manifest["protocol"]["training_environment_steps"] == 50000
-    assert dc.preflight(batch)["payloads_checked"] is False
+    preflight = dc.preflight(batch)
+    assert preflight["payloads_checked"] is False
+    assert preflight["target_configs_checked"] == ["p05_n04_g05", dc.SCENARIO, "p05_n04_g35"]
     assert not (batch / "protocol/main.json").exists()
     assert dc.plan(batch, "pilot")["policy_world_repeat_count"] == 60
     with pytest.raises(ValueError, match="batch exists"):
@@ -356,9 +364,17 @@ def test_existing_mappo_loop_repeat_deterministic_and_combined_extension(tmp_pat
         assert not np.array_equal(a["action_normalized"], b["action_normalized"])
 
 
-def test_existing_maddpg_loop_noise_repeat_and_gap_adapter(tmp_path, monkeypatch):
+@pytest.mark.parametrize("historical", [False, True])
+def test_existing_maddpg_loop_noise_repeat_and_gap_adapter(tmp_path, monkeypatch, historical):
     from analysis import evaluate_maddpg_e1 as md
     src, cfg = source(tmp_path, "algorithm2")
+    if historical:
+        raw = cfg.to_dict()
+        raw.update(profile="paper_faithful", semantic_version="paper_faithful_v4", mappo_actor_sharing=None)
+        raw.pop("algorithm", None)  # Historical Algorithm 2 has no explicit algorithm.
+        cfg = config_from_dict(raw)
+        with pytest.raises(ValueError, match="active training requires profile"):
+            validate_config(cfg)
     class Agent:
         def __init__(self): self.actor = torch.nn.Linear(1, 1)
         def load_state_dict_full(self, state): pass
@@ -372,23 +388,39 @@ def test_existing_maddpg_loop_noise_repeat_and_gap_adapter(tmp_path, monkeypatch
     payload = {"config": cfg.to_dict(), "config_hash": cfg.canonical_hash(), "episode": 500,
                "completed": True, "algorithm": "modified_maddpg_tdec", "agents": [{}] * 5, "learner": {}}
     monkeypatch.setattr(md.torch, "load", lambda *a, **k: payload)
-    monkeypatch.setattr(md, "_make_system", lambda config: (FakeEnvironment(config), [Agent() for _ in range(5)], Learner(), None, None, torch.device("cpu")))
+    runtime_configs = []
+    def make_system(config):
+        runtime_configs.append(copy.deepcopy(config))
+        return FakeEnvironment(config), [Agent() for _ in range(5)], Learner(), None, None, torch.device("cpu")
+    monkeypatch.setattr(md, "_make_system", make_system)
     run = Path(src["run_dir"])
     override = {"run_dir": run, "resolved_run_dir": run, "checkpoint": Path(src["checkpoint"]["path"]),
                 "canonical_run_name": run.name, "historical_run_name": run.name, "algorithm_label": "algorithm2",
                 "is_symlink": False, "complete": src["complete"], "manifest": {}}
     results = []
-    for repeat, noise, gap in ((0, .3, dc.SCENARIO), (1, .3, dc.SCENARIO), (0, 0., dc.SCENARIO), (0, .3, "p05_n04_g05")):
+    for repeat, noise, gap in ((0, .3, dc.SCENARIO), (1, .3, dc.SCENARIO), (0, 0., dc.SCENARIO), (0, .3, "p05_n04_g05"), (0, .3, "p05_n04_g35")):
         result = md.evaluate_maddpg_e1("modified_maddpg_tdec", noise, 8, tmp_path, tmp_path / f"md_{repeat}_{noise}_{gap}",
                                       "cpu", [213], 1, 5, 500, action_repeat=repeat, target_scenario=gap,
                                       source_override=override, deployment=True)
         assert result["checkpoint_episode"] == 500 and result["optimizer_steps"] == 0
         assert result["source_scenario"] == dc.SCENARIO and result["target_scenario"] == gap
+        before, after = cfg.to_dict(), runtime_configs[-1].to_dict()
+        for key in set(before) | set(after):
+            if key not in {"scenario", "derived", "device", "is_formal_result"}:
+                assert before.get(key) == after.get(key), key
+        assert result["source_config_hash"] == cfg.canonical_hash()
+        assert after["profile"] == before["profile"]
         results.append(result)
     assert results[0]["exogenous_probes"] == results[1]["exogenous_probes"] == results[2]["exogenous_probes"]
     assert results[0]["action_seed_words"] != results[1]["action_seed_words"]
     with np.load(Path(results[0]["eval_dir"]) / "metrics.npz") as a:
         assert np.array_equal(a["reset_event"], a["aoi_ms"] == 1)
+    monkeypatch.setattr(md, "resolve_maddpg_source_run", lambda *a: override)
+    legacy = md.evaluate_maddpg_e1("modified_maddpg_tdec", .3, 8, tmp_path, tmp_path / "legacy_e1",
+                                  "cpu", [213], 1, 5, 500)
+    with np.load(Path(results[0]["eval_dir"]) / "metrics.npz") as new, np.load(Path(legacy["eval_dir"]) / "metrics.npz") as old:
+        for key in old.files:
+            assert np.array_equal(new[key], old[key]), key
 
 
 def test_world_lock_fixed_before_main_and_reserved_hits_preserved(tmp_path, monkeypatch):
@@ -408,6 +440,109 @@ def test_world_lock_fixed_before_main_and_reserved_hits_preserved(tmp_path, monk
     assert dc.plan(batch, "main")["policy_world_repeat_count"] == 2340
     with pytest.raises(ValueError, match="already fixed"):
         dc.lock_worlds(batch, [], reviewed=True, audit_name="world_use_audit_03")
+
+
+def test_frozen_maddpg_retarget_rejects_incompatible_spaces_without_mutating_source():
+    from analysis.evaluate_maddpg_e1 import build_frozen_maddpg_target_config
+    cfg = resolve_config(algorithm="modified_maddpg_tdec", scenario="p05_n04_g25")
+    cfg.profile = "paper_faithful"
+    before = copy.deepcopy(cfg.__dict__)
+    with pytest.raises(ValueError, match="P5 gaps"):
+        build_frozen_maddpg_target_config(cfg, "p07_n04_g25", "cpu")
+    cfg.scenario = resolve_config(scenario="p05_n06_g25").scenario
+    with pytest.raises(ValueError, match="state_dim"):
+        build_frozen_maddpg_target_config(cfg, dc.SCENARIO, "cpu")
+    cfg.scenario = before["scenario"]
+    assert cfg.__dict__ == before
+    target = build_frozen_maddpg_target_config(cfg, "p05_n04_g35", "cpu")
+    assert target.profile == "paper_faithful" and cfg.__dict__ == before
+    with pytest.raises(ValueError, match="active training requires profile"):
+        validate_config(target)
+
+
+def _reusable_pilot_fixture(tmp_path, monkeypatch):
+    sources = [source(tmp_path, model, seed)[0] for model in dc.MODELS for seed in dc.SEEDS]
+    models = tmp_path / "models.json"
+    dump(models, [{"model_id": s["model_id"], "training_seed": s["training_seed"], "checkpoint": s["checkpoint"]["path"]} for s in sources])
+    active_commit = [ev.REUSABLE_PILOT_COMMIT]
+    monkeypatch.setattr(dc, "code_check", lambda *a: active_commit[0])
+    monkeypatch.setattr(dc, "git", lambda *a: "")
+    diagnostics = tmp_path / "diagnostics"
+    old = Path(dc.init(diagnostics, "old", models_json=models)["batch_root"])
+    units = dc.phase_plan("pilot")["units"]
+    for unit in units:
+        if dc.MODELS[unit["model_id"]]["family"] == "mappo":
+            dump(ev.unit_dir(old, unit) / "DEPLOYMENT_COMPLETE.json", {"unit": unit, "valid": True})
+    base_rows = ev.reduce_arrays(synthetic_arrays(100), META, {})
+    def fake_accept(batch, unit, src, attempt, manifest):
+        marker = dc.read(ev.unit_dir(batch, unit, attempt) / "DEPLOYMENT_COMPLETE.json")
+        dc.require(marker == {"unit": unit, "valid": True}, "original completion changed")
+        record = {"attempt": attempt, "unit": unit, "implementation_commit": manifest["implementation_commit"],
+                  "native_evaluation_dir": str(ev.unit_dir(batch, unit, attempt) / "native")}
+        rows = [{**r, **unit, "family": src["family"], "implementation_commit": manifest["implementation_commit"], "data_role": "new"} for r in base_rows]
+        return record, rows, {"world": unit["world"], "rng_state": "fixed"}
+    monkeypatch.setattr(ev, "accept", fake_accept)
+    monkeypatch.setattr(su, "accept", fake_accept)
+    active_commit[0] = "repair_commit"
+    return diagnostics, old, models, units, sources
+
+
+def test_pilot_read_only_reuse_44_plus_16_and_original_provenance(tmp_path, monkeypatch):
+    diagnostics, old, models, units, sources = _reusable_pilot_fixture(tmp_path, monkeypatch)
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in old.rglob("*") if p.is_file()}
+    result = dc.init(diagnostics, "repaired", models_json=models, reuse_pilot=old)
+    batch = Path(result["batch_root"])
+    assert result["pilot_reused_units"] == 44 and result["pilot_required_new_units"] == 16
+    assert not list((batch / "evaluations").rglob("*"))
+    manifest, _ = dc.load_batch(batch)
+    dump(batch / "protocol/preflight_payload.json", {"technical_status": "PASS", "payloads_checked": True, "implementation_commit": "repair_commit"})
+    record = ev.execute(batch, "pilot", 0, check_only=True)
+    assert record["skipped_complete"] and record["implementation_commit"] == ev.REUSABLE_PILOT_COMMIT
+    # Only the 16 formerly failed Algorithm 2 units need new accepted attempts.
+    for unit in units:
+        if dc.MODELS[unit["model_id"]]["family"] != "mappo":
+            dump(ev.unit_dir(batch, unit) / "DEPLOYMENT_COMPLETE.json", {"unit": unit, "valid": True})
+    verification = su.summarize(batch, "pilot", make_plots=False)
+    assert verification["technical_status"] == "PASS"
+    assert verification["new_policy_world_repeats"] == 16 and verification["reused_policy_world_repeats"] == 44
+    assert verification["policy_world_repeats"] == 60 and verification["platoon_rows"] == 300
+    assert verification["scored_agent_slots"] == 3000000
+    rows = ev.csv_read(batch / "analysis/pilot/a01/world_repeat_platoon.csv")
+    assert sum(r["data_role"] == "reused" for r in rows) == 220
+    assert {r["implementation_commit"] for r in rows if r["data_role"] == "reused"} == {ev.REUSABLE_PILOT_COMMIT}
+    assert {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in old.rglob("*") if p.is_file()} == before
+    unit = units[0]
+    src = next(s for s in sources if (s["model_id"], s["training_seed"]) == (unit["model_id"], unit["training_seed"]))
+    duplicate = ev.unit_dir(batch, unit) / "native/EVAL_COMPLETE.json"
+    dump(duplicate, {})
+    with pytest.raises(ValueError, match="duplicate newly evaluated"):
+        ev.reused_pilot_unit(batch, unit, src, manifest)
+    duplicate.unlink()
+    dump(ev.unit_dir(old, unit) / "DEPLOYMENT_COMPLETE.json", {"unit": unit, "valid": False})
+    with pytest.raises(ValueError, match="completion changed"):
+        ev.reused_pilot_unit(batch, unit, src, manifest)
+
+
+@pytest.mark.parametrize("fault", ["missing", "source", "code", "old_commit", "maddpg_native"])
+def test_pilot_reuse_fails_closed(tmp_path, monkeypatch, fault):
+    diagnostics, old, models, units, sources = _reusable_pilot_fixture(tmp_path, monkeypatch)
+    if fault == "missing":
+        (ev.unit_dir(old, units[0]) / "DEPLOYMENT_COMPLETE.json").unlink()
+    elif fault == "source":
+        changed = dc.read(old / "protocol/sources.json")
+        changed[0]["training_commit"] = "other"
+        dump(old / "protocol/sources.json", changed)
+    elif fault == "code":
+        monkeypatch.setattr(dc, "git", lambda *a: "analysis/evaluate_mappo_zero_shot.py")
+    elif fault == "old_commit":
+        changed = dc.read(old / "protocol/manifest.json")
+        changed["implementation_commit"] = "unapproved"
+        dump(old / "protocol/manifest.json", changed)
+    else:
+        dump(ev.unit_dir(old, units[36]) / "native/EVAL_COMPLETE.json", {})
+    with pytest.raises(ValueError):
+        dc.init(diagnostics, "blocked", models_json=models, reuse_pilot=old)
+    assert not list(diagnostics.glob("actor-sharing-study/D1-frozen-deployment/P5_N4_gap25/blocked/protocol/reused_pilot.json"))
 
 
 def test_summary_pipeline_full_synthetic_pilot_and_no_missing_units(tmp_path, monkeypatch):

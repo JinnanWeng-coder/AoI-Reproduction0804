@@ -192,7 +192,7 @@ def pack_inventory(path):
     return rows
 
 
-def init(diagnostics, batch_id, models_json=None, evidence_pack=None, addendum=None):
+def init(diagnostics, batch_id, models_json=None, evidence_pack=None, addendum=None, reuse_pilot=None):
     require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", batch_id), "unsafe batch ID")
     commit = code_check()
     diagnostics = Path(diagnostics).resolve()
@@ -245,7 +245,12 @@ def init(diagnostics, batch_id, models_json=None, evidence_pack=None, addendum=N
     write(batch / "protocol/sources.json", sources)
     for phase in ("pilot", "gap-transfer"):
         write(batch / f"protocol/{phase}.json", phase_plan(phase))
+    if reuse_pilot is not None:
+        from analysis.evaluate_frozen_deployment import register_reused_pilot
+        register_reused_pilot(batch, reuse_pilot)
     return {"batch_root": str(batch), "status": "METADATA_READY", "pilot_units": 60,
+            "pilot_reused_units": 44 if reuse_pilot is not None else 0,
+            "pilot_required_new_units": 16 if reuse_pilot is not None else 60,
             "main_units_after_lock": 2340, "gap_transfer_units": 144, "source_models": 24}
 
 
@@ -279,13 +284,21 @@ def plan(batch, phase):
 
 
 def preflight(batch, load_payload=False):
+    from aoi_v2x_reproduction.config import config_from_dict
+    from analysis.evaluate_maddpg_e1 import build_frozen_maddpg_target_config
+    from analysis.evaluate_mappo_zero_shot import build_target_config
     manifest, sources = load_batch(batch)
     for identity in manifest["input_packs"].values():
         require(file_identity(identity["path"]) == identity, f"input evidence pack changed: {identity['path']}")
     for source in sources:
         source_check(source, payload=load_payload)
+        cfg = config_from_dict(source["config"])
+        builder = build_frozen_maddpg_target_config if source["family"] == "maddpg" else build_target_config
+        for target in ("p05_n04_g05", SCENARIO, "p05_n04_g35"):
+            builder(cfg, target, "cpu")  # Config-only check, no environment or rollout.
     result = {"technical_status": "PASS", "implementation_commit": manifest["implementation_commit"],
               "source_models": len(sources), "payloads_checked": load_payload,
+              "target_configs_checked": ["p05_n04_g05", SCENARIO, "p05_n04_g35"],
               "protocol": PROTOCOL, "no_training": True}
     if load_payload:
         dest = Path(batch) / "protocol/preflight_payload.json"
@@ -405,6 +418,7 @@ def main(argv=None):
     p.add_argument("--models-json", type=Path)
     p.add_argument("--evidence-pack", type=Path)
     p.add_argument("--metadata-addendum", type=Path)
+    p.add_argument("--reuse-pilot", type=Path, help="Read-only reuse of the 44 MAPPO units from the original pilot commit")
     p = sub.add_parser("preflight")
     p.add_argument("--batch-root", type=Path, required=True)
     p.add_argument("--load-payload", action="store_true")
@@ -420,7 +434,7 @@ def main(argv=None):
     p.add_argument("--audit-name", default="world_use_audit")
     args = parser.parse_args(argv)
     if args.command == "init":
-        result = init(args.diagnostics_root, args.batch_id, args.models_json, args.evidence_pack, args.metadata_addendum)
+        result = init(args.diagnostics_root, args.batch_id, args.models_json, args.evidence_pack, args.metadata_addendum, args.reuse_pilot)
     elif args.command == "preflight":
         result = preflight(args.batch_root, args.load_payload)
     elif args.command == "lock-worlds":

@@ -19,3 +19,5 @@
 - 全部raw NPZ/checkpoint/完整轨迹留服务器；精简证据含来源、完成记录、累计量CSV、各级摘要、verification、报告及PNG。没有修改历史provenance或正式旧表。
 
 本地能确认合成数据、薄适配接线、统计归约与脚本语法；真实checkpoint加载、实际GPU rollout、Slurm资源和正式产物验收需服务器记录支持。
+
+技术修复说明：历史Algorithm 2的paper_faithful/paper_faithful_v4是来源身份，不会被改名为当前训练profile；冻结目标派生不调用active-training校验，只改变目标scenario与运行控制并验收空间兼容。原pilot的44个MAPPO单元可在新的修复批次中经重新验收后只读引用；新执行仅16个MADDPG单元，总pilot覆盖仍为60。原评估commit和完成记录保留，分析commit另列；复用不产生新训练或新rollout。

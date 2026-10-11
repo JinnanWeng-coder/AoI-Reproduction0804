@@ -191,6 +191,51 @@ export AOI_ATTEMPT=a02 AOI_RETRY_REASON='记录真实失败原因'
 后处理失败用新的 analysis attempt。缺模型、源数据或元数据时报告最小缺口，不训练、不自动补评估其他实验。
 Grok回传：完整SHA、batch路径、固定world列表、所有JOB_ID、sacct资源/退出信息、各阶段verification、归档路径及任何未通过项。
 
+## 7. 原 pilot 的 MADDPG profile 技术修复与只读复用
+
+原提交 `3258d35b66dbc00f4a987a76159e8a7167cb6413` 的44个MAPPO单元已经完成；Algorithm 2的16个单元（36–51）在rollout前失败。
+原因是历史`paper_faithful`配置误入MAPPO目标派生函数的active-training校验。
+修复后的MADDPG目标派生保留原profile/semantic_version和全部有效配置，只改变目标scenario、device和is_formal_result，检查动作/观测/agent兼容性。
+不把历史profile重命名成reproduction_baseline，不放宽config.py训练校验。
+新preflight在不实例化环境的前提下检查24个源模型的gap5/25/35目标配置派生。
+
+旧checkout、旧batch、44个完成标记及16个失败现场全部只读保留。先按第1节安全同步到本轮修复提交，创建新的固定SHA execution worktree；**不要更新旧checkout，也不要编辑旧manifest的commit**。
+然后执行以下修复专用命令（仅HPC Grok执行）：
+
+```bash
+export OLD_BATCH="$DIAGNOSTICS_ROOT/actor-sharing-study/D1-frozen-deployment/P5_N4_gap25/deploy_20261011T081733_25999"
+export EVIDENCE_PACK="$("$PYTHON_BIN" -c 'import json,sys; from pathlib import Path; print(json.loads((Path(sys.argv[1])/"protocol/manifest.json").read_text())["input_packs"]["evidence_pack"]["path"])' "$OLD_BATCH")"
+export METADATA_ADDENDUM="$("$PYTHON_BIN" -c 'import json,sys; from pathlib import Path; print(json.loads((Path(sys.argv[1])/"protocol/manifest.json").read_text())["input_packs"]["metadata_addendum"]["path"])' "$OLD_BATCH")"
+export BATCH_ID="deploy_repair_$(date -u +%Y%m%dT%H%M%S)_${RANDOM}"
+export AOI_BATCH_ROOT="$DIAGNOSTICS_ROOT/actor-sharing-study/D1-frozen-deployment/P5_N4_gap25/$BATCH_ID"
+export TMPDIR="$AOI_BATCH_ROOT/tmp" XDG_CACHE_HOME="$AOI_BATCH_ROOT/cache" MPLCONFIGDIR="$AOI_BATCH_ROOT/cache/matplotlib"
+export TORCH_HOME="$AOI_BATCH_ROOT/cache/torch" CUDA_CACHE_PATH="$AOI_BATCH_ROOT/cache/cuda"
+"$PYTHON_BIN" -B -m analysis.deployment_contract init \
+  --diagnostics-root "$DIAGNOSTICS_ROOT" --batch-id "$BATCH_ID" \
+  --evidence-pack "$EVIDENCE_PACK" --metadata-addendum "$METADATA_ADDENDUM" --reuse-pilot "$OLD_BATCH"
+"$PYTHON_BIN" -B -m analysis.deployment_contract preflight --batch-root "$AOI_BATCH_ROOT" --load-payload
+"$PYTHON_BIN" -B -m analysis.summarize_frozen_deployment evidence-regression --evidence-pack "$EVIDENCE_PACK"
+export AOI_DEVICE=cuda:0 AOI_ATTEMPT=a01 AOI_TASK_OFFSET=0
+unset AOI_RETRY_REASON
+export REPAIR_JOB="$(sbatch --parsable --array=36-51%6 --partition=Q10 --gres=gpu:l20:1 \
+  --cpus-per-task=4 --mem=16G --time=02:00:00 --export=ALL \
+  --output="$AOI_BATCH_ROOT/slurm_logs/%x_%A_%a.out" --error="$AOI_BATCH_ROOT/slurm_logs/%x_%A_%a.err" \
+  hpc/aoi_deployment_pilot.sbatch)"
+export AOI_PHASE=pilot AOI_ANALYSIS_ATTEMPT=a01 AOI_EVIDENCE_PACK="$EVIDENCE_PACK"
+export REPAIR_SUMMARY_JOB="$(sbatch --parsable --dependency="afterok:${REPAIR_JOB%%;*}" --export=ALL \
+  --output="$AOI_BATCH_ROOT/slurm_logs/%x_%j.out" --error="$AOI_BATCH_ROOT/slurm_logs/%x_%j.err" \
+  hpc/aoi_deployment_summary.sbatch)"
+```
+
+`init --reuse-pilot`限定原3258d35 pilot，要求全部24个来源及输入包身份一致、44个MAPPO完整键/数组/累积量重新验收通过、原MADDPG没有原生完成。
+它检查MAPPO执行、reward记录、环境和动作RNG代码相对原commit未变，写新`protocol/reused_pilot.json`引用旧run，**不复制NPZ、不回写旧provenance**。
+任一缺口阻止登记，不自动重跑44个MAPPO。新任务仅36–51，共16次policy-world-repeat。
+汇总自动读取旧44+新16；逐流保留原评估commit，completion_records另列analysis implementation commit、evaluation_implementation_commit、data_role和reused_from_batch。
+verification应为technical_status=PASS、policy_world_repeats=60、new_policy_world_repeats=16、reused_policy_world_repeats=44、300行、3m scored agent-slots、30000 CAM deadline。
+使用sacct检查16个task和CPU summary；PASS后才按第6节export pilot。失败保留新旧现场并报告，不修改容差、seed或超参。
+本次技术修复交接只恢复pilot并验收；不顺带lock-worlds、提交main/gap-transfer或新训练。
+本地105项与服务器48项来自不同测试选择，不能写成服务器已通过105项；各自保留真实命令、数量及日志。
+
 ## 本地核验入口
 
 ```bash

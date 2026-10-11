@@ -232,6 +232,77 @@ def _check_csv(path, rows):
                 dc.require(left[key] == ("" if value is None else str(value)), f"cumulative CSV identity: {key}")
 
 
+REUSABLE_PILOT_COMMIT = "3258d35b66dbc00f4a987a76159e8a7167cb6413"
+
+
+def _reuse_inputs(batch, previous_batch):
+    """Narrow repair bridge: old MAPPO execution code must be unchanged."""
+    manifest, sources = dc.load_batch(batch)
+    old_manifest, old_sources = dc.load_batch(previous_batch, check_code=False)
+    dc.require(Path(batch).resolve() != Path(previous_batch).resolve(), "reuse requires a new batch")
+    dc.require(old_manifest["implementation_commit"] == REUSABLE_PILOT_COMMIT,
+               "reuse is limited to the original 3258d35 pilot")
+    dc.require(not dc.git("diff", "--name-only", REUSABLE_PILOT_COMMIT, "HEAD", "--",
+                         "aoi_v2x_reproduction", "analysis/evaluate_mappo_zero_shot.py",
+                         "analysis/evaluate_mappo_feasibility_reward.py",
+                         "analysis/evaluate_mappo_power_intervention.py", "analysis/deployment_rng.py"),
+               "MAPPO execution/environment/RNG code changed; cannot reuse this pilot")
+    by_key = lambda entries: {(s["model_id"], s["training_seed"]): s for s in entries}
+    dc.require(by_key(sources) == by_key(old_sources), "pilot reuse source identity/config mismatch")
+    dc.require(manifest["diagnostics_root"] == old_manifest["diagnostics_root"] and
+               manifest["input_packs"] == old_manifest["input_packs"], "pilot reuse input mapping changed")
+    dc.require(dc.plan(previous_batch, "pilot") == dc.phase_plan("pilot"), "original pilot plan changed")
+    return manifest, sources, old_manifest
+
+
+def register_reused_pilot(batch, previous_batch):
+    manifest, sources, old_manifest = _reuse_inputs(batch, previous_batch)
+    dc.require(not any((Path(batch) / "evaluations/pilot").glob("unit_*")), "register reuse before any new pilot unit")
+    records = {}
+    for unit in dc.phase_plan("pilot")["units"]:
+        parent = unit_dir(previous_batch, unit).parent
+        completed = list(parent.glob("a*/DEPLOYMENT_COMPLETE.json"))
+        source = next(s for s in sources if (s["model_id"], s["training_seed"]) == (unit["model_id"], unit["training_seed"]))
+        if source["family"] != "mappo":
+            dc.require(not completed and not list(parent.rglob("EVAL_COMPLETE.json")),
+                       "old MADDPG completion exists; this repair expects 16 pre-rollout failures")
+            continue
+        dc.require(len(completed) == 1, f"reused MAPPO unit {unit['unit_id']} requires one accepted attempt")
+        dc.source_check(source)
+        record, _, _ = accept(previous_batch, unit, source, completed[0].parent.name, old_manifest)
+        records[str(unit["unit_id"])] = record
+    dc.require(len(records) == 44, "exactly 44 original MAPPO pilot units required")
+    dc.write(Path(batch) / "protocol/reused_pilot.json", {
+        "previous_batch_root": str(Path(previous_batch).resolve()),
+        "previous_implementation_commit": old_manifest["implementation_commit"],
+        "implementation_commit": manifest["implementation_commit"], "records": records,
+        "reused_policy_world_repeats": 44, "required_new_policy_world_repeats": 16,
+        "raw_data_copied": False, "historical_provenance_modified": False})
+
+
+def reused_pilot_unit(batch, unit, source, manifest):
+    reference = Path(batch) / "protocol/reused_pilot.json"
+    if unit["phase"] != "pilot" or not reference.exists():
+        return None
+    refs = dc.read(reference)
+    expected_ids = {str(u["unit_id"]) for u in dc.phase_plan("pilot")["units"] if dc.MODELS[u["model_id"]]["family"] == "mappo"}
+    dc.require(refs["implementation_commit"] == manifest["implementation_commit"] and
+               refs["previous_implementation_commit"] == REUSABLE_PILOT_COMMIT and
+               set(refs["records"]) == expected_ids, "invalid reused pilot mapping")
+    if str(unit["unit_id"]) not in refs["records"]:
+        return None
+    previous_batch = Path(refs["previous_batch_root"])
+    _, _, old_manifest = _reuse_inputs(batch, previous_batch)
+    dc.require(not list(unit_dir(batch, unit).parent.glob("a*/DEPLOYMENT_COMPLETE.json")) and
+               not list(unit_dir(batch, unit).parent.rglob("EVAL_COMPLETE.json")),
+               "duplicate newly evaluated and reused MAPPO unit")
+    saved = refs["records"][str(unit["unit_id"])]
+    record, rows, probe = accept(previous_batch, unit, source, saved["attempt"], old_manifest)
+    dc.require(record == saved, "original pilot completion changed after reuse registration")
+    return ({**record, "reused_from_batch": str(previous_batch)},
+            [{**r, "data_role": "reused"} for r in rows], probe)
+
+
 def execute(batch, phase, unit_id, device="cpu", attempt="a01", reason=None, accept_existing=False, check_only=False):
     manifest, sources = dc.load_batch(batch)
     preflight = dc.read(Path(batch) / "protocol/preflight_payload.json")
@@ -242,6 +313,9 @@ def execute(batch, phase, unit_id, device="cpu", attempt="a01", reason=None, acc
     unit = units[unit_id]
     source = next(s for s in sources if (s["model_id"], s["training_seed"]) == (unit["model_id"], unit["training_seed"]))
     dc.source_check(source)
+    reused = reused_pilot_unit(batch, unit, source, manifest)
+    if reused is not None:
+        return {**reused[0], "skipped_complete": True}
     dest = unit_dir(batch, unit, attempt)
     # One accepted source/key across attempts; never count or run it twice.
     accepted = list(dest.parent.glob("a*/DEPLOYMENT_COMPLETE.json")) if dest.parent.exists() else []

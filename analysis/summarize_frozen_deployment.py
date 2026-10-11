@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from analysis import deployment_contract as dc
-from analysis.evaluate_frozen_deployment import (SUM_METRICS, accept, csv_write, csv_read, unit_dir)
+from analysis.evaluate_frozen_deployment import (SUM_METRICS, accept, csv_write, csv_read, unit_dir, reused_pilot_unit)
 from analysis.mappo_b1_accounting import T95
 
 GROUP = ("condition", "model_id", "target_scenario", "training_seed")
@@ -324,15 +324,22 @@ def summarize(batch, phase, attempt="a01", evidence_pack=None, make_plots=True):
         for unit in data["units"]:
             source = next(s for s in sources if (s["model_id"], s["training_seed"]) == (unit["model_id"], unit["training_seed"]))
             dc.source_check(source)
-            parent = unit_dir(batch, unit).parent
-            completed = list(parent.glob("a*/DEPLOYMENT_COMPLETE.json"))
-            dc.require(len(completed) == 1, f"unit {unit['unit_id']} requires exactly one accepted attempt")
-            record, unit_rows, probe = accept(batch, unit, source, completed[0].parent.name, manifest)
+            reused = reused_pilot_unit(batch, unit, source, manifest)
+            if reused is None:
+                parent = unit_dir(batch, unit).parent
+                completed = list(parent.glob("a*/DEPLOYMENT_COMPLETE.json"))
+                dc.require(len(completed) == 1, f"unit {unit['unit_id']} requires exactly one accepted attempt")
+                record, unit_rows, probe = accept(batch, unit, source, completed[0].parent.name, manifest)
+            else:
+                record, unit_rows, probe = reused
             rows.extend(unit_rows)
             records.append({**unit, "attempt": record["attempt"], "technical_status": "PASS",
                             "native_evaluation_dir": record["native_evaluation_dir"],
                             "source_checkpoint": source["checkpoint"]["path"], "training_commit": source["training_commit"],
                             "implementation_commit": manifest["implementation_commit"],
+                            "evaluation_implementation_commit": record.get("implementation_commit", manifest["implementation_commit"]),
+                            "data_role": "reused" if record.get("reused_from_batch") else "new",
+                            "reused_from_batch": record.get("reused_from_batch"),
                             **{k: record.get(k) for k in ("slurm_job_id", "slurm_array_job_id", "slurm_array_task_id")}})
             key = (unit["target_scenario"], unit["world"])
             if key in probes:
@@ -370,6 +377,8 @@ def summarize(batch, phase, attempt="a01", evidence_pack=None, make_plots=True):
             plots(tables_for_plots, output)
         (output / "report_cn.md").write_text(
             f"# 冻结部署技术汇总\n\n阶段：{phase}；policy-world-repeat={len(data['units'])}；车队累积量行数={len(rows)}。\n\n"
+            f"本批新执行={sum(r['data_role'] == 'new' for r in records)}；只读复用={sum(r['data_role'] == 'reused' for r in records)}。"
+            "复用单元保留原评估commit、路径和完成记录，不复制原始数组、不新增策略执行计数。\n\n"
             "scene-first 在同一 world/车队合并 repeats 的 sum/count，再分别取最大 AoI 和最小 CAM；两者可来自不同车队。"
             "legacy 先跨 world 合并每个车队，再取各自极值。所有训练 seed 保留；训练 seed 是推断重复单位。\n\n"
             "业务水平、跨 world sample SD、跨 seed sample SD、动作 repeat sample SD 单独报告，不能相加或作为因果分解。"
@@ -392,6 +401,8 @@ def summarize(batch, phase, attempt="a01", evidence_pack=None, make_plots=True):
         result = {"technical_status": "PASS", "claim_support": "NOT_ASSESSED", "phase": phase,
                   "implementation_commit": manifest["implementation_commit"], "new_training_runs": 0,
                   "policy_world_repeats": len(data["units"]), "platoon_rows": len(rows),
+                  "new_policy_world_repeats": sum(r["data_role"] == "new" for r in records),
+                  "reused_policy_world_repeats": sum(r["data_role"] == "reused" for r in records),
                   "scored_agent_slots": sum(r["slot_count"] for r in rows),
                   "cam_deadlines": sum(r["cam_episode_count"] for r in rows),
                   "training_seeds": data["training_seeds"], "worlds": data["worlds"],
