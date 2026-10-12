@@ -161,8 +161,8 @@ def build_frozen_maddpg_target_config(source_config, target_scenario: str, devic
     """
     if source_config.algorithm not in ALGORITHMS:
         raise ValueError("frozen MADDPG target requires a MADDPG source")
-    if target_scenario not in {"p05_n04_g05", "p05_n04_g25", "p05_n04_g35"}:
-        raise ValueError("deployment supports P5 gaps 5/25/35 only")
+    if target_scenario not in {"p05_n04_g05", "p05_n04_g15", "p05_n04_g25", "p05_n04_g35"}:
+        raise ValueError("deployment supports P5 gaps 5/15/25/35 only")
     target = copy.deepcopy(source_config)
     target.scenario = load_scenario(target_scenario)
     target.device = str(device)

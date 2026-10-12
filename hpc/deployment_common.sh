@@ -14,4 +14,4 @@ export TMPDIR="$AOI_BATCH_ROOT/tmp/$task_token" XDG_CACHE_HOME="$AOI_BATCH_ROOT/
 export MPLCONFIGDIR="$XDG_CACHE_HOME/matplotlib" TORCH_HOME="$XDG_CACHE_HOME/torch" CUDA_CACHE_PATH="$XDG_CACHE_HOME/cuda"
 mkdir -p "$TMPDIR" "$MPLCONFIGDIR" "$TORCH_HOME" "$CUDA_CACHE_PATH"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}" MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}" OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
-"$PYTHON_BIN" -B -c 'import sys; from pathlib import Path; from analysis.deployment_contract import load_batch; m,_=load_batch(Path(sys.argv[1])); assert m["implementation_commit"] == sys.argv[2]' "$AOI_BATCH_ROOT" "$AOI_EXPECTED_COMMIT"
+"$PYTHON_BIN" -B -c 'import sys,os,importlib; from pathlib import Path; c=importlib.import_module(os.environ.get("AOI_CONTRACT_MODULE","analysis.deployment_contract")); m,_=c.load_batch(Path(sys.argv[1])); assert m["implementation_commit"] == sys.argv[2]' "$AOI_BATCH_ROOT" "$AOI_EXPECTED_COMMIT"

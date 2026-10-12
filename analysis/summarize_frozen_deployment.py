@@ -311,10 +311,10 @@ def plots(tables, output):
             plt.close(fig)
 
 
-def summarize(batch, phase, attempt="a01", evidence_pack=None, make_plots=True):
+def summarize(batch, phase, attempt="a01", evidence_pack=None, make_plots=True, *, contract=dc, extension=None):
     dc.require(re.fullmatch(r"a[0-9]{2,4}", attempt), "unsafe analysis attempt")
-    manifest, sources = dc.load_batch(batch)
-    data = dc.plan(batch, phase)
+    manifest, sources = contract.load_batch(batch)
+    data = contract.plan(batch, phase)
     output = Path(batch) / "analysis" / phase / attempt
     output.mkdir(parents=True, exist_ok=False)
     rows, records, probes = [], [], {}
@@ -411,6 +411,8 @@ def summarize(batch, phase, attempt="a01", evidence_pack=None, make_plots=True):
         if phase == "gap-transfer":
             result.update({"reused_mappo_gap_evaluation_cells": 24, "reused_mappo_policy_worlds": 144,
                            "reused_mappo_platoon_rows": 720, "new_mappo_evaluations": 0})
+        if extension is not None:
+            result.update(extension(rows, tables, output, manifest, sources))
         dc.code_check(manifest["implementation_commit"])
         dc.write(output / "verification.json", result)
         return result

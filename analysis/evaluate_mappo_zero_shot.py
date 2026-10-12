@@ -233,7 +233,9 @@ def evaluate_zero_shot(
         if source_config.algorithm != "mappo" or source_config.mappo_variant not in allowed_variants:
             raise RuntimeError("zero-shot evaluation requires a TDec MAPPO policy")
         target_config = build_target_config(source_config, target_scenario, device)
-        if target_scenario not in TARGETS and target_scenario != source_config.scenario.id:
+        if target_scenario not in TARGETS and target_scenario != source_config.scenario.id and not (
+            deployment and target_scenario == "p05_n04_g15"
+        ):
             raise ValueError(f"unsupported zero-shot target scenario: {target_scenario}")
         if target_config.eval_protocol != "sequential_warm" or int(target_config.eval_warmup_episodes) != 5:
             raise RuntimeError("unexpected source evaluation protocol")

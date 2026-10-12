@@ -398,7 +398,7 @@ def test_existing_maddpg_loop_noise_repeat_and_gap_adapter(tmp_path, monkeypatch
                 "canonical_run_name": run.name, "historical_run_name": run.name, "algorithm_label": "algorithm2",
                 "is_symlink": False, "complete": src["complete"], "manifest": {}}
     results = []
-    for repeat, noise, gap in ((0, .3, dc.SCENARIO), (1, .3, dc.SCENARIO), (0, 0., dc.SCENARIO), (0, .3, "p05_n04_g05"), (0, .3, "p05_n04_g35")):
+    for repeat, noise, gap in ((0, .3, dc.SCENARIO), (1, .3, dc.SCENARIO), (0, 0., dc.SCENARIO), (0, .3, "p05_n04_g05"), (0, .3, "p05_n04_g35"), (0, .3, "p05_n04_g15")):
         result = md.evaluate_maddpg_e1("modified_maddpg_tdec", noise, 8, tmp_path, tmp_path / f"md_{repeat}_{noise}_{gap}",
                                       "cpu", [213], 1, 5, 500, action_repeat=repeat, target_scenario=gap,
                                       source_override=override, deployment=True)

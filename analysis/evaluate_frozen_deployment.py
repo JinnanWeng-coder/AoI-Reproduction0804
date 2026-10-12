@@ -303,12 +303,12 @@ def reused_pilot_unit(batch, unit, source, manifest):
             [{**r, "data_role": "reused"} for r in rows], probe)
 
 
-def execute(batch, phase, unit_id, device="cpu", attempt="a01", reason=None, accept_existing=False, check_only=False):
-    manifest, sources = dc.load_batch(batch)
+def execute(batch, phase, unit_id, device="cpu", attempt="a01", reason=None, accept_existing=False, check_only=False, *, contract=dc):
+    manifest, sources = contract.load_batch(batch)
     preflight = dc.read(Path(batch) / "protocol/preflight_payload.json")
     dc.require(preflight.get("technical_status") == "PASS" and preflight.get("payloads_checked") is True and
                preflight["implementation_commit"] == manifest["implementation_commit"], "payload preflight required")
-    units = dc.plan(batch, phase)["units"]
+    units = contract.plan(batch, phase)["units"]
     dc.require(0 <= unit_id < len(units), "unit ID out of range")
     unit = units[unit_id]
     source = next(s for s in sources if (s["model_id"], s["training_seed"]) == (unit["model_id"], unit["training_seed"]))
