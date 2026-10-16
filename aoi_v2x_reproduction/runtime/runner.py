@@ -594,6 +594,8 @@ def _prepare_run(
         if not checkpoint.is_file():
             raise FileNotFoundError(checkpoint)
         run_dir = _require_checkpoint_in_run(checkpoint)
+        if _read_json_object(run_dir / "provenance.json", "resume provenance").get("training_reward_selection"):
+            raise ValueError("training100 artifacts do not support resume; preserve attempt and start a fresh run")
         if config.is_formal_result:
             _require_formal_scientific_contract(config, "formal resume")
             current = _require_current_formal_provenance("formal resume")
@@ -803,7 +805,11 @@ def _train_mappo(
     resume: Optional[str] = None,
     max_episodes: Optional[int] = None,
     recover_empty_run: bool = False,
+    *, training_reward_best: bool = False,
 ) -> Dict[str, Any]:
+    if training_reward_best:
+        from .training_selection import validate_request
+        validate_request(config, resume, max_episodes, recover_empty_run)
     if resume or recover_empty_run:
         raise ValueError("the first MAPPO baseline does not support training resume or empty-run recovery")
     if config.checkpoint_mode == "resumable":
@@ -814,6 +820,10 @@ def _train_mappo(
     if is_resume:
         raise RuntimeError("MAPPO exploratory runs must start from a new run directory")
     environment, trainer, rollout, metrics, device = _make_mappo_system(config)
+    selector = None
+    if training_reward_best:
+        from .training_selection import TrainingRewardBest
+        selector = TrainingRewardBest(run_dir, config)
     if hasattr(environment, "reset_world") and not getattr(environment, "_world_initialized", False):
         environment.reset_world(config.seed)
 
@@ -887,6 +897,11 @@ def _train_mappo(
             observations = next_observations
         metrics.append_episode(step_records, task1_steps, task2_steps, global_steps)
 
+        if selector is not None:
+            logged = metrics.episodes[-1]
+            selector.observe(logged["task1_step"], logged["task2_step"], logged["global_step"], trainer, trainer.policy_version,
+                             trainer.policy_version, "after_episode_before_pending_ppo_update")
+
         rollout_ready = rollout.terminal_count >= int(config.mappo_rollout_episodes)
         final_episode_this_call = episode == stop_episode - 1
         if rollout_ready or final_episode_this_call:
@@ -902,8 +917,10 @@ def _train_mappo(
         raise RuntimeError("MAPPO rollout was not consumed at the training boundary")
     shapes = metrics.save(run_dir)
     policy_saved = False
+    training_selection = selector.finish(trainer, trainer.policy_version) if selector is not None else None
     if config.checkpoint_mode == "policy_only":
-        atomic_torch_save(build_policy_payload(config, trainer, config.episodes), run_dir / "policy_final.pt")
+        if selector is None:
+            atomic_torch_save(build_policy_payload(config, trainer, config.episodes), run_dir / "policy_final.pt")
         policy_saved = True
     parameter_counts = trainer.parameter_counts()
     wall_seconds = float(time.perf_counter() - started)
@@ -972,6 +989,9 @@ def _train_mappo(
         "metrics_shapes": shapes,
         "audit": audit,
     }
+    if training_selection is not None:
+        complete["training_reward_selection"] = training_selection
+        complete["policy_best_training"] = training_selection["policy_best"]
     _write_json(run_dir / "COMPLETE.json", complete)
     with (run_dir / "stdout.log").open("a", encoding="utf-8") as handle:
         handle.write("MAPPO run completed\n")
@@ -989,14 +1009,22 @@ def train(
     resume: Optional[str] = None,
     max_episodes: Optional[int] = None,
     recover_empty_run: bool = False,
+    *, training_reward_best: bool = False,
 ) -> Dict[str, Any]:
     if config.algorithm == "mappo":
-        return _train_mappo(config, resume, max_episodes, recover_empty_run)
+        return _train_mappo(config, resume, max_episodes, recover_empty_run, training_reward_best=training_reward_best)
+    if training_reward_best:
+        from .training_selection import validate_request
+        validate_request(config, resume, max_episodes, recover_empty_run)
     if resume and config.checkpoint_mode != "resumable":
         raise ValueError("training resume requires checkpoint_mode=resumable")
     run_dir, is_resume = _prepare_run(config, resume, recover_empty_run=recover_empty_run)
     environment, agents, learner, replay, metrics, device = _make_system(config)
     start_episode = 0
+    selector = None
+    if training_reward_best:
+        from .training_selection import TrainingRewardBest
+        selector = TrainingRewardBest(run_dir, config)
     selection_state: Optional[Dict[str, Any]] = None
     if config.checkpoint_mode == "resumable":
         selection_state = {
@@ -1023,6 +1051,7 @@ def train(
 
     stop_episode = config.episodes if max_episodes is None else min(config.episodes, int(max_episodes))
     for episode in range(start_episode, stop_episode):
+        version_before_episode = int(learner.learn_step_counter) // int(config.policy_delay) if selector is not None else None
         if hasattr(environment, "start_episode"):
             observations = environment.start_episode(episode)
         else:
@@ -1046,7 +1075,11 @@ def train(
             observations = next_observations
         metrics.append_episode(step_records, task1_steps, task2_steps, global_steps)
         metrics.append_learning_episode(learning_records)
-        if config.checkpoint_mode == "resumable" and (
+        if selector is not None:
+            logged = metrics.episodes[-1]
+            selector.observe(logged["task1_step"], logged["task2_step"], logged["global_step"], agents, version_before_episode,
+                             int(learner.learn_step_counter) // int(config.policy_delay), "after_episode_online_actor_updates")
+        if selector is None and config.checkpoint_mode == "resumable" and (
             ((episode + 1) % config.checkpoint_every == 0) or episode == stop_episode - 1
         ):
             assert selection_state is not None
@@ -1074,7 +1107,15 @@ def train(
     shapes = metrics.save(run_dir)
     final_checkpoint_hashes: Dict[str, str] = {}
     policy_saved = False
-    if config.checkpoint_mode == "resumable":
+    training_selection = None
+    if selector is not None:
+        training_selection = selector.finish(agents, int(learner.learn_step_counter) // int(config.policy_delay))
+        policy_saved = True
+        if config.checkpoint_mode == "resumable":
+            final_payload = build_payload(config, agents, learner, replay, environment, metrics, config.episodes, completed=True)
+            final_payload.update(checkpoint_role="training100_final_not_resumable", training_reward_selection=training_selection)
+            atomic_torch_save(final_payload, run_dir / "checkpoints/latest.pt")
+    elif config.checkpoint_mode == "resumable":
         assert selection_state is not None
         final_payload = build_payload(config, agents, learner, replay, environment, metrics, config.episodes, completed=True)
         final_payload.update({"checkpoint_role": "latest_final", "selection_state": selection_state, "training_completed": True})
@@ -1141,6 +1182,10 @@ def train(
         "checkpoint_selection": selection_state,
         "audit": audit,
     }
+    if training_selection is not None:
+        complete["training_reward_selection"] = training_selection
+        complete["policy_best_training"] = training_selection["policy_best"]
+        complete["checkpoint_selection"] = training_selection
     _write_json(run_dir / "COMPLETE.json", complete)
     with (run_dir / "stdout.log").open("a", encoding="utf-8") as handle:
         handle.write("run completed\n")
