@@ -10,7 +10,7 @@ from pathlib import Path
 
 from analysis import deployment_contract as dc, training100_contract as tc
 
-ARRAYS = {"pilot": "0,6,12,18", "main": "1-5,7-11,13-17,19-23"}
+ARRAYS = {"all": "0-23", "pilot": "0,6,12,18", "main": "1-5,7-11,13-17,19-23"}
 
 
 def command(batch, stage, partition="Q10", account=None, concurrency=6, cpus=8, mem="32G", time="08:00:00", dependency=None):
@@ -29,7 +29,7 @@ def command(batch, stage, partition="Q10", account=None, concurrency=6, cpus=8, 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--batch-root", type=Path, required=True)
-    p.add_argument("--stage", choices=("audit", "pilot", "pilot-check", "main", "summary", "export"), required=True)
+    p.add_argument("--stage", choices=("audit", "all", "pilot", "pilot-check", "main", "summary", "export"), required=True)
     p.add_argument("--partition", default="Q10")
     p.add_argument("--account")
     p.add_argument("--concurrency", type=int, default=6)
@@ -41,12 +41,20 @@ def main(argv=None):
     a = p.parse_args(argv)
     m, _ = tc.load(a.batch_root)
     if a.stage in ARRAYS:
-        dc.require(dc.read(a.batch_root / "protocol/execution_decision.json")["decision"] == "24_FROM_SCRATCH", "audit and decision required")
+        decision = dc.read(a.batch_root / "protocol/execution_decision.json")
+        dc.require(decision["decision"] == "24_FROM_SCRATCH" and
+                   decision.get("implementation_commit") == m["implementation_commit"], "audit and pinned decision required")
+        if a.stage == "all":
+            dc.require(decision.get("execution_mode") == "direct24" and decision.get("pilot_required") is False,
+                       "direct24 approval required")
     if a.stage == "main":
         dc.require(dc.read(a.batch_root / "protocol/pilot_verification.json")["technical_status"] == "PASS", "pilot PASS required")
     if a.submit:
         previous = list((a.batch_root / "protocol").glob(f"submission_*_{a.stage}.json"))
         dc.require(not previous, "stage already submitted: inspect/recover only missing tasks, do not blindly resubmit")
+        conflicts = ("pilot", "main") if a.stage == "all" else (("all",) if a.stage in {"pilot", "main"} else ())
+        dc.require(not any(list((a.batch_root / "protocol").glob(f"submission_*_{s}.json")) for s in conflicts),
+                   "do not mix direct24 and pilot/main submissions in the same batch")
     cmd = command(a.batch_root.resolve(), a.stage, a.partition, a.account, a.concurrency, a.cpus, a.mem, a.time, a.dependency)
     env = {**os.environ, "PROJECT_DIR": str(dc.REPO), "PYTHON_BIN": sys.executable,
            "BATCH_ROOT": str(a.batch_root.resolve()), "AOI_EXPECTED_COMMIT": m["implementation_commit"], "AOI_ATTEMPT": "a01"}

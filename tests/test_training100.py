@@ -222,11 +222,14 @@ def test_matrix_and_submission_arrays_no_test_or_noise_duplicate(tmp_path):
     assert len({(c["model_id"], c["training_seed"]) for c in cells}) == 24
     assert {tc.cell(i)["training_seed"] for i in tc.PILOTS} == {8}
     assert sum(c["environment_steps"] for c in cells) == 6000000
-    assert sj.ARRAYS == {"pilot": "0,6,12,18", "main": "1-5,7-11,13-17,19-23"}
+    assert sj.ARRAYS == {"all": "0-23", "pilot": "0,6,12,18", "main": "1-5,7-11,13-17,19-23"}
     cmd = sj.command(tmp_path, "main", dependency="afterok:123")
     assert "--array=1-5,7-11,13-17,19-23%6" in cmd and "afterok:123" in cmd
     assert "--gres" not in sj.command(tmp_path, "audit")
     with pytest.raises(ValueError): sj.command(tmp_path, "main", concurrency=7)
+    cmd = sj.command(tmp_path, "all")
+    assert "--array=0-23%6" in cmd and cmd[cmd.index("--gres") + 1] == "gpu:l20:1"
+    with pytest.raises(ValueError): sj.command(tmp_path, "all", concurrency=7)
 
 
 def test_completed_training100_resume_rejected_without_state_loading(tmp_path, monkeypatch):
@@ -331,12 +334,46 @@ def test_summary_export_readback_and_exclusion_without_trajectories(tmp_path, mo
 def test_submit_cli_dry_run_and_pilot_gate(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(tc, "load", lambda _: ({"implementation_commit": "fixed"}, []))
     monkeypatch.setattr(sj.subprocess, "check_output", lambda *a, **kw: pytest.fail("dry-run must not submit"))
-    dump(tmp_path / "protocol/execution_decision.json", {"decision": "24_FROM_SCRATCH"})
+    dump(tmp_path / "protocol/execution_decision.json", {"decision": "24_FROM_SCRATCH", "implementation_commit": "fixed"})
     assert sj.main(["--batch-root", str(tmp_path), "--stage", "pilot"]) == 0
     assert json.loads(capsys.readouterr().out)["submitted"] is False
     with pytest.raises(FileNotFoundError): sj.main(["--batch-root", str(tmp_path), "--stage", "main"])
     dump(tmp_path / "protocol/pilot_verification.json", {"technical_status": "PASS"})
     assert sj.main(["--batch-root", str(tmp_path), "--stage", "main"]) == 0
+
+
+def test_direct24_submit_without_pilot_and_duplicate_guard(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(tc, "load", lambda _: ({"implementation_commit": "fixed"}, []))
+    dump(tmp_path / "protocol/execution_decision.json", {"decision": "24_FROM_SCRATCH", "implementation_commit": "fixed",
+         "execution_mode": "direct24", "pilot_required": False})
+    monkeypatch.setattr(sj.subprocess, "check_output", lambda *a, **kw: pytest.fail("dry-run must not submit"))
+    args = ["--batch-root", str(tmp_path), "--stage", "all", "--concurrency", "6"]
+    assert sj.main(args) == 0
+    assert "--array=0-23%6" in json.loads(capsys.readouterr().out)["command"]
+    def fake_submit(cmd, **kw):
+        assert "--array=0-23%6" in cmd and kw["env"]["AOI_EXPECTED_COMMIT"] == "fixed"
+        return "12345\n"
+    monkeypatch.setattr(sj.subprocess, "check_output", fake_submit)
+    assert sj.main(args + ["--submit"]) == 0
+    assert not (tmp_path / "protocol/pilot_verification.json").exists()
+    with pytest.raises(ValueError, match="already submitted"): sj.main(args + ["--submit"])
+    with pytest.raises(ValueError, match="do not mix"):
+        sj.main(["--batch-root", str(tmp_path), "--stage", "pilot", "--submit"])
+
+
+def test_direct24_train_gate_does_not_require_pilot(tmp_path, monkeypatch):
+    monkeypatch.setattr(tc, "load", lambda _: ({"implementation_commit": "fixed"}, []))
+    decision = {"decision": "24_FROM_SCRATCH", "implementation_commit": "fixed",
+                "execution_mode": "direct24", "pilot_required": False}
+    dump(tmp_path / "protocol/execution_decision.json", decision)
+    record = {"run_dir": str(tmp_path / "synthetic_complete"), "technical_status": "PASS"}
+    dump(tmp_path / "records/train_01.json", record)
+    monkeypatch.setattr(tc, "verify_run", lambda *a: record)
+    assert tc.train_run(tmp_path, 1)["skipped_complete"] is True
+    assert not (tmp_path / "protocol/pilot_verification.json").exists()
+    decision.pop("execution_mode")
+    dump(tmp_path / "protocol/execution_decision.json", decision)
+    with pytest.raises(FileNotFoundError): tc.train_run(tmp_path, 1)
 
 
 def test_loader_preserves_rng_on_architecture_construction(tmp_path, monkeypatch):
@@ -377,6 +414,9 @@ def test_historical_audit_is_read_only_and_requires_b1_finals(tmp_path, monkeypa
     assert result["fresh_mappo_runs"] == 18 and result["fresh_maddpg_runs"] == 6
     assert result["legacy_resume_allowed"] is False and all(r["decision"] == "FROM_SCRATCH" for r in result["rows"])
     assert before == {p: p.read_bytes() for p in before}
-    assert tc.approve(batch)["decision"] == "24_FROM_SCRATCH"
+    approval = tc.approve(batch)
+    assert approval["decision"] == "24_FROM_SCRATCH"
+    assert approval["execution_mode"] == "direct24" and approval["pilot_required"] is False
+    assert approval["max_concurrent_gpus"] == 6
     next(b1.rglob("policy_final.pt")).unlink()
     with pytest.raises(ValueError, match="B1250k final missing"): tc.audit(batch)

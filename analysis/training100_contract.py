@@ -164,7 +164,8 @@ def approve(batch):
     report = dc.read(Path(batch) / "protocol/historical_audit.json")
     dc.require(report["technical_status"] == "PASS" and report["implementation_commit"] == m["implementation_commit"], "remote audit required")
     result = {"implementation_commit": m["implementation_commit"], "decision": "24_FROM_SCRATCH", "reuse": 0,
-              "approved_runs": [cell(i) for i in range(24)], "evaluations": 0}
+              "approved_runs": [cell(i) for i in range(24)], "evaluations": 0,
+              "execution_mode": "direct24", "pilot_required": False, "max_concurrent_gpus": 6}
     dc.write(Path(batch) / "protocol/execution_decision.json", result)
     return result
 
@@ -239,7 +240,8 @@ def train_run(batch, i, attempt="a01", reason=None):
     m, ss = load(batch)
     decision = dc.read(Path(batch) / "protocol/execution_decision.json")
     dc.require(decision["decision"] == "24_FROM_SCRATCH" and decision["implementation_commit"] == m["implementation_commit"], "audit/approval required")
-    if i not in PILOTS:
+    direct = decision.get("execution_mode") == "direct24" and decision.get("pilot_required") is False
+    if not direct and i not in PILOTS:
         dc.require(dc.read(Path(batch) / "protocol/pilot_verification.json")["technical_status"] == "PASS", "pilot PASS required")
     record = Path(batch) / "records" / f"train_{i:02d}.json"
     if record.exists():

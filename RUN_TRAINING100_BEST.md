@@ -104,32 +104,26 @@ training substitutes. After audit PASS confirms the conservative fresh-run premi
 
 ```bash
 "$PYTHON_BIN" -B -m analysis.training100_contract approve-fresh --batch-root "$BATCH_ROOT"
-"$PYTHON_BIN" -B -m analysis.submit_training100 --batch-root "$BATCH_ROOT" --stage pilot --concurrency 4
-"$PYTHON_BIN" -B -m analysis.submit_training100 --batch-root "$BATCH_ROOT" --stage pilot --concurrency 4 --submit
+"$PYTHON_BIN" -B -m analysis.submit_training100 --batch-root "$BATCH_ROOT" --stage all --concurrency 6
+"$PYTHON_BIN" -B -m analysis.submit_training100 --batch-root "$BATCH_ROOT" --stage all --concurrency 6 --submit
 ```
 
-Pilot is IDs `0,6,12,18`, seed 8 in all four configurations, each FULL 2500 episodes;
-it is part of the formal 24, never an additional four. GPU defaults: Q10, L20×1,
-8 CPUs, 32G, 8h/task; change resource settings only after observing actual pilot
-Elapsed/MaxRSS/raw output size. Account/partition/time/memory/CPU/concurrency are
-CLI options; GPU is the existing Q10 L20 resource. Concurrency must stay ≤6.
-No random/result-dependent restart or hyperparameter adjustment.
+Per the revised authorization, there is NO pilot: submit one `0-23%6` array, all
+24 full-budget runs queued together. Each task requests one L20, so at most six GPUs
+are occupied by this array. GPU defaults: Q10, 8 CPUs, 32G, 8h/task. Account,
+partition/time/memory/CPU/concurrency are CLI options; concurrency must stay ≤6.
+`approve-fresh` records `execution_mode=direct24`, `pilot_required=false`; neither
+submission nor individual run execution requires pilot_verification in this mode.
+Source audit, config/source identity, 2500-episode budget, strict policy loading,
+per-seed score recomputation and completion checks remain mandatory.
 
-When all four pilot tasks complete, dry-run then submit `--stage pilot-check`
-(CPU options as audit). It strictly reloads best/final actors and recomputes selection
-from arrays, including policy versions. After its PASS, inspect pilot sacct and disk
-usage/quota/inodes, calibrate resource limits, then dry-run and submit:
-
-```bash
-"$PYTHON_BIN" -B -m analysis.submit_training100 --batch-root "$BATCH_ROOT" --stage main --concurrency 6
-"$PYTHON_BIN" -B -m analysis.submit_training100 --batch-root "$BATCH_ROOT" --stage main --concurrency 6 --submit
-```
-
-Main array is `1-5,7-11,13-17,19-23%6` (20 runs). After main succeeds, dry-run and
-submit CPU `--stage summary`, then `--stage export`, with the same CPU options.
-`--dependency afterok:<actual_job_id>` is supported, but main cannot even be queued
-before pilot verification PASS. Do not submit duplicate stages; the submitter rejects
-them. Check both job exit AND JSON verification, never just sbatch acceptance.
+After all 24 tasks succeed, dry-run and submit CPU `--stage summary`, then
+`--stage export`, with the same CPU options as audit. `--dependency
+afterok:<actual_job_id>` is supported. Legacy pilot/main entry points are retained
+only for compatibility; do not use or combine them with `all` in this batch.
+Duplicate or mixed direct24/pilot-main submissions are rejected. Check both job
+exit AND JSON verification, never just sbatch acceptance. No result-dependent
+restart or hyperparameter adjustment.
 
 ## Acceptance, outputs, failures
 
@@ -164,4 +158,4 @@ do not hotpatch a running checkout, loosen checks, or alter old artifacts.
 Local synthetic tests use fake environment/learners only, including full-budget
 artifact construction, strict loaders, RNG/weight/array equality with the opt-in
 off/on, boundary/tie/per-seed rules, gates, summary and ZIP readback. They do not
-establish real checkpoint compatibility, GPU equivalence, or HPC pilot completion.
+establish real checkpoint compatibility, GPU equivalence, or HPC completion.
