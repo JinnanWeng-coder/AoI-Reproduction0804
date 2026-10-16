@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import io
 import json
@@ -24,6 +25,33 @@ MODELS = ("shared_tdec", "independent_tdec", "shared_combined", "algorithm2")
 PILOTS = (0, 6, 12, 18)
 ROOT = Path("Training100-best/P5_N4_gap25")
 EPISODES = 2500
+BUNDLE = dc.REPO / "configs/training100_fresh_sources.json"
+
+
+def bundled_sources():
+    """Expand exact historical configs, not historical payloads or machine paths."""
+    bundle = dc.read(BUNDLE)
+    dc.require(bundle["schema"] == "training100_config_bundle_v1" and
+               bundle["origin_implementation_commit"] == "75098b00714daf315a1d82298deb563209da9ac8" and
+               set(bundle["templates"]) == set(MODELS), "configuration bundle identity mismatch")
+    sources = []
+    for entry in bundle["sources"]:
+        cfg = copy.deepcopy(bundle["templates"][entry["model_id"]])
+        cfg.update(seed=entry["training_seed"], run_name=entry["run_name"])
+        dc.require(config_from_dict(cfg).canonical_hash() == entry["source_config_hash"], "bundled historical config identity mismatch")
+        sources.append({"source_kind": "bundled_config", "model_id": entry["model_id"], "training_seed": entry["training_seed"],
+                        "config": cfg, "source_config_hash": entry["source_config_hash"], "training_commit": entry["training_commit"],
+                        "historical_run_reference_only": entry["source_run"]})
+    dc.require(len(sources) == 24 and {(s["model_id"], s["training_seed"]) for s in sources} ==
+               {(m, seed) for m in MODELS for seed in dc.SEEDS}, "24 bundled configurations required")
+    return sources
+
+
+def check_source(source):
+    if source.get("source_kind") == "bundled_config":
+        dc.require(source in bundled_sources(), "bundled source changed")
+    else:
+        dc.source_check(source)
 
 
 def code_check(expected=None):
@@ -89,6 +117,30 @@ def init(study, batch_id, old_batch, b1_root):
     return {"batch_root": str(batch), "new_from_scratch_runs_if_no_qualified_reuse": 24, "environment_steps": 6000000}
 
 
+def init_local(study, batch_id):
+    dc.require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", batch_id), "unsafe batch ID")
+    commit = code_check()
+    study = Path(study).resolve()
+    batch = study / ROOT / batch_id
+    dc.require(not batch.exists(), "unique new batch required")
+    sources = bundled_sources()
+    for source in sources:
+        derive(source, batch / "training/a01/runs")
+    batch.mkdir(parents=True)
+    for folder in ("protocol", "records", "training", "analysis", "logs", "tmp", "cache"):
+        (batch / folder).mkdir()
+    dc.write(batch / "protocol/manifest.json", {"schema": "training100_batch_v1", "batch_root": str(batch), "study_root": str(study),
+             "implementation_commit": commit, "baseline_commit": BASELINE, "rule": RULE, "runs": [cell(i) for i in range(24)],
+             "source_mode": "bundled_config_fresh", "source_ledger": dc.file_identity(BUNDLE),
+             "historical_payload_audit": "NOT_RUN_NOT_REQUIRED_FOR_AUTHORIZED_FRESH_TRAINING",
+             "new_evaluations": 0, "new_worlds": [], "no_legacy_resume_implemented": True})
+    dc.write(batch / "protocol/sources.json", sources)
+    dc.write(batch / "protocol/execution_decision.json", {"implementation_commit": commit, "decision": "24_FROM_SCRATCH", "reuse": 0,
+             "approved_runs": [cell(i) for i in range(24)], "evaluations": 0, "execution_mode": "direct24", "pilot_required": False,
+             "max_concurrent_gpus": 1, "authorization": "fresh local training; configurations only, no old weights/arrays required"})
+    return {"batch_root": str(batch), "from_scratch_runs": 24, "environment_steps": 6000000, "pilot_required": False}
+
+
 def load(batch):
     batch = Path(batch).resolve()
     m, ss = dc.read(batch / "protocol/manifest.json"), dc.read(batch / "protocol/sources.json")
@@ -98,6 +150,8 @@ def load(batch):
                m["runs"] == [cell(i) for i in range(24)] and len(ss) == 24 and
                {(s["model_id"], s["training_seed"]) for s in ss} == {(k, s) for k in MODELS for s in dc.SEEDS}, "batch contract changed")
     dc.require(dc.file_identity(m["source_ledger"]["path"]) == m["source_ledger"], "historical source ledger changed")
+    if m.get("source_mode") == "bundled_config_fresh":
+        dc.require(m["source_ledger"] == dc.file_identity(BUNDLE) and ss == bundled_sources(), "local configuration snapshot changed")
     return m, ss
 
 
@@ -117,6 +171,7 @@ def best_index(rewards):
 
 def audit(batch):
     m, ss = load(batch)
+    dc.require(m.get("source_mode") != "bundled_config_fresh", "local fresh mode uses bundled config checks, not historical payload audit")
     rows = []
     for source in ss:
         dc.source_check(source, payload=True)
@@ -182,7 +237,7 @@ def verify_run(batch, i, run):
     item = cell(i)
     dc.require(run.parent.parent.parent == Path(batch).resolve() / "training", "run outside new training root")
     source = next(s for s in ss if (s["model_id"], s["training_seed"]) == (item["model_id"], item["training_seed"]))
-    dc.source_check(source)
+    check_source(source)
     cfg, expected_delta = derive(source, run.parent)
     complete = dc.read(run / "COMPLETE.json")
     dc.require(complete["reproduction_git_commit"] == m["implementation_commit"] and
@@ -258,7 +313,7 @@ def train_run(batch, i, attempt="a01", reason=None):
     else:
         item = cell(i)
         source = next(s for s in ss if (s["model_id"], s["training_seed"]) == (item["model_id"], item["training_seed"]))
-        dc.source_check(source)
+        check_source(source)
         run = attempt_run(batch, i, attempt)
         dc.require(not run.exists(), "partial attempt preserved; use a fresh attempt, no resume")
         cfg, _ = derive(source, run.parent)
@@ -309,7 +364,7 @@ def summary(batch, attempt="a01"):
             "MADDPG best captured after online updates of the episode. Actor update count is policy version.\n"
             "Windows span behavior versions; these scores are not frozen-policy validation or test scores. No causal performance claim.\n"
             "Best/final separate portable actors, not resumable; historical validation best is not reused.\n"
-            "Old configs/curves/final references remain read-only. NPZ and policies stay on HPC.\n", encoding="utf-8")
+            "Old configs/curves/final references remain read-only. NPZ and policies stay on the execution host.\n", encoding="utf-8")
         result = {"technical_status": "PASS", "implementation_commit": m["implementation_commit"], "accepted_runs": 24,
                   "from_scratch_runs": 24, "training_env_steps": 6000000, "episode_rows": len(curves),
                   "best_policies": 24, "final_policies": 24, "new_evaluations": 0, "claim_support": "NOT_ASSESSED"}
@@ -327,7 +382,13 @@ def export(batch, attempt="a01"):
     out = Path(batch) / "analysis" / attempt
     dc.require(dc.read(out / "verification.json")["technical_status"] == "PASS", "summary PASS required")
     runtime_path = out / "runtime_report.json"
-    if not runtime_path.exists():
+    if not runtime_path.exists() and m.get("source_mode") == "bundled_config_fresh":
+        processes = [dc.read(p) for p in sorted((Path(batch) / "records").glob("local_process_*.json"))]
+        dc.write(runtime_path, {"implementation_commit": m["implementation_commit"], "backend": "local_python_serial",
+                 "processes": processes, "MaxRSS": None, "MaxRSS_note": "not measured; no sacct on local host",
+                 "raw_training_bytes": sum(p.stat().st_size for p in (Path(batch) / "training").rglob("*") if p.is_file()),
+                 "historical_payload_audit": m["historical_payload_audit"], "new_evaluations": 0})
+    elif not runtime_path.exists():
         jobs = [dc.read(p) for p in sorted((Path(batch) / "protocol").glob("submission_*.json"))]
         dc.require(jobs, "submission records required for runtime accounting")
         args = ["sacct", "-P", "-j", ",".join(str(j["job_id"]) for j in jobs),
@@ -351,23 +412,29 @@ def export(batch, attempt="a01"):
             if (p / "COMPLETE.json").exists():
                 for name in ("COMPLETE.json", "provenance.json", "config.resolved.json"):
                     z.write(p / name, (p / name).relative_to(batch).as_posix())
-        for p in sorted((Path(batch) / "slurm_logs").glob("*")):
-            if p.is_file() and p.suffix in {".out", ".err"}:
-                with p.open("rb") as f:
-                    f.seek(max(0, p.stat().st_size - 16384))
-                    z.writestr("log_excerpts/" + p.name, f.read())
+        for folder in ("slurm_logs", "logs"):
+            for p in sorted((Path(batch) / folder).glob("*")):
+                if p.is_file() and p.suffix in {".out", ".err"}:
+                    with p.open("rb") as f:
+                        f.seek(max(0, p.stat().st_size - 16384))
+                        z.writestr("log_excerpts/" + folder + "/" + p.name, f.read())
+    verify_archive(path, attempt)
+    return {"archive": str(path.resolve()), "bytes": path.stat().st_size, "zip_integrity": "PASS"}
+
+
+def verify_archive(path, attempt="a01"):
     with zipfile.ZipFile(path) as z:
         dc.require(z.testzip() is None, "ZIP integrity failure")
-        dc.require(json.loads(z.read(f"analysis/{attempt}/verification.json"))["accepted_runs"] == 24, "ZIP readback failed")
+        result = json.loads(z.read(f"analysis/{attempt}/verification.json"))
+        dc.require(result["accepted_runs"] == 24 and result["technical_status"] == "PASS", "ZIP readback failed")
         dc.require(len(list(csv.DictReader(io.StringIO(z.read(f"analysis/{attempt}/selected_policies.csv").decode("utf-8-sig"))))) == 24 and
                    len(list(csv.DictReader(io.StringIO(z.read(f"analysis/{attempt}/training_episode_curves.csv").decode("utf-8-sig"))))) == 60000,
                    "ZIP CSV readback counts")
-    return {"archive": str(path.resolve()), "bytes": path.stat().st_size, "zip_integrity": "PASS"}
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("command", choices=("init", "audit", "approve-fresh", "train", "verify", "pilot-check", "summary", "export"))
+    p.add_argument("command", choices=("init", "init-local", "audit", "approve-fresh", "train", "verify", "pilot-check", "summary", "export"))
     p.add_argument("--batch-root", type=Path)
     p.add_argument("--study-root", type=Path)
     p.add_argument("--batch-id")
@@ -377,7 +444,10 @@ def main(argv=None):
     p.add_argument("--attempt", default="a01")
     p.add_argument("--reason")
     a = p.parse_args(argv)
-    if a.command == "init":
+    if a.command == "init-local":
+        dc.require(a.study_root is not None and a.batch_id, "--study-root and --batch-id required")
+        r = init_local(a.study_root, a.batch_id)
+    elif a.command == "init":
         dc.require(all((a.study_root, a.batch_id, a.old_batch, a.b1_runs)), "init paths required")
         r = init(a.study_root, a.batch_id, a.old_batch, a.b1_runs)
     else:

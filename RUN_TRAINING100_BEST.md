@@ -1,5 +1,10 @@
 # Training100 best + final: 2500-episode per-seed selection
 
+For the newly authorized Windows/laboratory fresh batch, use
+[RUN_TRAINING100_LOCAL.md](RUN_TRAINING100_LOCAL.md), `init-local` and the serial
+Python queue. That mode uses the bundled historical configurations only and does
+NOT require HPC policies/NPZ/B1 directories or the legacy payload audit below.
+
 This is training-artifact preparation, not a deployment evaluation. No validation,
 test-world rollout, new test worlds, or performance-based seed exclusion is authorized.
 

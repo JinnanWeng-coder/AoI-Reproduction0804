@@ -40,6 +40,7 @@ def main(argv=None):
     p.add_argument("--submit", action="store_true")
     a = p.parse_args(argv)
     m, _ = tc.load(a.batch_root)
+    dc.require(m.get("source_mode") != "bundled_config_fresh", "local batch: use analysis.run_training100_local, not sbatch")
     if a.stage in ARRAYS:
         decision = dc.read(a.batch_root / "protocol/execution_decision.json")
         dc.require(decision["decision"] == "24_FROM_SCRATCH" and
