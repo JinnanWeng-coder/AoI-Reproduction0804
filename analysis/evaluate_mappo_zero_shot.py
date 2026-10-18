@@ -210,11 +210,17 @@ def evaluate_zero_shot(
     deterministic: bool = False,
     deployment: bool = False,
     world_role: str | None = None,
+    training_policy: bool = False,
 ) -> dict:
     from analysis.deployment_rng import policy_seed, action_seed_words, exogenous_probe
     if action_repeat < 0:
         raise ValueError("action_repeat must be non-negative")
-    if world_role not in {None, "locked_new_worlds", "reused_development_worlds"}:
+    if training_policy and not deployment:
+        raise ValueError("training100 policies require explicit deployment mode")
+    allowed_roles = {None, "locked_new_worlds", "reused_development_worlds"}
+    if training_policy:
+        allowed_roles.add("user_fixed_exploratory_worlds")
+    if world_role not in allowed_roles:
         raise ValueError("invalid deployment world role")
     if not deployment and (action_repeat != 0 or deterministic or world_role is not None):
         raise ValueError("non-default execution requires deployment=True for unambiguous output identity")
@@ -228,7 +234,13 @@ def evaluate_zero_shot(
         payload = torch.load(policy_path, map_location="cpu", weights_only=False)
         if not isinstance(payload, dict):
             raise RuntimeError("MAPPO policy payload must be a dictionary")
-        run_dir, source_config, source_complete = _validate_mappo_policy_artifact(policy_path, payload)
+        if training_policy:
+            from aoi_v2x_reproduction.runtime.training_selection import load_training_policy
+            source_config, payload = load_training_policy(policy_path)
+            run_dir = policy_path.parent
+            source_complete = json.loads((run_dir / "COMPLETE.json").read_text(encoding="utf-8"))
+        else:
+            run_dir, source_config, source_complete = _validate_mappo_policy_artifact(policy_path, payload)
         allowed_variants = {"tdec", "combined"} if deployment else {"tdec"}
         if source_config.algorithm != "mappo" or source_config.mappo_variant not in allowed_variants:
             raise RuntimeError("zero-shot evaluation requires a TDec MAPPO policy")
@@ -245,7 +257,12 @@ def evaluate_zero_shot(
         )
         if deployment:
             eval_name += f"_deployment_{'deterministic' if deterministic else 'stochastic'}_r{action_repeat}"
-        eval_dir = output_root / target_config.scenario.id / structure / run_dir.name / eval_name
+        if training_policy:
+            eval_name = eval_name.replace("policy_final", f"{payload['checkpoint_role']}_e{payload['episode']}")
+        # The selected-eval wrapper already isolates the complete unit key.
+        # Short native paths also avoid Windows MAX_PATH nesting problems.
+        eval_dir = (output_root / "native" if training_policy else
+                    output_root / target_config.scenario.id / structure / run_dir.name / eval_name)
         if eval_dir.exists():
             raise FileExistsError(f"refusing to overwrite zero-shot evaluation: {eval_dir}")
 
@@ -305,6 +322,8 @@ def evaluate_zero_shot(
     policy_reference = os.path.relpath(policy_path, eval_dir).replace(os.sep, "/")
     summary = {
         **git_metadata,
+        **({"checkpoint_role": payload["checkpoint_role"], "policy_version": payload["policy_version"],
+            "training_budget_episodes": source_config.episodes} if training_policy else {}),
         **summarize_arrays(arrays, target_config.cam_bits),
         "status": "complete",
         "algorithm": "mappo",
@@ -362,6 +381,8 @@ def evaluate_zero_shot(
     }
     provenance = {
         **git_metadata,
+        **({"checkpoint_role": payload["checkpoint_role"], "policy_version": payload["policy_version"],
+            "policy_episode": payload["episode"]} if training_policy else {}),
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "training_seed": int(source_config.seed),
         "training_run_name": run_dir.name,
