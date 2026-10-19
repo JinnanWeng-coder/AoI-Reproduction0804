@@ -24,6 +24,11 @@ ROOT = Path("Training100-selected-eval/P5_N4_gap25")
 ROLES = {"best100": "best_training100", "final": "final_training100"}
 WORLD_ROLE = "user_fixed_exploratory_worlds"
 CONDITIONS = dict(list(dc.CONDITIONS.items())[:5])
+MODELS = dc.MODELS
+
+
+def code_check(expected=None):
+    return tc.code_check(expected)
 
 
 def candidates(training_batch):
@@ -98,7 +103,7 @@ def make_units(sources):
     return units
 
 
-def source_check(source, payload=False):
+def source_check(source, payload=False, *, spec=None):
     from aoi_v2x_reproduction.config import config_from_dict
     record = source["record"]
     dc.require(dc.read(source["record_file"]["path"]) == record, "accepted source record changed")
@@ -107,7 +112,7 @@ def source_check(source, payload=False):
     run = Path(record["run_dir"]).resolve()
     cfg = config_from_dict(dc.read(run / "config.resolved.json"))
     complete = dc.read(run / "COMPLETE.json")
-    spec = dc.MODELS[record["model_id"]]
+    spec = dc.MODELS[record["model_id"]] if spec is None else spec
     dc.require(cfg.episodes == 2500 and cfg.steps_per_episode == 100 and cfg.seed == record["training_seed"] and
                cfg.scenario.id == dc.SCENARIO and cfg.n_rb == 3 and cfg.number_agents == 5 and
                cfg.global_actor_weight == 1 and cfg.eval_protocol == "sequential_warm" and cfg.eval_warmup_episodes == 5,
@@ -227,7 +232,8 @@ def preflight(batch, device="cuda:0"):
     return report
 
 
-def native_check(metadata, unit, source, commit):
+def native_check(metadata, unit, source, commit, *, spec=None):
+    spec = dc.MODELS[unit["model_id"]] if spec is None else spec
     record = source["record"]
     expected = {"status": "complete", "training_seed": unit["training_seed"], "eval_seeds": [unit["world"]],
                 "environment_seeds": [unit["world"]], "action_repeat": 0, "action_seed_words": [unit["action_seed_words"]],
@@ -237,10 +243,10 @@ def native_check(metadata, unit, source, commit):
                 "reproduction_git_commit": commit, "reproduction_git_dirty": False, "world_role": WORLD_ROLE,
                 "checkpoint_role": ROLES[source["checkpoint_kind"]], "policy_version": source["policy_version"],
                 "training_budget_episodes": 2500}
-    if dc.MODELS[unit["model_id"]]["family"] == "mappo":
+    if spec["family"] == "mappo":
         expected.update(policy_episode=source["policy_episode"], policy_parameters_unchanged=True,
-                        mappo_eval_mode="stochastic", actor_sharing=dc.MODELS[unit["model_id"]]["structure"] == "shared",
-                        mappo_variant=dc.MODELS[unit["model_id"]]["variant"],
+                        mappo_eval_mode="stochastic", actor_sharing=spec["structure"] == "shared",
+                        mappo_variant=spec["variant"],
                         policy_sampling_seeds=[policy_seed(unit["training_seed"], unit["world"], 0)])
     else:
         expected.update(checkpoint_episode=source["policy_episode"], parameter_snapshot_unchanged=True,
@@ -253,7 +259,7 @@ def native_check(metadata, unit, source, commit):
                metadata["exogenous_probes"][0]["world"] == unit["world"], "missing exogenous probe")
 
 
-def accept(batch, unit, source, manifest, attempt, create=False):
+def accept(batch, unit, source, manifest, attempt, create=False, *, native_validator=None):
     dest = Path(batch) / "units" / f"unit_{unit['unit_id']:03d}" / attempt
     started = dc.read(dest / "STARTED.json")
     dc.require(started["unit"] == unit and started["source"] == source and
@@ -261,7 +267,7 @@ def accept(batch, unit, source, manifest, attempt, create=False):
     markers = list(dest.rglob("EVAL_COMPLETE.json"))
     dc.require(len(markers) == 1, "expected one native evaluation completion")
     metadata = dc.read(markers[0])
-    native_check(metadata, unit, source, manifest["implementation_commit"])
+    (native_validator or native_check)(metadata, unit, source, manifest["implementation_commit"])
     provenance = dc.read(markers[0].with_name("provenance.json"))
     dc.require(provenance["reproduction_git_commit"] == manifest["implementation_commit"], "native provenance commit")
     policy_path = ((markers[0].parent / metadata["policy"]).resolve() if "policy" in metadata else
@@ -291,18 +297,19 @@ def accept(batch, unit, source, manifest, attempt, create=False):
     return rows, metadata["exogenous_probes"][0]
 
 
-def execute(batch, unit_id, device="cuda:0", attempt="a01", reason=None):
-    m, sources, units = load(batch)
-    dc.require(0 <= unit_id < 300 and re.fullmatch(r"a\d{2,4}", attempt), "invalid unit/attempt")
+def execute(batch, unit_id, device="cuda:0", attempt="a01", reason=None, *, workflow=None):
+    w = workflow or sys.modules[__name__]
+    m, sources, units = w.load(batch)
+    dc.require(0 <= unit_id < len(units) and re.fullmatch(r"a\d{2,4}", attempt), "invalid unit/attempt")
     pre = dc.read(Path(batch) / "protocol/preflight.json")
     dc.require(pre["technical_status"] == "PASS" and pre["implementation_commit"] == m["implementation_commit"] and
                pre["device"] == device and pre["executable"] == sys.executable, "run preflight with same interpreter/device")
     unit = units[unit_id]
     source = next(s for s in sources if s["source_id"] == unit["source_id"])
-    source_check(source)
+    w.source_check(source)
     accepted = Path(batch) / f"records/unit_{unit_id:03d}.json"
     if accepted.exists():
-        accept(batch, unit, source, m, dc.read(accepted)["attempt"])
+        w.accept(batch, unit, source, m, dc.read(accepted)["attempt"])
         return {"unit_id": unit_id, "skipped_verified": True}
     parent = Path(batch) / "units" / f"unit_{unit_id:03d}"
     dest = parent / attempt
@@ -310,7 +317,7 @@ def execute(batch, unit_id, device="cuda:0", attempt="a01", reason=None):
         # Completed rollout + failed post-check: inspect arrays; never run it again.
         dc.require(len(list(dest.rglob("EVAL_COMPLETE.json"))) == 1,
                    "partial attempt preserved; retry only failed IDs with new attempt and reason")
-        accept(batch, unit, source, m, attempt, create=True)
+        w.accept(batch, unit, source, m, attempt, create=True)
         return {"unit_id": unit_id, "accepted_existing_native": True}
     dc.require(not list(parent.rglob("EVAL_COMPLETE.json")), "native completion exists in another attempt; accept its arrays first")
     dc.require(not parent.exists() or bool(reason), "retry requires explicit reason")
@@ -318,7 +325,7 @@ def execute(batch, unit_id, device="cuda:0", attempt="a01", reason=None):
     dc.write(dest / "STARTED.json", {"unit": unit, "source": source, "implementation_commit": m["implementation_commit"],
                                     "pid": os.getpid(), "created_at_utc": datetime.now(timezone.utc).isoformat(), "reason": reason})
     policy = Path(source["checkpoint"]["path"])
-    if dc.MODELS[unit["model_id"]]["family"] == "mappo":
+    if w.MODELS[unit["model_id"]]["family"] == "mappo":
         from analysis.evaluate_mappo_zero_shot import evaluate_zero_shot
         evaluate_zero_shot(policy, dest, dc.SCENARIO, device, [unit["world"]], 100,
                            deployment=True, world_role=WORLD_ROLE, training_policy=True)
@@ -326,16 +333,16 @@ def execute(batch, unit_id, device="cuda:0", attempt="a01", reason=None):
         from analysis.evaluate_maddpg_e1 import evaluate_maddpg_e1
         run = policy.parent
         override = {"run_dir": run, "resolved_run_dir": run, "checkpoint": policy,
-                    "canonical_run_name": run.name, "historical_run_name": run.name, "algorithm_label": "algorithm2",
+                    "canonical_run_name": run.name, "historical_run_name": run.name, "algorithm_label": unit["model_id"],
                     "is_symlink": run.is_symlink(), "complete": dc.read(run / "COMPLETE.json"),
                     "manifest": {"selected_training100_source": source["source_id"]}}
         evaluate_maddpg_e1("modified_maddpg_tdec", unit["noise_std"], unit["training_seed"], Path(m["study_root"]).parent,
                           dest, device, [unit["world"]], 100, 5, source["policy_episode"],
                           target_scenario=dc.SCENARIO, source_override=override, deployment=True,
                           world_role=WORLD_ROLE, training_policy=True)
-    source_check(source)
-    tc.code_check(m["implementation_commit"])
-    accept(batch, unit, source, m, attempt, create=True)
+    w.source_check(source)
+    w.code_check(m["implementation_commit"])
+    w.accept(batch, unit, source, m, attempt, create=True)
     return {"unit_id": unit_id, "technical_status": "PASS"}
 
 
@@ -404,13 +411,14 @@ def summarize(batch, attempt="a01"):
     return {**verification, "archive": str(archive)}
 
 
-def run(batch, device="cuda:0", workers=2, ids=None, attempt="a01", reason=None):
+def run(batch, device="cuda:0", workers=2, ids=None, attempt="a01", reason=None, *, workflow=None):
     """Bounded independent Python children; no sbatch, no in-process global RNG races."""
     dc.require(workers in (1, 2), "one or two concurrent evaluation processes only")
-    m, _, _ = load(batch)
-    ids = list(range(300)) if ids is None else ids
-    dc.require(ids and len(ids) == len(set(ids)) and all(0 <= i < 300 for i in ids), "invalid/duplicate unit IDs")
-    preflight(batch, device)
+    w = workflow or sys.modules[__name__]
+    m, _, units = w.load(batch)
+    ids = list(range(len(units))) if ids is None else ids
+    dc.require(ids and len(ids) == len(set(ids)) and all(0 <= i < len(units) for i in ids), "invalid/duplicate unit IDs")
+    w.preflight(batch, device)
     lock = Path(batch) / "RUNNING.json"
     dc.write(lock, {"pid": os.getpid(), "implementation_commit": m["implementation_commit"]})
     active, failed, pending = [], [], iter(ids)
@@ -427,12 +435,12 @@ def run(batch, device="cuda:0", workers=2, ids=None, attempt="a01", reason=None)
                     exhausted = True
                     break
                 if (Path(batch) / f"records/unit_{i:03d}.json").exists():
-                    execute(batch, i, device, attempt, reason)
+                    w.execute(batch, i, device, attempt, reason)
                     continue
                 stdout = (Path(batch) / f"logs/unit_{i:03d}_{attempt}.out").open("x")
                 stderr = (Path(batch) / f"logs/unit_{i:03d}_{attempt}.err").open("x")
-                cmd = [sys.executable, "-B", "-u", "-m", __name__ if __name__ != "__main__" else
-                       "analysis.evaluate_training100_selected", "unit", "--batch-root", str(batch),
+                module = getattr(w, "CLI_MODULE", "analysis.evaluate_training100_selected")
+                cmd = [sys.executable, "-B", "-u", "-m", module, "unit", "--batch-root", str(batch),
                        "--id", str(i), "--device", device, "--attempt", attempt]
                 if reason:
                     cmd += ["--reason", reason]
@@ -468,8 +476,8 @@ def run(batch, device="cuda:0", workers=2, ids=None, attempt="a01", reason=None)
             stdout.close()
             stderr.close()
         lock.unlink()
-    if all((Path(batch) / f"records/unit_{i:03d}.json").exists() for i in range(300)):
-        return summarize(batch, attempt)
+    if all((Path(batch) / f"records/unit_{i:03d}.json").exists() for i in range(len(units))):
+        return w.summarize(batch, attempt)
     return {"technical_status": "PARTIAL", "submitted_ids": ids}
 
 
