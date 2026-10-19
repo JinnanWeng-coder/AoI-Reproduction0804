@@ -108,7 +108,7 @@ def init(training_batch,batch_id,expected_commit):
        'baseline_commit':BASELINE,'training_parent':str(training_batch),'rule':tc.RULE,
        'runs':[cell(i) for i in range(6)],'new_training_runs':6,'training_env_steps':1500000,
        'source_mode':'accepted_independent_configs','resume_supported':True,'resume_interval':50,'new_evaluation_units':0,
-       'final_evaluation_units':0,'concurrent_training_processes':1,'actor_objective':'(global_loss+sum_leader_task1_task2_losses)/P'}
+       'final_evaluation_units':0,'concurrent_training_processes':2,'actor_objective':'(global_loss+sum_leader_task1_task2_losses)/P'}
     dc.write(batch/'protocol/manifest.json',m)
     dc.write(batch/'protocol/sources.json',sources)
     dc.write(batch/'protocol/derived_configs.json',derived)
@@ -123,7 +123,7 @@ def load(batch):
     dc.require(m['schema']==SCHEMA and m['batch_root']==str(batch) and batch.parent==Path(m['study_root'])/ROOT and
                m['rule']==tc.RULE and m['runs']==[cell(i) for i in range(6)] and
                m.get('resume_supported') is True and m.get('resume_interval')==50 and
-               m.get('new_evaluation_units')==0 and m.get('concurrent_training_processes')==1 and
+               m.get('new_evaluation_units')==0 and m.get('concurrent_training_processes')==2 and
                len(sources)==6 and {(s['model_id'],s['training_seed']) for s in sources}=={(MODEL,s) for s in dc.SEEDS},
                'shared training contract changed')
     derived=[]
@@ -227,7 +227,8 @@ def preflight(batch):
         dc.require(cfg.device=='cuda:0','CUDA config required')
     result={'technical_status':'PASS','implementation_commit':m['implementation_commit'],
             'python_executable':sys.executable,'python':sys.version,'dependencies':versions,'gpu':cuda_probe(),
-            'source_configs':6,'new_training_runs':6,'real_rollouts_in_preflight':0}
+            'source_configs':6,'new_training_runs':6,'real_rollouts_in_preflight':0,
+            'concurrent_training_processes':2}
     path=Path(batch)/'protocol/preflight.json'
     if path.exists(): dc.require(dc.read(path)==result,'preflight environment changed')
     else: dc.write(path,result)
@@ -323,8 +324,8 @@ def main(argv=None):
         elif a.command=='summary': result=summary(a.batch_root,a.attempt)
         elif a.command=='export': result=export(a.batch_root,a.attempt)
         else:
-            from analysis.run_training100_local import run_queue
-            result=run_queue(a.batch_root,a.ids,a.attempt,a.reason,workflow=sys.modules[__name__])
+            from analysis.run_shared_maddpg_local import run_queue
+            result=run_queue(a.batch_root,a.ids,a.attempt,a.reason)
     print(json.dumps(result,ensure_ascii=False,indent=2))
 
 

@@ -22,6 +22,7 @@ def test_six_seed_derivation_and_no_evaluation(tmp_path, monkeypatch):
     assert loaded == m and len(sources) == 6
     assert [sc.cell(i)["training_seed"] for i in range(6)] == list(range(8, 14))
     assert m["new_evaluation_units"] == 0 and m["training_env_steps"] == 1500000
+    assert m["concurrent_training_processes"] == 2 and m["resume_interval"] == 50
     for source in sources:
         cfg, delta = sc.derive(source, batch / "training/a01/runs")
         assert set(delta) == {"maddpg_actor_sharing", "run_name", "output_root"}

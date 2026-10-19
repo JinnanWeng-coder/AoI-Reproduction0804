@@ -29,7 +29,14 @@ if ($LASTEXITCODE -ne 0) { throw 'Queue failed; preserve the attempt' }
 ```
 
 `$batchRoot` is `<study>/Shared-MADDPG-TDec/P5_N4_gap25/<batchId>`.
-The serial queue runs all six seeds, then automatically summarizes and exports
+The queue runs at most **two seed processes concurrently on cuda:0** (the same
+4090), beginning with seeds8/9, and fills an available slot in seed order. Seeds
+have separate processes, RNG, replay, optimizer, output, log and temporary/cache
+directories. The historical 24-run serial launcher is unchanged. The shared
+study-root launcher lock prevents another managed training queue starting beside
+this one. Do not launch extra `train` commands while the queue is active.
+
+The queue runs all six seeds, then automatically summarizes and exports
 `analysis/a01/core_evidence.zip`. Do not invoke summary/export again after a
 successful full queue. Expected acceptance: six runs, six best and six final
 policies, 15,000 episode rows, 1,500,000 training environment steps and zero
@@ -40,6 +47,20 @@ If only packaging failed after all six records were accepted, run the explicit
 `summary`/`export` commands with a new unused `--attempt a02`; never retrain an
 accepted seed. A failed training attempt instead requires an explicit recovery
 decision using the retained checkpoints as described below.
+
+On a nonzero child exit, missing acceptance record, or process-launch failure,
+the queue stops launching later seeds and lets any already-running peer finish;
+it then exits with failure and does not summarize. Thus a healthy peer is not
+discarded because the other seed failed. A supervisor interrupt/unexpected error
+terminates only its own children before releasing the lock, preserving their
+partial directories and saved checkpoints. GPU OOM is not retried automatically.
+Measure actual peak GPU/RAM usage and checkpoint I/O on the laboratory machine;
+two processes are a cap, not a claim of doubled throughput or validated capacity.
+
+Use a new batch for this release. An old serial batch pinned to an earlier
+commit must remain on that checkout; this release does not migrate its manifest
+or import checkpoints across implementation commits. If old training has already
+started or completed, report it before creating duplicate runs.
 
 ## What is saved
 
@@ -92,7 +113,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Resume failed; preserve both attempts' }
 
 `$checkpoint` is the seed's retained `episode_NNNNNN.pt` within this same batch.
 The batch must already have a same-environment preflight. An already accepted
-seed cannot be resumed for performance-based reselection. The serial queue does
+seed cannot be resumed for performance-based reselection. The queue does
 not automatically choose a checkpoint or retry a failed run.
 
 A standalone runtime entry also supports a resolved parent Algorithm2 config or
