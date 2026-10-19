@@ -104,7 +104,8 @@ def _make_system(config):
     config.device_resolved = str(device)
     seed_everything(config.seed, device)
     environment = _make_environment(config)
-    agents = [Agent(config, index) for index in range(config.number_agents)]
+    from ..algorithms.modified_maddpg.agent import make_agents
+    agents = make_agents(config)
     learner = Global_Critic(config, agents)
     replay = ReplayBuffer(config.replay_capacity, config.state_dim, config.action_dim, config.number_agents)
     metrics = MetricStore(
@@ -616,7 +617,7 @@ def _prepare_run(
     return run_dir, False
 
 
-def _load_checkpoint(path: Path, config, agents, learner, replay, environment, metrics):
+def _load_checkpoint(path: Path, config, agents, learner, replay, environment, metrics, *, allow_output_relocation=False):
     # Deserialize portable checkpoint data on CPU.  Module/optimizer
     # load_state_dict calls below copy their tensors to the live parameter
     # device, while CPU-only RNG state remains valid for torch.set_rng_state.
@@ -643,14 +644,31 @@ def _load_checkpoint(path: Path, config, agents, learner, replay, environment, m
         raise ValueError("checkpoint schema version is not checkpoint_v4")
     if payload.get("mobility_revision") != config.mobility_revision:
         raise ValueError("checkpoint mobility_revision does not match resolved config")
-    if payload.get("config_hash") != config.canonical_hash():
+    if allow_output_relocation:
+        from .shared_resume import validate_resume_config
+        validate_resume_config(payload, config)
+    elif payload.get("config_hash") != config.canonical_hash():
         raise ValueError("checkpoint config hash does not match resolved config")
     if payload.get("gap_definition") != config.gap_definition:
         raise ValueError("checkpoint gap_definition does not match resolved config")
     if float(payload.get("vehicle_length_m", -1.0)) != float(config.vehicle_length_m):
         raise ValueError("checkpoint vehicle_length_m does not match resolved config")
-    for agent, state in zip(agents, payload["agents"]):
-        agent.load_state_dict_full(state)
+    if len(payload["agents"]) != len(agents):
+        raise ValueError("checkpoint agent count mismatch")
+    shared = bool(getattr(config, "maddpg_actor_sharing", False))
+    if bool(payload.get("actor_sharing", False)) != shared:
+        raise ValueError("checkpoint actor sharing mismatch")
+    if shared:
+        if payload.get("sharing_schema") != "shared_maddpg_resume_v1":
+            raise ValueError("unsupported shared checkpoint schema")
+        if len({id(a.actor) for a in agents}) != 1 or len({id(a.target_actor) for a in agents}) != 1:
+            raise ValueError("shared actor aliasing lost")
+        for i, (agent, state) in enumerate(zip(agents, payload["agents"])):
+            agent.load_state_dict_full({**state, **payload["shared_actor"]} if i == 0 else state,
+                                       load_actor=(i == 0))
+    else:
+        for agent, state in zip(agents, payload["agents"]):
+            agent.load_state_dict_full(state)
     learner.load_state_dict_full(payload["learner"])
     replay.load_state_dict(payload["replay"])
     if payload.get("environment") is not None and hasattr(environment, "load_state_dict"):
@@ -1009,22 +1027,27 @@ def train(
     resume: Optional[str] = None,
     max_episodes: Optional[int] = None,
     recover_empty_run: bool = False,
-    *, training_reward_best: bool = False,
+    *, training_reward_best: bool = False, shared_resume_interval: Optional[int] = None,
 ) -> Dict[str, Any]:
+    shared_resume = shared_resume_interval is not None
+    if shared_resume:
+        from .shared_resume import validate_request as validate_shared, prepare_run as prepare_shared
+        validate_shared(config, training_reward_best, shared_resume_interval, max_episodes, recover_empty_run)
     if config.algorithm == "mappo":
         return _train_mappo(config, resume, max_episodes, recover_empty_run, training_reward_best=training_reward_best)
-    if training_reward_best:
+    if training_reward_best and not shared_resume:
         from .training_selection import validate_request
         validate_request(config, resume, max_episodes, recover_empty_run)
-    if resume and config.checkpoint_mode != "resumable":
+    if resume and config.checkpoint_mode != "resumable" and not shared_resume:
         raise ValueError("training resume requires checkpoint_mode=resumable")
-    run_dir, is_resume = _prepare_run(config, resume, recover_empty_run=recover_empty_run)
+    run_dir, is_resume = (prepare_shared(config, resume, shared_resume_interval) if shared_resume else
+                         _prepare_run(config, resume, recover_empty_run=recover_empty_run))
     environment, agents, learner, replay, metrics, device = _make_system(config)
     start_episode = 0
     selector = None
     if training_reward_best:
         from .training_selection import TrainingRewardBest
-        selector = TrainingRewardBest(run_dir, config)
+        selector = TrainingRewardBest(run_dir, config, resume_supported=shared_resume)
     selection_state: Optional[Dict[str, Any]] = None
     if config.checkpoint_mode == "resumable":
         selection_state = {
@@ -1037,15 +1060,21 @@ def train(
             "best_metrics": None,
         }
     if is_resume:
-        payload = _load_checkpoint(Path(resume).expanduser().resolve(), config, agents, learner, replay, environment, metrics)
+        payload = _load_checkpoint(Path(resume).expanduser().resolve(), config, agents, learner, replay, environment, metrics,
+                                   allow_output_relocation=shared_resume)
         start_episode = int(payload["episode"])
         if isinstance(payload.get("selection_state"), dict):
             selection_state = dict(payload["selection_state"])
         if payload.get("completed"):
             raise RuntimeError("refusing to resume a completed run")
-        if selection_state is None:
+        if shared_resume:
+            selector.load_state_dict(payload["training100_selector"])
+            if selector.episode != start_episode or len(metrics.episodes) != start_episode:
+                raise RuntimeError("resume episode/metrics/selector mismatch")
+        elif selection_state is None:
             raise RuntimeError("resumable checkpoint is missing selection_state")
-        _repair_selection_best_after_resume(run_dir, payload, selection_state)
+        if not shared_resume:
+            _repair_selection_best_after_resume(run_dir, payload, selection_state)
     elif hasattr(environment, "reset_world") and not getattr(environment, "_world_initialized", False):
         environment.reset_world(config.seed)
 
@@ -1079,6 +1108,10 @@ def train(
             logged = metrics.episodes[-1]
             selector.observe(logged["task1_step"], logged["task2_step"], logged["global_step"], agents, version_before_episode,
                              int(learner.learn_step_counter) // int(config.policy_delay), "after_episode_online_actor_updates")
+        if shared_resume and ((episode + 1) % shared_resume_interval == 0 or episode == stop_episode - 1):
+            from .shared_resume import save_checkpoint
+            save_checkpoint(run_dir, config, agents, learner, replay, environment, metrics, selector,
+                            episode + 1, shared_resume_interval)
         if selector is None and config.checkpoint_mode == "resumable" and (
             ((episode + 1) % config.checkpoint_every == 0) or episode == stop_episode - 1
         ):
@@ -1186,6 +1219,23 @@ def train(
         complete["training_reward_selection"] = training_selection
         complete["policy_best_training"] = training_selection["policy_best"]
         complete["checkpoint_selection"] = training_selection
+    if shared_resume:
+        complete["episode_resume"] = {
+            "schema": "shared_training100_episode_resume_v1", "interval": shared_resume_interval,
+            "latest_pointer": "checkpoints/latest.json",
+            "resume_source": provenance_data.get("resume_source"),
+            "resume_episode": provenance_data.get("resume_episode", 0),
+            "restore_requires_new_run_directory": True,
+        }
+    if config.maddpg_actor_sharing:
+        complete.update(model_id="shared_maddpg_tdec", actor_sharing=True, actor_structure="shared",
+                        actor_network_count=1, target_actor_network_count=1,
+                        actor_optimizer_step_count=learner.actor_optimizer_step_count,
+                        target_actor_update_count=learner.target_actor_update_count,
+                        learn_step_count=learner.learn_step_counter,
+                        actor_objective="(global_loss+sum_leader_task1_task2_losses)/P",
+                        gradient_diagnostic_scope="per_leader_contribution_to_shared_mean",
+                        environment_steps=config.episodes * config.steps_per_episode)
     _write_json(run_dir / "COMPLETE.json", complete)
     with (run_dir / "stdout.log").open("a", encoding="utf-8") as handle:
         handle.write("run completed\n")

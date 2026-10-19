@@ -60,27 +60,29 @@ def preflight(batch):
     return result
 
 
-def selected_ids(text):
-    ids = list(range(24)) if text is None else [int(x) for x in text.split(",")]
-    require(ids and len(ids) == len(set(ids)) and all(0 <= i < 24 for i in ids), "IDs must be unique 0..23")
+def selected_ids(text, count=24):
+    ids = list(range(count)) if text is None else [int(x) for x in text.split(",")]
+    require(ids and len(ids) == len(set(ids)) and all(0 <= i < count for i in ids), f"IDs must be unique 0..{count-1}")
     return ids
 
 
-def child_command(batch, i, attempt, reason):
-    cmd = [sys.executable, "-B", "-u", "-m", "analysis.training100_contract", "train",
+def child_command(batch, i, attempt, reason, module="analysis.training100_contract"):
+    cmd = [sys.executable, "-B", "-u", "-m", module, "train",
            "--batch-root", str(batch), "--id", str(i), "--attempt", attempt]
     if reason:
         cmd += ["--reason", reason]
     return cmd
 
 
-def run_queue(batch, ids=None, attempt="a01", reason=None):
+def run_queue(batch, ids=None, attempt="a01", reason=None, *, workflow=None):
+    c = workflow or tc
     batch = Path(batch).resolve()
-    ids = selected_ids(ids)
+    manifest, _ = c.load(batch)
+    count = len(manifest['runs'])
+    ids = selected_ids(ids, count)
     require(attempt == "a01" or reason, "retry attempt requires a reason; no partial resume")
-    tc.attempt_run(batch, ids[0], attempt)  # Validate before starting any process.
-    report = preflight(batch)
-    manifest, _ = tc.load(batch)
+    c.attempt_run(batch, ids[0], attempt)  # Validate before starting any process.
+    report = workflow.preflight(batch) if workflow else preflight(batch)
     lock = Path(manifest["study_root"]) / ".training100_local_gpu.lock"
     # One launcher for this study root. A stale lock is reported, never auto-deleted.
     with lock.open("x", encoding="utf-8") as f:
@@ -98,11 +100,11 @@ def run_queue(batch, ids=None, attempt="a01", reason=None):
         for i in ids:
             accepted = batch / f"records/train_{i:02d}.json"
             if accepted.exists():
-                tc.train_run(batch, i, attempt, reason)  # Full identity/array/artifact recheck, not blind skip.
+                c.train_run(batch, i, attempt, reason)  # Full identity/array/artifact recheck, not blind skip.
                 print(f"run {i}: accepted and reverified; skipped", flush=True)
                 continue
             log = batch / f"logs/train_{i:02d}_{attempt}.out"
-            cmd = child_command(batch, i, attempt, reason)
+            cmd = child_command(batch, i, attempt, reason) if workflow is None else child_command(batch,i,attempt,reason,c.CLI_MODULE)
             stamp = datetime.now(timezone.utc).isoformat()
             started = time.perf_counter()
             with log.open("x", encoding="utf-8") as handle:
@@ -122,18 +124,18 @@ def run_queue(batch, ids=None, attempt="a01", reason=None):
             write(batch / f"records/local_process_{i:02d}_{attempt}.json", {**metadata, "exit_code": exit_code,
                   "elapsed_seconds": time.perf_counter() - started, "finished_at_utc": datetime.now(timezone.utc).isoformat()})
             require(exit_code == 0 and accepted.is_file(), f"run {i} failed; preserve {log}; no automatic retry")
-        if all((batch / f"records/train_{i:02d}.json").is_file() for i in range(24)):
+        if all((batch / f"records/train_{i:02d}.json").is_file() for i in range(count)):
             summary_path = batch / f"analysis/{attempt}/verification.json"
             if summary_path.exists():
                 require(read(summary_path)["technical_status"] == "PASS", "failed summary preserved: use a new analysis attempt")
             else:
-                tc.summary(batch, attempt)
+                c.summary(batch, attempt)
             archive = summary_path.parent / "core_evidence.zip"
             if not archive.exists():
-                tc.export(batch, attempt)
+                c.export(batch, attempt)
             else:
-                tc.verify_archive(archive, attempt)
-            return {"technical_status": "PASS", "accepted_runs": 24, "archive": str(archive)}
+                c.verify_archive(archive, attempt)
+            return {"technical_status": "PASS", "accepted_runs": count, "archive": str(archive)}
         return {"technical_status": "PARTIAL", "requested_ids": ids, "new_evaluations": 0}
     finally:
         lock.unlink()  # Only the lock acquired by this launcher; never remove run artifacts.

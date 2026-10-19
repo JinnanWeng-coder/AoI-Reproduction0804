@@ -187,6 +187,7 @@ class ExperimentConfig:
     global_actor_weight: float = 1.0
     mappo_variant: str = "combined"
     mappo_actor_sharing: bool = False
+    maddpg_actor_sharing: bool = False
     mappo_actor_lr: float = 0.0005
     mappo_critic_lr: float = 0.0005
     mappo_rollout_episodes: int = 5
@@ -276,6 +277,9 @@ class ExperimentConfig:
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
+        # Opt-in only: all historical independent and MAPPO hashes stay unchanged.
+        if not self.maddpg_actor_sharing:
+            data.pop("maddpg_actor_sharing", None)
         omit_unversioned_clip_mode = data.pop("_omit_mappo_value_clip_mode_from_serialization", False)
         omit_unversioned_variant = data.pop("_omit_mappo_variant_from_serialization", False)
         omit_unversioned_actor_sharing = data.pop("_omit_mappo_actor_sharing_from_serialization", False)
@@ -475,6 +479,11 @@ def config_from_dict(data: Dict[str, Any]) -> ExperimentConfig:
 
 
 def validate_config(config: ExperimentConfig) -> None:
+    if not isinstance(config.maddpg_actor_sharing, bool):
+        raise ValueError("maddpg_actor_sharing must be boolean")
+    if config.maddpg_actor_sharing and (config.algorithm != "modified_maddpg_tdec" or
+            config.global_update_mode != "synchronous_joint" or config.checkpoint_mode != "policy_only"):
+        raise ValueError("shared MADDPG requires TDec, synchronous_joint and policy_only frozen artifacts; use shared_resume for episode recovery")
     if config.algorithm not in SUPPORTED_ALGORITHMS:
         raise ValueError(f"unsupported algorithm: {config.algorithm}")
     if config.profile != REPRODUCTION_PROFILE:

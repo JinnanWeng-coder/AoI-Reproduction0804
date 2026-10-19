@@ -41,19 +41,51 @@ def episode_reward(task1, task2, global_rewards):
 
 
 class TrainingRewardBest:
-    def __init__(self, run_dir, config):
+    def __init__(self, run_dir, config, *, resume_supported=False):
         self.run = Path(run_dir)
         self.config = config
         self.window = deque(maxlen=100)
         self.best = None
         self.episode = 0
         self.rows = []
+        self.resume_supported = bool(resume_supported)
         provenance_path = self.run / "provenance.json"
         provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
         provenance.update(training_reward_selection=RULE, checkpoint_selection=RULE,
-                          training100_resume_supported=False)
+                          training100_resume_supported=self.resume_supported)
         from .runner import _write_json
         _write_json(provenance_path, provenance)  # Only the newly initialized run.
+
+    def state_dict(self):
+        """Self-contained selection history, including the best actor at this point."""
+        return {"rule": RULE, "episode": self.episode, "window": list(self.window),
+                "best": self.best, "rows": self.rows,
+                "best_payload": torch.load(self.run / BEST, map_location="cpu", weights_only=False)
+                if self.best is not None else None}
+
+    def load_state_dict(self, state):
+        require(state.get("rule") == RULE and len(state["rows"]) == state["episode"],
+                "selector checkpoint rule/history mismatch")
+        require(len(state["window"]) == min(100, state["episode"]), "selector window mismatch")
+        require([r["episode"] for r in state["rows"]] == list(range(1, state["episode"] + 1)),
+                "selector episode sequence mismatch")
+        expected_window = [(r["episode_reward"], r["policy_version_before_episode"], r["policy_version_saved"])
+                           for r in state["rows"][-100:]]
+        require([tuple(x) for x in state["window"]] == expected_window, "selector window/history mismatch")
+        self.episode = int(state["episode"])
+        self.window = deque(expected_window, maxlen=100)
+        self.rows = list(state["rows"])
+        self.best = state["best"]
+        best = state["best_payload"]
+        require((best is None) == (self.best is None) == (self.episode < 100), "missing best state")
+        if best is not None:
+            require(best["training_reward_selection"] == self.best and
+                    best["episode"] == self.best["selected_episode"] <= self.episode,
+                    "selector best artifact mismatch")
+            # Only runtime naming changes on an explicit fork; preserve all actor tensors.
+            best["config"] = self.config.to_dict()
+            best["training_completed"] = False
+            atomic_torch_save(best, self.run / BEST)
 
     def observe(self, task1, task2, global_rewards, policy, version_before, version_saved, timing):
         self.episode += 1
@@ -98,7 +130,7 @@ class TrainingRewardBest:
             writer.writeheader()
             writer.writerows(self.rows)
         return {"rule": RULE, "best": self.best, "policy_best": BEST, "policy_final": "policy_final.pt",
-                "final_episode": self.episode, "final_policy_version": int(final_version), "resume_supported": False}
+                "final_episode": self.episode, "final_policy_version": int(final_version), "resume_supported": self.resume_supported}
 
 
 def load_training_policy(path):
@@ -131,7 +163,14 @@ def load_training_policy(path):
         require(payload["policy_version"] == selection["best"]["policy_version"], "best policy version mismatch")
     else:
         require(payload["policy_version"] == selection["final_policy_version"], "final policy version mismatch")
-    expected = 1 if cfg.algorithm == "mappo" and cfg.mappo_actor_sharing else cfg.number_agents
+    shared = bool(cfg.mappo_actor_sharing) if cfg.algorithm == "mappo" else bool(cfg.maddpg_actor_sharing)
+    if cfg.algorithm != "mappo":
+        require(bool(payload.get("actor_sharing", False)) == shared and bool(complete.get("actor_sharing",False)) == shared,
+                "MADDPG sharing identity mismatch")
+        if shared:
+            require(payload.get("model_id") == complete.get("model_id") == "shared_maddpg_tdec" and
+                    payload.get("sharing_schema") == "shared_maddpg_tdec_v1", "shared MADDPG artifact schema")
+    expected = 1 if shared else cfg.number_agents
     require(isinstance(payload.get("actors"), list) and len(payload["actors"]) == expected and all(
         state and all(isinstance(t, torch.Tensor) and torch.isfinite(t).all() for t in state.values()) for state in payload["actors"]),
         "training100 invalid actor states")
@@ -148,7 +187,7 @@ def load_training_actors(path, device="cpu"):
         modules = []
         for state in payload["actors"]:
             actor = (HybridActor(cfg.state_dim, cfg.actor_hidden, cfg.n_rb, cfg.n_modes) if cfg.algorithm == "mappo" else
-                     ActorNetwork(cfg.state_dim, cfg.actor_hidden, cfg.action_dim, cfg.actor_lr, "cpu"))
+                     ActorNetwork(cfg.state_dim, cfg.actor_hidden, cfg.action_dim, cfg.actor_lr, "cpu", create_optimizer=False))
             actor.load_state_dict(state, strict=True)
             actor.requires_grad_(False)
             modules.append(actor.to(device).eval())

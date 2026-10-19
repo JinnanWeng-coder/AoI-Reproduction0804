@@ -231,14 +231,17 @@ def attempt_run(batch, i, attempt):
     return Path(batch) / "training" / attempt / "runs" / f"train100_{item['model_id']}_seed{item['training_seed']:02d}"
 
 
-def verify_run(batch, i, run):
-    m, ss = load(batch)
+def verify_run(batch, i, run, *, contract=None):
+    # Opt-in external contract; historical callers keep the exact old checks.
+    import sys
+    c = contract or sys.modules[__name__]
+    m, ss = c.load(batch)
     run = Path(run).resolve()
-    item = cell(i)
+    item = c.cell(i)
     dc.require(run.parent.parent.parent == Path(batch).resolve() / "training", "run outside new training root")
     source = next(s for s in ss if (s["model_id"], s["training_seed"]) == (item["model_id"], item["training_seed"]))
-    check_source(source)
-    cfg, expected_delta = derive(source, run.parent)
+    c.check_source(source)
+    cfg, expected_delta = c.derive(source, run.parent)
     complete = dc.read(run / "COMPLETE.json")
     dc.require(complete["reproduction_git_commit"] == m["implementation_commit"] and
                cfg.canonical_hash() == complete["config_hash"] and complete["episodes"] == 2500,

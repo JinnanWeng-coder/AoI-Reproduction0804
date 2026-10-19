@@ -80,6 +80,14 @@ def build_payload(config, agents, learner, replay, environment, metrics, episode
         "vehicle_length_m": float(config.vehicle_length_m),
         "statistics_schema_version": config.statistics_schema_version,
     }
+    if bool(getattr(config, "maddpg_actor_sharing", False)):
+        if len({id(a.actor) for a in agents}) != 1 or len({id(a.target_actor) for a in agents}) != 1:
+            raise ValueError("shared checkpoint requires one actor and one target actor")
+        payload["agents"] = [a.state_dict_full(include_actor=False) for a in agents]
+        payload["shared_actor"] = {k: agents[0].state_dict_full()[k]
+                                   for k in ("actor", "target_actor", "actor_optimizer")}
+        payload["actor_sharing"] = True
+        payload["sharing_schema"] = "shared_maddpg_resume_v1"
     payload.update(_git_stamp())
     return payload
 
@@ -91,6 +99,10 @@ def build_policy_payload(config, policy_source, episode: int) -> Dict[str, Any]:
         actors = list(policy_source.policy_state_dicts())
     else:
         actors = []
+        if bool(getattr(config, "maddpg_actor_sharing", False)):
+            if len({id(agent.actor) for agent in policy_source}) != 1:
+                raise ValueError("shared artifact requires one unique actor")
+            policy_source = policy_source[:1]
         for agent in policy_source:
             actors.append({name: tensor.detach().cpu() for name, tensor in agent.actor.state_dict().items()})
     payload = {
@@ -110,5 +122,9 @@ def build_policy_payload(config, policy_source, episode: int) -> Dict[str, Any]:
             "external_action_noise_applicable": False,
             "global_actor_update_mode_applicable": False,
         }
+    elif bool(getattr(config, "maddpg_actor_sharing", False)):
+        payload.update(actor_sharing=True, actor_structure="shared", actor_network_count=1,
+                       model_id="shared_maddpg_tdec", sharing_schema="shared_maddpg_tdec_v1",
+                       actor_objective="(global_loss+sum_leader_task1_task2_losses)/P")
     payload.update(_git_stamp())
     return payload
