@@ -84,7 +84,8 @@ def _training_policy_system(path, runtime_config):
     device = resolve_device(runtime_config.device)
     seed_everything(runtime_config.seed, device)
     _, actors = load_training_actors(path, device=device)
-    return PaperEnviron(runtime_config), [FrozenAgent(a, runtime_config, device) for a in actors], None, device
+    per_leader = [actors[0]] * runtime_config.number_agents if runtime_config.maddpg_actor_sharing else actors
+    return PaperEnviron(runtime_config), [FrozenAgent(a, runtime_config, device) for a in per_leader], None, device
 
 
 def reduce_heldout_metrics(
@@ -437,7 +438,11 @@ def evaluate_maddpg_e1(
         "status": "complete",
         "algorithm": algorithm,
         "algorithm_label": source["algorithm_label"],
-        "actor_sharing": False,
+        "actor_sharing": bool(training_config.maddpg_actor_sharing),
+        **({"model_id": "shared_maddpg_tdec", "actor_network_count": 1,
+            "actor_structure": "shared", "sharing_schema": "shared_maddpg_tdec_v1",
+            "optimizer_constructed": False, "runtime_config": runtime_config.to_dict()}
+           if training_config.maddpg_actor_sharing else {}),
         "training_seed": int(seed),
         "training_run_name": source["canonical_run_name"],
         "historical_run_name": source["historical_run_name"],
