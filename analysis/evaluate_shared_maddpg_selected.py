@@ -229,7 +229,6 @@ def summarize(batch, attempt='a01'):
               'selected_seed': sources[0]['record']['training_seed'], 'selected_episode': sources[0]['policy_episode'],
               'selected_checkpoint_sha256': sources[0]['checkpoint_sha256'], 'new_training': 0,
               'worlds': selected.WORLDS, 'world_role': selected.WORLD_ROLE, 'new_unseen_confirmation': False}
-    dc.write(out / 'verification.json', result)
     (out / 'REPORT_CN.md').write_text(
         '# Shared MADDPG 训练赢家的冻结评估\n\n'
         '六个候选只按best100训练分数选一个模型，精确并列按最低seed。接受run已经包含继承前缀，不重复拼接。\n'
@@ -239,6 +238,7 @@ def summarize(batch, attempt='a01'):
         '这是一个训练赢家的30world表现，训练seed不确定性、repeat变异和六seed置信区间为空。\n'
         '这些world已使用，不称新的未见确认。technical PASS与性能方向无关。\n'
         '源权重SHA256、原始路径和best episode/version见protocol；权重及完整NPZ留实验室。\n', encoding='utf-8')
+    dc.write(out / 'verification.json', result)
     return export(batch, attempt)
 
 
@@ -248,6 +248,11 @@ def export(batch, attempt='a01'):
     out = Path(batch) / 'analysis' / attempt
     dc.require(re.fullmatch(r'a\d{2,4}', attempt) and dc.read(out / 'verification.json')['technical_status'] == 'PASS',
                'summary PASS required')
+    required = ('world_repeat_platoon.csv', 'world_endpoints.csv', 'repeat_endpoints.csv',
+                'world_platoon_repeat_pooled.csv', 'seed_endpoints.csv', 'legacy_seed_endpoints.csv',
+                'condition_summary.csv', 'legacy_condition_summary.csv', 'REPORT_CN.md')
+    dc.require(all((out / name).is_file() for name in required),
+               'partial analysis preserved; choose a new analysis attempt')
     dc.require(status(batch, verify=True)['accepted_units'] == 30, 'reverify all units before export')
     archive = out / 'core_evidence.zip'
     if archive.exists():
