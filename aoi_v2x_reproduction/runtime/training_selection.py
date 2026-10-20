@@ -137,6 +137,9 @@ def load_training_policy(path):
     """Load/validate portable best or final for either family; no rollout/resume."""
     from ..config import config_from_dict
     path = Path(path).resolve()
+    if path.parent.name == "policies" and path.name.startswith("policy_episode_"):
+        from .maddpg_noise import load_periodic_policy
+        return load_periodic_policy(path)
     require(path.name in {BEST, "policy_final.pt"}, "not a training100 policy artifact")
     run = path.parent
     complete = json.loads((run / "COMPLETE.json").read_text(encoding="utf-8"))

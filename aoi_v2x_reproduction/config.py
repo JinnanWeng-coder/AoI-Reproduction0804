@@ -207,6 +207,10 @@ class ExperimentConfig:
     local_critic_hidden: List[int] = field(default_factory=lambda: [512, 256])
     global_critic_hidden: List[int] = field(default_factory=lambda: [1024, 512, 256])
     exploration_noise: float = 0.3
+    exploration_noise_schedule: str = "fixed"
+    exploration_noise_end: float = 0.05
+    exploration_noise_decay_environment_steps: int = 150000
+    exploration_noise_floor: float = 0.05
     output_root: str = "experiments/runs"
     device: str = "auto"
     checkpoint_every: int = 50
@@ -277,6 +281,11 @@ class ExperimentConfig:
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
+        # Opt-in schedule: historical fixed-noise identities remain byte-for-byte compatible.
+        if self.exploration_noise_schedule == "fixed":
+            for key in ("exploration_noise_schedule", "exploration_noise_end",
+                        "exploration_noise_decay_environment_steps", "exploration_noise_floor"):
+                data.pop(key)
         # Opt-in only: all historical independent and MAPPO hashes stay unchanged.
         if not self.maddpg_actor_sharing:
             data.pop("maddpg_actor_sharing", None)
@@ -479,6 +488,16 @@ def config_from_dict(data: Dict[str, Any]) -> ExperimentConfig:
 
 
 def validate_config(config: ExperimentConfig) -> None:
+    if config.exploration_noise_schedule not in {"fixed", "linear_environment_steps"}:
+        raise ValueError("unsupported exploration_noise_schedule")
+    if config.exploration_noise_schedule != "fixed":
+        if (config.algorithm != "modified_maddpg_tdec" or
+                not all(math.isfinite(v) for v in (config.exploration_noise,
+                    config.exploration_noise_end, config.exploration_noise_floor)) or
+                not 0 <= config.exploration_noise_floor == config.exploration_noise_end <= config.exploration_noise or
+                type(config.exploration_noise_decay_environment_steps) is not int or
+                config.exploration_noise_decay_environment_steps <= 0):
+            raise ValueError("invalid MADDPG environment-step exploration schedule")
     if not isinstance(config.maddpg_actor_sharing, bool):
         raise ValueError("maddpg_actor_sharing must be boolean")
     if config.maddpg_actor_sharing and (config.algorithm != "modified_maddpg_tdec" or

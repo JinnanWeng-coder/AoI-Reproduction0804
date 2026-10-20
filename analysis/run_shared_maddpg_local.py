@@ -32,39 +32,42 @@ def child_environment(batch, i, attempt):
     return env
 
 
-def run_queue(batch, ids=None, attempt="a01", reason=None):
+def run_queue(batch, ids=None, attempt="a01", reason=None, *, workflow=None, workers=CONCURRENCY):
+    c = workflow or sc
+    require(type(workers) is int and 1 <= workers <= CONCURRENCY, "one or two training workers required")
+    require(workflow is not None or workers == CONCURRENCY, "historical shared queue retains two workers")
     batch = Path(batch).resolve()
-    manifest, _ = sc.load(batch)
+    manifest, _ = c.load(batch)
     require(manifest["concurrent_training_processes"] == CONCURRENCY, "two-process batch required")
     count = len(manifest["runs"])
     ids = selected_ids(ids, count)
     require(attempt == "a01" or reason, "retry attempt requires a reason")
     for i in ids:
-        sc.attempt_run(batch, i, attempt)
-    report = sc.preflight(batch)
+        c.attempt_run(batch, i, attempt)
+    report = c.preflight(batch)
     lock = Path(manifest["study_root"]) / ".training100_local_gpu.lock"
     with lock.open("x", encoding="utf-8") as handle:
         json.dump({"pid": os.getpid(), "batch_root": str(batch), "python": sys.executable,
-                   "concurrent_training_processes": CONCURRENCY}, handle)
+                   "concurrent_training_processes": workers}, handle)
     active = {}
     failures = []
     try:
         pending = deque()
         for i in ids:
             if (batch / f"records/train_{i:02d}.json").exists():
-                sc.train_run(batch, i, attempt, reason)  # Verify, never blindly skip.
+                c.train_run(batch, i, attempt, reason)  # Verify, never blindly skip.
             else:
                 # Refuse previously used launcher paths before launching any seed.
                 for path in (batch / f"logs/train_{i:02d}_{attempt}.out",
                              batch / f"records/local_started_{i:02d}_{attempt}.json",
                              batch / f"records/local_process_{i:02d}_{attempt}.json"):
                     require(not path.exists(), f"preserve prior attempt; choose explicit new attempt: {path}")
-                run = sc.attempt_run(batch, i, attempt)
+                run = c.attempt_run(batch, i, attempt)
                 require(not run.exists() or (run / "COMPLETE.json").is_file(),
                         f"partial run preserved; explicit checkpoint recovery required: {run}")
                 pending.append(i)
         print(json.dumps({"queue_pid": os.getpid(), "ids": ids, "preflight": report,
-                          "concurrent_training_processes": CONCURRENCY}, ensure_ascii=False), flush=True)
+                          "concurrent_training_processes": workers}, ensure_ascii=False), flush=True)
         while pending or active:
             # Inspect every live child before replenishing capacity: an observed
             # failure prevents all later seeds, but does not kill a healthy peer.
@@ -84,16 +87,16 @@ def run_queue(batch, ids=None, attempt="a01", reason=None):
                     failures.append({"run_id": i, "exit_code": code, "log": job["metadata"]["log"]})
                     print(json.dumps({"stop_new_launches": True, "failure": failures[-1],
                                       "waiting_for_active_ids": list(active)}, ensure_ascii=False), flush=True)
-            while pending and not failures and len(active) < CONCURRENCY:
+            while pending and not failures and len(active) < workers:
                 i = pending.popleft()
                 log = batch / f"logs/train_{i:02d}_{attempt}.out"
-                cmd = child_command(batch, i, attempt, reason, sc.CLI_MODULE)
-                metadata = {"run_id": i, "training_seed": sc.cell(i)["training_seed"],
+                cmd = child_command(batch, i, attempt, reason, c.CLI_MODULE)
+                metadata = {"run_id": i, "training_seed": c.cell(i)["training_seed"],
                             "attempt": attempt, "reason": reason, "command": cmd,
                             "started_at_utc": datetime.now(timezone.utc).isoformat(),
                             "implementation_commit": manifest["implementation_commit"],
                             "log": str(log), "python": sys.executable, "MaxRSS": None,
-                            "concurrent_training_processes": CONCURRENCY, "device": "cuda:0"}
+                            "concurrent_training_processes": workers, "device": "cuda:0"}
                 started = time.perf_counter()
                 handle = log.open("x", encoding="utf-8")
                 try:
@@ -119,14 +122,17 @@ def run_queue(batch, ids=None, attempt="a01", reason=None):
             if summary.exists():
                 require(read(summary)["technical_status"] == "PASS", "failed summary preserved; use new analysis attempt")
             else:
-                sc.summary(batch, attempt)
+                c.summary(batch, attempt)
             archive = summary.parent / "core_evidence.zip"
             if archive.exists():
-                sc.verify_archive(archive, attempt)
+                c.verify_archive(archive, attempt)
             else:
-                sc.export(batch, attempt)
+                c.export(batch, attempt)
+            if workflow is not None:
+                # New workflows may deliver a second business package even if core ZIP already exists.
+                return {**c.export(batch, attempt), "concurrent_training_processes": workers}
             return {"technical_status": "PASS", "accepted_runs": count, "archive": str(archive),
-                    "concurrent_training_processes": CONCURRENCY}
+                    "concurrent_training_processes": workers}
         return {"technical_status": "PARTIAL", "requested_ids": ids, "new_evaluations": 0}
     finally:
         # Interrupt/unexpected supervisor error: stop only children created here,

@@ -1028,26 +1028,40 @@ def train(
     max_episodes: Optional[int] = None,
     recover_empty_run: bool = False,
     *, training_reward_best: bool = False, shared_resume_interval: Optional[int] = None,
+    noise_decay_training: bool = False,
 ) -> Dict[str, Any]:
     shared_resume = shared_resume_interval is not None
+    if config.exploration_noise_schedule != "fixed" and not noise_decay_training:
+        raise ValueError("nonfixed exploration requires explicit noise_decay_training protocol")
+    episode_resume = shared_resume or noise_decay_training
+    snapshot_index = []
+    if noise_decay_training:
+        if shared_resume:
+            raise ValueError("noise-decay and historical shared resume are separate protocols")
+        from . import maddpg_noise as noise_protocol
+        noise_protocol.validate_request(config, training_reward_best, max_episodes, recover_empty_run)
+        resume_interval = 100
+    else:
+        resume_interval = shared_resume_interval
     if shared_resume:
         from .shared_resume import validate_request as validate_shared, prepare_run as prepare_shared
         validate_shared(config, training_reward_best, shared_resume_interval, max_episodes, recover_empty_run)
     if config.algorithm == "mappo":
         return _train_mappo(config, resume, max_episodes, recover_empty_run, training_reward_best=training_reward_best)
-    if training_reward_best and not shared_resume:
+    if training_reward_best and not episode_resume:
         from .training_selection import validate_request
         validate_request(config, resume, max_episodes, recover_empty_run)
-    if resume and config.checkpoint_mode != "resumable" and not shared_resume:
+    if resume and config.checkpoint_mode != "resumable" and not episode_resume:
         raise ValueError("training resume requires checkpoint_mode=resumable")
-    run_dir, is_resume = (prepare_shared(config, resume, shared_resume_interval) if shared_resume else
+    run_dir, is_resume = (noise_protocol.prepare_run(config, resume) if noise_decay_training else
+                         prepare_shared(config, resume, shared_resume_interval) if shared_resume else
                          _prepare_run(config, resume, recover_empty_run=recover_empty_run))
     environment, agents, learner, replay, metrics, device = _make_system(config)
     start_episode = 0
     selector = None
     if training_reward_best:
         from .training_selection import TrainingRewardBest
-        selector = TrainingRewardBest(run_dir, config, resume_supported=shared_resume)
+        selector = TrainingRewardBest(run_dir, config, resume_supported=episode_resume)
     selection_state: Optional[Dict[str, Any]] = None
     if config.checkpoint_mode == "resumable":
         selection_state = {
@@ -1061,19 +1075,21 @@ def train(
         }
     if is_resume:
         payload = _load_checkpoint(Path(resume).expanduser().resolve(), config, agents, learner, replay, environment, metrics,
-                                   allow_output_relocation=shared_resume)
+                                   allow_output_relocation=episode_resume)
         start_episode = int(payload["episode"])
         if isinstance(payload.get("selection_state"), dict):
             selection_state = dict(payload["selection_state"])
         if payload.get("completed"):
             raise RuntimeError("refusing to resume a completed run")
-        if shared_resume:
+        if episode_resume:
             selector.load_state_dict(payload["training100_selector"])
+            if noise_decay_training:
+                snapshot_index = list(payload["policy_snapshot_index"])
             if selector.episode != start_episode or len(metrics.episodes) != start_episode:
                 raise RuntimeError("resume episode/metrics/selector mismatch")
         elif selection_state is None:
             raise RuntimeError("resumable checkpoint is missing selection_state")
-        if not shared_resume:
+        if not episode_resume:
             _repair_selection_best_after_resume(run_dir, payload, selection_state)
     elif hasattr(environment, "reset_world") and not getattr(environment, "_world_initialized", False):
         environment.reset_world(config.seed)
@@ -1090,8 +1106,18 @@ def train(
         global_steps: List[float] = []
         step_records: List[Dict[str, Any]] = []
         learning_records: List[Dict[str, Any]] = []
+        noise_counts = {}
+        sigmas = []
         for _step in range(config.steps_per_episode):
-            actions = np.asarray([agent.choose_action(observations[index], explore=True) for index, agent in enumerate(agents)], dtype=np.float32)
+            if config.exploration_noise_schedule != "fixed":
+                from .maddpg_noise import sigma
+                # Five leaders advance ONE joint environment step, regardless of updates/replay warmup.
+                applied_sigma = sigma(config, episode * config.steps_per_episode + _step)
+                sigmas.append(applied_sigma)
+                actions = np.asarray([agent.choose_action(observations[index], explore=True,
+                    noise_std=applied_sigma, diagnostics=noise_counts) for index, agent in enumerate(agents)], dtype=np.float32)
+            else:
+                actions = np.asarray([agent.choose_action(observations[index], explore=True) for index, agent in enumerate(agents)], dtype=np.float32)
             next_observations, reward_global, reward_task1, reward_task2, terminated, info = environment.step(actions)
             replay.store_transition(observations.reshape(-1), actions.reshape(-1), reward_global, reward_task1, reward_task2, next_observations.reshape(-1), terminated)
             if replay.size >= config.batch_size:
@@ -1104,14 +1130,36 @@ def train(
             observations = next_observations
         metrics.append_episode(step_records, task1_steps, task2_steps, global_steps)
         metrics.append_learning_episode(learning_records)
+        if sigmas:
+            metrics.episodes[-1]["exploration"] = {"environment_step_start": episode * config.steps_per_episode,
+                "environment_step_end_exclusive": (episode + 1) * config.steps_per_episode,
+                "sigma_first": sigmas[0], "sigma_last": sigmas[-1], "sigma_mean": float(np.mean(sigmas)),
+                **noise_counts, "clip_rate": noise_counts["clipped_component_count"] / noise_counts["component_count"],
+                "rb_changed_fraction": noise_counts["rb_changed_count"] / noise_counts["action_count"],
+                "mode_changed_fraction": noise_counts["mode_changed_count"] / noise_counts["action_count"]}
+            if noise_decay_training and ((episode + 1) % 10 == 0 or episode == stop_episode - 1):
+                progress = {"episodes_completed": episode + 1,
+                    "environment_steps": (episode + 1) * config.steps_per_episode,
+                    "learn_step_count": learner.learn_step_counter, "last_noise": metrics.episodes[-1]["exploration"],
+                    "policy_snapshots": len(snapshot_index), "training_completed": False}
+                _write_json(run_dir / "progress.json", progress)
+                print(json.dumps(progress), flush=True)
         if selector is not None:
             logged = metrics.episodes[-1]
             selector.observe(logged["task1_step"], logged["task2_step"], logged["global_step"], agents, version_before_episode,
                              int(learner.learn_step_counter) // int(config.policy_delay), "after_episode_online_actor_updates")
-        if shared_resume and ((episode + 1) % shared_resume_interval == 0 or episode == stop_episode - 1):
+        if noise_decay_training and (episode + 1) % 100 == 0:
+            snapshot_index.append(noise_protocol.snapshot(run_dir, config, agents, episode + 1,
+                int(learner.learn_step_counter) // int(config.policy_delay)))
+        if episode_resume and ((episode + 1) % resume_interval == 0 or episode == stop_episode - 1):
             from .shared_resume import save_checkpoint
+            extra = ({"schema": noise_protocol.SCHEMA, "extra": {"policy_snapshot_index": snapshot_index,
+                      "completed_environment_steps": (episode + 1) * config.steps_per_episode}}
+                     if noise_decay_training else {})
+            if noise_decay_training:
+                noise_protocol.write_logs(run_dir, metrics, snapshot_index, config, learner)
             save_checkpoint(run_dir, config, agents, learner, replay, environment, metrics, selector,
-                            episode + 1, shared_resume_interval)
+                            episode + 1, resume_interval, **extra)
         if selector is None and config.checkpoint_mode == "resumable" and (
             ((episode + 1) % config.checkpoint_every == 0) or episode == stop_episode - 1
         ):
@@ -1219,14 +1267,21 @@ def train(
         complete["training_reward_selection"] = training_selection
         complete["policy_best_training"] = training_selection["policy_best"]
         complete["checkpoint_selection"] = training_selection
-    if shared_resume:
+    if episode_resume:
         complete["episode_resume"] = {
-            "schema": "shared_training100_episode_resume_v1", "interval": shared_resume_interval,
+            "schema": noise_protocol.SCHEMA if noise_decay_training else "shared_training100_episode_resume_v1",
+            "interval": resume_interval,
             "latest_pointer": "checkpoints/latest.json",
             "resume_source": provenance_data.get("resume_source"),
             "resume_episode": provenance_data.get("resume_episode", 0),
             "restore_requires_new_run_directory": True,
         }
+    if noise_decay_training:
+        complete.update(exploration_noise_schedule=config.exploration_noise_schedule,
+                        policy_snapshot_count=len(snapshot_index), policy_snapshot_index="policy_snapshot_index.json",
+                        environment_steps=config.episodes * config.steps_per_episode,
+                        learn_step_count=learner.learn_step_counter,
+                        actor_network_count=1 if config.maddpg_actor_sharing else config.number_agents)
     if config.maddpg_actor_sharing:
         complete.update(model_id="shared_maddpg_tdec", actor_sharing=True, actor_structure="shared",
                         actor_network_count=1, target_actor_network_count=1,

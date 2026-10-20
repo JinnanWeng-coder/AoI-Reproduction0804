@@ -38,6 +38,9 @@ def validate_request(config, training_reward_best, interval, max_episodes=None, 
 
 
 def validate_resume_config(payload, config):
+    if payload.get("resume_schema") == "maddpg_noise_decay_episode_resume_v1":
+        from .maddpg_noise import validate_resume_config as validate_noise
+        return validate_noise(payload, config)
     require(payload.get("resume_schema") == SCHEMA and payload.get("sharing_schema") == "shared_maddpg_resume_v1",
             "not a resumable shared training100 checkpoint")
     old = config_from_dict(payload["config"])
@@ -52,6 +55,7 @@ def validate_resume_config(payload, config):
 def read_resume(path, config, interval):
     path = Path(path).resolve()
     payload = torch.load(path, map_location="cpu", weights_only=False)
+    require(payload.get("resume_schema") == SCHEMA, "not a resumable shared training100 checkpoint")
     validate_resume_config(payload, config)
     require(payload.get("checkpoint_interval") == interval and not payload.get("completed") and
             0 < payload["episode"] < config.episodes, "checkpoint is final or has wrong interval/episode")
@@ -79,7 +83,8 @@ def prepare_run(config, resume, interval):
     return run, payload is not None
 
 
-def save_checkpoint(run, config, agents, learner, replay, environment, metrics, selector, episode, interval):
+def save_checkpoint(run, config, agents, learner, replay, environment, metrics, selector, episode, interval,
+                    *, schema=SCHEMA, extra=None):
     from .runner import _write_json
     path = Path(run) / "checkpoints" / f"episode_{episode:06d}.pt"
     require(not path.exists(), "refusing to overwrite an episode checkpoint")
@@ -91,13 +96,16 @@ def save_checkpoint(run, config, agents, learner, replay, environment, metrics, 
                                 completed=episode == config.episodes)
         require(payload["environment"] is not None and len(metrics.episodes) == selector.episode == episode,
                 "checkpoint environment/metrics/selector inconsistent")
-        payload.update(resume_schema=SCHEMA, checkpoint_role="shared_training100_episode_boundary",
+        payload.update(resume_schema=schema, checkpoint_role=("shared_training100_episode_boundary"
+                       if schema == SCHEMA else schema + "_episode_boundary"),
                        checkpoint_interval=interval, runtime_identity=runtime_identity(config),
                        training100_selector=selector.state_dict())
+        if extra:
+            payload.update(extra)
         atomic_torch_save(payload, path)
         # A small pointer, not another full checkpoint. No old numbered file is removed.
         _write_json(Path(run) / "checkpoints" / "latest.json",
-                    {"schema": SCHEMA, "episode": episode, "checkpoint": str(path.resolve()),
+                    {"schema": schema, "episode": episode, "checkpoint": str(path.resolve()),
                      "bytes": path.stat().st_size, "can_resume": episode < config.episodes})
     finally:
         restore_rng_state(rng)

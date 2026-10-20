@@ -60,12 +60,14 @@ class Agent:
         explore=True,
         noise_std: Optional[float] = None,
         rng: Optional[np.random.Generator] = None,
+        diagnostics=None,
     ):
         was_training = self.actor.training
         self.actor.eval()
         state = torch.as_tensor(np.asarray(observation, dtype=np.float32), dtype=torch.float32, device=self.device).unsqueeze(0)
         with torch.no_grad():
             action = self.actor(state).squeeze(0).cpu().numpy()
+        before_noise = action.copy() if diagnostics is not None else None
         applied_noise = float(self.config.exploration_noise) if explore and noise_std is None else float(noise_std or 0.0)
         if applied_noise < 0.0:
             raise ValueError("noise_std must be non-negative")
@@ -74,6 +76,18 @@ class Agent:
             action = action + noise_source.normal(0.0, applied_noise, size=self.config.action_dim)
         if was_training:
             self.actor.train()
+        if diagnostics is not None:
+            # Reuse this exact forward/noise draw. Never sample or evaluate the actor again.
+            clipped = np.clip(action, -self.config.target_action_clip, self.config.target_action_clip).astype(np.float32)
+            clean = np.clip(before_noise, -self.config.target_action_clip, self.config.target_action_clip).astype(np.float32)
+            diagnostics["action_count"] = diagnostics.get("action_count", 0) + 1
+            diagnostics["component_count"] = diagnostics.get("component_count", 0) + len(action)
+            diagnostics["clipped_component_count"] = diagnostics.get("clipped_component_count", 0) + int(np.count_nonzero(action != np.clip(action, -self.config.target_action_clip, self.config.target_action_clip)))
+            for dim, count, key in ((0, self.config.n_rb, "rb_changed_count"),
+                                    (1, self.config.n_modes, "mode_changed_count")):
+                # Same float64 floor/bin convention as PaperEnviron.decode_actions.
+                bins = np.minimum(count - 1, np.floor((np.asarray([clean[dim], clipped[dim]], dtype=np.float64) + 1) * .5 * count))
+                diagnostics[key] = diagnostics.get(key, 0) + int(bins[0] != bins[1])
         return np.clip(action, -self.config.target_action_clip, self.config.target_action_clip).astype(np.float32)
 
     def update_network_parameters(self, tau=None, *, update_actor=True):
