@@ -7,6 +7,14 @@ import numpy as np
 MAPPO_TAG = 0x4D415050
 MADDPG_TAG = 0xA01
 REPEAT_TAG = 0x44504C59
+RANDOM_TAG = 0x52414E44
+
+
+def random_action_seed_words(action_stream_id: int, world: int) -> list[int]:
+    """Version1 Uniform Random deployment stream, not a training seed/repeat0."""
+    if type(action_stream_id) is not int or type(world) is not int or min(action_stream_id, world) < 0:
+        raise ValueError("invalid Random action stream/world identity")
+    return [action_stream_id, world, RANDOM_TAG, 1]
 
 
 def action_seed_words(seed: int, world: int, repeat: int, family: str) -> list[int]:

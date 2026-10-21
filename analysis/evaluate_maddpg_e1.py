@@ -333,68 +333,20 @@ def evaluate_maddpg_e1(
 
         eval_dir.parent.mkdir(parents=True, exist_ok=True)
         eval_dir.mkdir(parents=False, exist_ok=False)
-        raw_records = []
-        exogenous = []
-        for world in eval_seeds:
-            environment.reset_world(int(world))
-            initial_probe = exogenous_probe(environment) if deployment else None
+        from analysis.frozen_rollout import sequential_warm
+
+        def action_factory(world):
             action_noise_rng = np.random.default_rng(
                 np.random.SeedSequence(action_seed_words(seed, world, action_repeat, "maddpg"))
             )
-            for warmup_index in range(int(warmup_episodes)):
-                observations = environment.start_episode(warmup_index)
-                for _slot in range(int(runtime_config.steps_per_episode)):
-                    actions = np.asarray(
-                        [
-                            agent.choose_action(
-                                observations[index],
-                                explore=False,
-                                noise_std=noise,
-                                rng=action_noise_rng,
-                            )
-                            for index, agent in enumerate(agents)
-                        ],
-                        dtype=np.float32,
-                    )
-                    observations, _rg, _t1, _t2, _done, _info = environment.step(actions)
-            world_records = []
-            for episode in range(int(eval_episodes)):
-                observations = environment.start_episode(int(warmup_episodes) + episode)
-                episode_records = []
-                for _slot in range(int(runtime_config.steps_per_episode)):
-                    actions = np.asarray(
-                        [
-                            agent.choose_action(
-                                observations[index],
-                                explore=False,
-                                noise_std=noise,
-                                rng=action_noise_rng,
-                            )
-                            for index, agent in enumerate(agents)
-                        ],
-                        dtype=np.float32,
-                    )
-                    observations, reward_global, reward_task1, reward_task2, _done, info = environment.step(actions)
-                    episode_records.append(
-                        {
-                            "aoi_ms": np.asarray(info["aoi_ms"], dtype=np.float32),
-                            "success": np.asarray(info["success"], dtype=np.float32),
-                            "remaining_demand": np.asarray(info["remaining_demand"], dtype=np.float32),
-                            "power_dbm": np.asarray(info["power_dbm"], dtype=np.float32),
-                            "rb": np.asarray(info["rb"], dtype=np.int64),
-                            "mode": np.asarray(info["mode"], dtype=np.int64),
-                            "action_normalized": np.asarray(actions, dtype=np.float32),
-                            "reward_global": np.float32(reward_global),
-                            "reward_task1": np.asarray(reward_task1, dtype=np.float32),
-                            "reward_task2": np.asarray(reward_task2, dtype=np.float32),
-                            **({"v2i_rate": np.asarray(info["v2i_rate"], dtype=np.float32)} if deployment else {}),
-                        }
-                    )
-                world_records.append(episode_records)
-            raw_records.append(world_records)
-            if deployment:
-                exogenous.append({"world": world, "initial": initial_probe,
-                                  "final": exogenous_probe(environment)})
+            def act(observations):
+                return np.asarray([agent.choose_action(observations[index], explore=False,
+                    noise_std=noise, rng=action_noise_rng) for index, agent in enumerate(agents)], dtype=np.float32)
+            return act
+
+        raw_records, exogenous = sequential_warm(environment, eval_seeds, action_factory,
+            steps_per_episode=runtime_config.steps_per_episode, scored_episodes=eval_episodes,
+            warmup_episodes=warmup_episodes, deployment=deployment, probe=exogenous_probe)
         if not _parameters_unchanged(agents, learner, snapshot):
             raise RuntimeError("MADDPG parameters or optimizer state changed during frozen evaluation")
     finally:
