@@ -211,6 +211,8 @@ def evaluate_zero_shot(
     deployment: bool = False,
     world_role: str | None = None,
     training_policy: bool = False,
+    sinr_log: bool = False,
+    sinr_console_episodes: int = 1,
 ) -> dict:
     from analysis.deployment_rng import policy_seed, action_seed_words, exogenous_probe
     if action_repeat < 0:
@@ -230,6 +232,8 @@ def evaluate_zero_shot(
     policy_path = Path(policy).expanduser().resolve()
     output_root = Path(output_root).expanduser().resolve()
     caller_rng = capture_rng_state()
+    sinr_logger = None
+    sinr_summary = None
     try:
         payload = torch.load(policy_path, map_location="cpu", weights_only=False)
         if not isinstance(payload, dict):
@@ -269,10 +273,14 @@ def evaluate_zero_shot(
         resolved_device = resolve_device(device)
         target_config.device_resolved = str(resolved_device)
         seed_everything(source_config.seed, resolved_device)
-        environment = PaperEnviron(target_config)
+        if sinr_log:
+            from analysis.mappo_sinr import SinrEnvironment, SinrLogger
+        environment = SinrEnvironment(target_config) if sinr_log else PaperEnviron(target_config)
         frozen = FrozenActorPolicy(source_config, payload["actors"], resolved_device)
         snapshot = frozen.snapshot()
         eval_dir.mkdir(parents=True, exist_ok=False)
+        if sinr_log:
+            sinr_logger = SinrLogger(eval_dir, target_config, sinr_console_episodes)
         raw_by_seed = []
         exogenous = []
         for heldout_seed in eval_seeds:
@@ -287,6 +295,8 @@ def evaluate_zero_shot(
                 for _slot in range(target_config.steps_per_episode):
                     actions = frozen.act(observations, deterministic=deterministic)
                     observations, _rg, _t1, _t2, _done, _info = environment.step(actions)
+                    if sinr_logger is not None:
+                        sinr_logger.record(environment, heldout_seed, "warmup", warmup_index+1, _slot+1)
             seed_records = []
             for episode in range(int(eval_episodes)):
                 observations = environment.start_episode(int(target_config.eval_warmup_episodes) + episode)
@@ -294,6 +304,8 @@ def evaluate_zero_shot(
                 for _slot in range(target_config.steps_per_episode):
                     actions = frozen.act(observations, deterministic=deterministic)
                     observations, rg, t1, t2, _done, info = environment.step(actions)
+                    if sinr_logger is not None:
+                        sinr_logger.record(environment, heldout_seed, "scored", episode+1, _slot+1)
                     episode_records.append(_step_record(info, actions, rg, t1, t2, target_config))
                 seed_records.append(episode_records)
             raw_by_seed.append(seed_records)
@@ -302,7 +314,11 @@ def evaluate_zero_shot(
                                   "final": exogenous_probe(environment)})
         if not frozen.unchanged(snapshot):
             raise RuntimeError("frozen zero-shot evaluation modified actor parameters")
+        if sinr_logger is not None:
+            sinr_summary = sinr_logger.finish(eval_seeds, int(eval_episodes), int(target_config.eval_warmup_episodes))
     finally:
+        if sinr_logger is not None:
+            sinr_logger.close()
         restore_rng_state(caller_rng)
 
     arrays = _stack_trajectory(raw_by_seed)
@@ -321,6 +337,8 @@ def evaluate_zero_shot(
     git_metadata = _git_metadata()
     policy_reference = os.path.relpath(policy_path, eval_dir).replace(os.sep, "/")
     summary = {
+        **({"sinr_logging": True, "sinr_summary": sinr_summary,
+            "sinr_files": ["sinr.log", "sinr_slots.csv", "sinr_summary.json"]} if sinr_log else {}),
         **git_metadata,
         **({"checkpoint_role": payload["checkpoint_role"], "policy_version": payload["policy_version"],
             "training_budget_episodes": source_config.episodes} if training_policy else {}),
