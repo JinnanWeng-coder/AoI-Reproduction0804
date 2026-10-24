@@ -37,6 +37,14 @@ class Global_Critic:
         self.number_states = config.state_dim
         self.number_actions = config.action_dim
         self.learn_step_counter = 0
+        self.actor_optimizer_step_count = 0
+        self.target_actor_update_count = 0
+        self.actor_sharing = bool(getattr(config, "maddpg_actor_sharing", False))
+        if self.actor_sharing:
+            if config.algorithm != "modified_maddpg_tdec" or config.global_update_mode != "synchronous_joint":
+                raise ValueError("shared actor supports synchronous TDec only")
+            if len({id(a.actor) for a in self.agents_networks}) != 1 or len({id(a.target_actor) for a in self.agents_networks}) != 1:
+                raise ValueError("shared learner requires one online and one target actor")
         self.global_critic1 = G_CriticNetwork(config.state_dim, config.global_critic_hidden, config.action_dim, config.number_agents, config.critic_lr, self.device)
         self.global_critic2 = G_CriticNetwork(config.state_dim, config.global_critic_hidden, config.action_dim, config.number_agents, config.critic_lr, self.device)
         self.global_target_critic1 = G_CriticNetwork(config.state_dim, config.global_critic_hidden, config.action_dim, config.number_agents, config.critic_lr, self.device)
@@ -279,6 +287,8 @@ class Global_Critic:
             actor_step_order = [int(index) for index in actor_step_order]
             if sorted(actor_step_order) != list(range(len(self.agents_networks))):
                 raise ValueError("actor_step_order must be a permutation of agent indices")
+        if self.actor_sharing:
+            return self._shared_actor_step(states)
         critics = [self.global_critic1, self.global_critic2, *self._local_critic_modules()]
         for agent in self.agents_networks:
             agent.actor.optimizer.zero_grad(set_to_none=True)
@@ -359,6 +369,71 @@ class Global_Critic:
             "actor_gradient_diagnostics": gradient_diagnostics,
         }
 
+    def _shared_actor_step(self, states):
+        """One Adam step on the mean of the original actors' contributions.
+
+        The global Q objective occurs ONCE, including gradients through every
+        joint-action branch. This equals the mean independent-actor gradient at
+        identical actor weights, not an average of independent Adam updates.
+        """
+        actor = self.agents_networks[0].actor
+        parameters = list(actor.parameters())
+        before = torch.cat([p.detach().flatten() for p in parameters])
+        actor.optimizer.zero_grad(set_to_none=True)
+        critics = [self.global_critic1, self.global_critic2, *self._local_critic_modules()]
+        diagnostic = None
+        with _freeze_modules(critics):
+            g, local, actions, components = self._actor_component_terms(states)
+            loss = (g + local) / self.number_agents
+            # A joint-action VJP isolates each leader's global contribution;
+            # repeatedly differentiating g wrt aliased parameters would wrongly
+            # report the same TOTAL shared gradient in every leader column.
+            action_grads = torch.autograd.grad(g, actions, retain_graph=True)
+            global_vectors = []
+            local_vectors = {name: [] for name in components}
+            def flatten(grads):
+                return torch.cat([(torch.zeros_like(p) if v is None else v).reshape(-1)
+                                  for p,v in zip(parameters,grads)]) / self.number_agents
+            for i,action in enumerate(actions):
+                grads = torch.autograd.grad(action, parameters, grad_outputs=action_grads[i],
+                                            retain_graph=True, allow_unused=True)
+                global_vectors.append(flatten(grads))
+                if bool(getattr(self.config,"diagnostics",False)):
+                    for name,terms in components.items():
+                        local_vectors[name].append(flatten(torch.autograd.grad(terms[i],parameters,
+                                                  retain_graph=True,allow_unused=True)))
+            global_norms = [float(torch.linalg.vector_norm(v).detach().cpu()) for v in global_vectors]
+            if bool(getattr(self.config,"diagnostics",False)):
+                diagnostic = {k: [] for k in ("task1_grad_l2","task2_grad_l2","local_sum_grad_l2","global_grad_l2",
+                    "global_to_local_ratio","global_to_task1_ratio","global_to_task2_ratio","task1_to_task2_ratio",
+                    "global_vs_local_cosine","global_vs_task1_cosine","global_vs_task2_cosine","task1_vs_task2_cosine")}
+                for i,gv in enumerate(global_vectors):
+                    a,b=local_vectors['task1'][i],local_vectors['task2'][i]
+                    lv=a+b
+                    na,nb,nl,ng=[torch.linalg.vector_norm(v) for v in (a,b,lv,gv)]
+                    def ratio(x,y):
+                        return x/torch.clamp(y,min=1e-30)
+                    def cosine(x,y,nx,ny):
+                        return torch.clamp(torch.dot(x,y)/torch.clamp(nx*ny,min=1e-30),-1,1)
+                    values=(na,nb,nl,ng,ratio(ng,nl),ratio(ng,na),ratio(ng,nb),ratio(na,nb),
+                            cosine(gv,lv,ng,nl),cosine(gv,a,ng,na),cosine(gv,b,ng,nb),cosine(a,b,na,nb))
+                    for key,value in zip(diagnostic,values):
+                        diagnostic[key].append(float(value.detach().cpu()))
+                finite=all(np.isfinite(v).all() for v in diagnostic.values())
+                diagnostic.update(mode=self.config.global_update_mode, global_contributes_to_actor=True,
+                                  scope="per_leader_contribution_to_shared_mean", finite=finite)
+            loss.backward()
+            actor.optimizer.step()
+        self.actor_optimizer_step_count += 1
+        delta = float(torch.linalg.vector_norm(torch.cat([p.detach().flatten() for p in parameters])-before).cpu())
+        for i,agent in enumerate(self.agents_networks):
+            agent.update_network_parameters(update_actor=(i==0))
+        self.target_actor_update_count += 1
+        return {"actor_loss":float(loss.detach().cpu()), "global_actor_gradient_norms":global_norms,
+                "actor_parameter_deltas":[delta]*self.number_agents, "actor_gradient_diagnostics":diagnostic,
+                "actor_optimizer_step_count":self.actor_optimizer_step_count,
+                "target_actor_update_count":self.target_actor_update_count}
+
     def learn(self, batch):
         states, actions, rewards_g, rewards_t1, rewards_t2, next_states, done = batch
         states_t = torch.as_tensor(states, dtype=torch.float32, device=self.device)
@@ -397,7 +472,7 @@ class Global_Critic:
                 target_param.data.copy_(tau * source_param.data + (1.0 - tau) * target_param.data)
 
     def state_dict_full(self):
-        return {
+        state = {
             "algorithm": self.config.algorithm,
             "global_critic1": self.global_critic1.state_dict(),
             "global_critic2": self.global_critic2.state_dict(),
@@ -407,6 +482,10 @@ class Global_Critic:
             "global_critic2_optimizer": self.global_critic2.optimizer.state_dict(),
             "learn_step_counter": self.learn_step_counter,
         }
+        if self.actor_sharing:
+            state.update(actor_sharing=True, actor_optimizer_step_count=self.actor_optimizer_step_count,
+                         target_actor_update_count=self.target_actor_update_count)
+        return state
 
     def load_state_dict_full(self, state):
         checkpoint_algorithm = state.get("algorithm", "modified_maddpg_tdec")
@@ -422,3 +501,8 @@ class Global_Critic:
         self.global_critic1.optimizer.load_state_dict(state["global_critic1_optimizer"])
         self.global_critic2.optimizer.load_state_dict(state["global_critic2_optimizer"])
         self.learn_step_counter = int(state["learn_step_counter"])
+        if self.actor_sharing:
+            if state.get("actor_sharing") is not True:
+                raise ValueError("shared learner checkpoint identity missing")
+            self.actor_optimizer_step_count = int(state["actor_optimizer_step_count"])
+            self.target_actor_update_count = int(state["target_actor_update_count"])

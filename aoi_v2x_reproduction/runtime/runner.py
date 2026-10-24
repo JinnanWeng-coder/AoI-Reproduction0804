@@ -104,7 +104,8 @@ def _make_system(config):
     config.device_resolved = str(device)
     seed_everything(config.seed, device)
     environment = _make_environment(config)
-    agents = [Agent(config, index) for index in range(config.number_agents)]
+    from ..algorithms.modified_maddpg.agent import make_agents
+    agents = make_agents(config)
     learner = Global_Critic(config, agents)
     replay = ReplayBuffer(config.replay_capacity, config.state_dim, config.action_dim, config.number_agents)
     metrics = MetricStore(
@@ -806,6 +807,7 @@ def _train_mappo(
     max_episodes: Optional[int] = None,
     recover_empty_run: bool = False,
     *, training_reward_best: bool = False, progress_callback=None,
+    periodic_policy_interval=None, periodic_policy_smoke=False,
 ) -> Dict[str, Any]:
     if training_reward_best:
         from .training_selection import validate_request
@@ -824,6 +826,10 @@ def _train_mappo(
     if training_reward_best:
         from .training_selection import TrainingRewardBest
         selector = TrainingRewardBest(run_dir, config)
+    periodic = None
+    if periodic_policy_interval is not None:
+        from .periodic_policy import PeriodicPolicySnapshots
+        periodic = PeriodicPolicySnapshots(run_dir, config, periodic_policy_interval, smoke=periodic_policy_smoke)
     if hasattr(environment, "reset_world") and not getattr(environment, "_world_initialized", False):
         environment.reset_world(config.seed)
 
@@ -913,6 +919,8 @@ def _train_mappo(
             diagnostics = trainer.update(batch)
             metrics.append_mappo_update(episode + 1, diagnostics)
 
+        if periodic is not None:
+            periodic.observe(episode + 1, trainer, trainer.policy_version)
         if progress_callback is not None:
             progress_callback({"episode": episode + 1, "episodes": stop_episode,
                                "environment_steps": int(trainer.environment_steps),
@@ -996,6 +1004,9 @@ def _train_mappo(
         "metrics_shapes": shapes,
         "audit": audit,
     }
+    if periodic is not None:
+        complete["periodic_policy_snapshots"] = {"index": "policies/index.json", "count": len(periodic.records),
+                "interval": periodic.interval, "smoke": periodic.smoke, "role": "periodic_policy_snapshot"}
     if training_selection is not None:
         complete["training_reward_selection"] = training_selection
         complete["policy_best_training"] = training_selection["policy_best"]
@@ -1017,10 +1028,14 @@ def train(
     max_episodes: Optional[int] = None,
     recover_empty_run: bool = False,
     *, training_reward_best: bool = False, progress_callback=None,
+    periodic_policy_interval=None, periodic_policy_smoke=False,
 ) -> Dict[str, Any]:
     if config.algorithm == "mappo":
         return _train_mappo(config, resume, max_episodes, recover_empty_run,
-                            training_reward_best=training_reward_best, progress_callback=progress_callback)
+                            training_reward_best=training_reward_best, progress_callback=progress_callback,
+                            periodic_policy_interval=periodic_policy_interval, periodic_policy_smoke=periodic_policy_smoke)
+    if periodic_policy_interval is not None and (resume or max_episodes is not None or recover_empty_run):
+        raise ValueError("periodic policy snapshots do not support training resume/partial recovery")
     if training_reward_best:
         from .training_selection import validate_request
         validate_request(config, resume, max_episodes, recover_empty_run)
@@ -1033,6 +1048,10 @@ def train(
     if training_reward_best:
         from .training_selection import TrainingRewardBest
         selector = TrainingRewardBest(run_dir, config)
+    periodic = None
+    if periodic_policy_interval is not None:
+        from .periodic_policy import PeriodicPolicySnapshots
+        periodic = PeriodicPolicySnapshots(run_dir, config, periodic_policy_interval, smoke=periodic_policy_smoke)
     selection_state: Optional[Dict[str, Any]] = None
     if config.checkpoint_mode == "resumable":
         selection_state = {
@@ -1057,6 +1076,7 @@ def train(
     elif hasattr(environment, "reset_world") and not getattr(environment, "_world_initialized", False):
         environment.reset_world(config.seed)
 
+    started = time.perf_counter()
     stop_episode = config.episodes if max_episodes is None else min(config.episodes, int(max_episodes))
     for episode in range(start_episode, stop_episode):
         version_before_episode = int(learner.learn_step_counter) // int(config.policy_delay) if selector is not None else None
@@ -1087,6 +1107,15 @@ def train(
             logged = metrics.episodes[-1]
             selector.observe(logged["task1_step"], logged["task2_step"], logged["global_step"], agents, version_before_episode,
                              int(learner.learn_step_counter) // int(config.policy_delay), "after_episode_online_actor_updates")
+        if periodic is not None:
+            periodic.observe(episode + 1, agents, int(learner.learn_step_counter) // int(config.policy_delay))
+        if progress_callback is not None:
+            version = int(learner.learn_step_counter) // int(config.policy_delay)
+            progress_callback({"episode": episode + 1, "episodes": stop_episode,
+                               "environment_steps": (episode + 1) * config.steps_per_episode,
+                               "critic_learning_steps": int(learner.learn_step_counter), "policy_version": version,
+                               "actor_optimizer_step_count": learner.actor_optimizer_step_count if config.maddpg_actor_sharing else version * len(agents),
+                               "elapsed_seconds": time.perf_counter() - started})
         if selector is None and config.checkpoint_mode == "resumable" and (
             ((episode + 1) % config.checkpoint_every == 0) or episode == stop_episode - 1
         ):
@@ -1194,6 +1223,19 @@ def train(
         complete["training_reward_selection"] = training_selection
         complete["policy_best_training"] = training_selection["policy_best"]
         complete["checkpoint_selection"] = training_selection
+    if periodic is not None or config.maddpg_actor_sharing:
+        version = int(learner.learn_step_counter) // int(config.policy_delay)
+        complete.update(actor_sharing=bool(config.maddpg_actor_sharing), actor_network_count=1 if config.maddpg_actor_sharing else len(agents),
+                        critic_learning_steps=int(learner.learn_step_counter), policy_version=version,
+                        actor_optimizer_step_count=learner.actor_optimizer_step_count if config.maddpg_actor_sharing else version * len(agents),
+                        environment_steps=config.episodes * config.steps_per_episode, training_wall_seconds=time.perf_counter() - started)
+        if config.maddpg_actor_sharing:
+            complete.update(model_id="shared_maddpg_tdec", actor_structure="shared", target_actor_network_count=1,
+                            target_actor_update_count=learner.target_actor_update_count,
+                            actor_objective="(global_loss+sum_leader_task1_task2_losses)/P")
+    if periodic is not None:
+        complete["periodic_policy_snapshots"] = {"index": "policies/index.json", "count": len(periodic.records),
+                "interval": periodic.interval, "smoke": periodic.smoke, "role": "periodic_policy_snapshot"}
     _write_json(run_dir / "COMPLETE.json", complete)
     with (run_dir / "stdout.log").open("a", encoding="utf-8") as handle:
         handle.write("run completed\n")

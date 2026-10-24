@@ -10,6 +10,21 @@ import torch
 from .networks import ActorNetwork, CriticNetwork
 
 
+def make_agents(config):
+    # Preserve the historical RNG draws and all critic initializations. Only
+    # after initialization discard actors1..P-1 and bind to actor0. No extra RNG.
+    agents = [Agent(config, i) for i in range(config.number_agents)]
+    if bool(getattr(config, "maddpg_actor_sharing", False)):
+        if config.algorithm != "modified_maddpg_tdec" or config.global_update_mode != "synchronous_joint":
+            raise ValueError("shared MADDPG requires synchronous TDec")
+        for agent in agents[1:]:
+            agent.actor = agents[0].actor
+            agent.target_actor = agents[0].target_actor
+        # Target actors never optimize; exactly one live actor optimizer remains.
+        del agents[0].target_actor.optimizer
+    return agents
+
+
 class Agent:
     def __init__(self, config, agent_index: int):
         self.config = config
@@ -61,15 +76,15 @@ class Agent:
             self.actor.train()
         return np.clip(action, -self.config.target_action_clip, self.config.target_action_clip).astype(np.float32)
 
-    def update_network_parameters(self, tau=None):
+    def update_network_parameters(self, tau=None, *, update_actor=True):
         tau = self.config.tau if tau is None else float(tau)
-        pairs = [(self.target_actor, self.actor)]
+        pairs = [(self.target_actor, self.actor)] if update_actor else []
         pairs.extend(zip(self.target_local_critics, self.local_critics))
         for target, source in pairs:
             for target_param, source_param in zip(target.parameters(), source.parameters()):
                 target_param.data.copy_(tau * source_param.data + (1.0 - tau) * target_param.data)
 
-    def state_dict_full(self) -> Dict[str, object]:
+    def state_dict_full(self, *, include_actor=True) -> Dict[str, object]:
         state = {
             "algorithm": self.config.algorithm,
             "actor": self.actor.state_dict(),
@@ -91,18 +106,22 @@ class Agent:
                 "critic_task1_optimizer": self.critic_task1.optimizer.state_dict(),
                 "critic_task2_optimizer": self.critic_task2.optimizer.state_dict(),
             })
+        if not include_actor:
+            for key in ("actor", "target_actor", "actor_optimizer"):
+                state.pop(key)
         return state
 
-    def load_state_dict_full(self, state):
+    def load_state_dict_full(self, state, *, load_actor=True):
         checkpoint_algorithm = state.get("algorithm", "modified_maddpg_tdec")
         if checkpoint_algorithm != self.config.algorithm:
             raise ValueError(
                 f"agent checkpoint algorithm mismatch: checkpoint={checkpoint_algorithm!r}, "
                 f"resolved={self.config.algorithm!r}"
             )
-        self.actor.load_state_dict(state["actor"])
-        self.target_actor.load_state_dict(state["target_actor"])
-        self.actor.optimizer.load_state_dict(state["actor_optimizer"])
+        if load_actor:
+            self.actor.load_state_dict(state["actor"])
+            self.target_actor.load_state_dict(state["target_actor"])
+            self.actor.optimizer.load_state_dict(state["actor_optimizer"])
         if self.config.algorithm == "modified_maddpg":
             self.critic.load_state_dict(state["critic"])
             self.target_critic.load_state_dict(state["target_critic"])

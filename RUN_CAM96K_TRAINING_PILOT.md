@@ -1,145 +1,159 @@
-# CAM96k 从头训练与冻结评估
+# CAM96k training pilot v2：五种方法、周期快照与冻结评估
 
-本入口只运行三种 MAPPO（Shared TDec、Independent TDec、Shared Combined），各保留 seed12、seed13。
-正式预算是每次 2500 周期 × 100 时隙，共 1,500,000 环境步。CAM 为十进制 96,000 bit/周期。
-P5、N4、K3、gap25、1ms/时隙及原算法、奖励、移动和信道语义保持原样。
+当前入口为 `analysis.cam96k_training_pilot_v2`，schema 为 `cam96k_training_pilot_v2`。
+旧 v1 的入口、六单元 schema、批次、prompt 和 smoke 历史保留，不能把旧 manifest 改成十单元或更改旧提交身份。
+本文件描述 v2；v1 的历史操作说明可在提交 `048ce8f0c765b91384039a9ba07c60e88007d6a2` 中查看。
 
-开发基线为 `ee05154233c9122f5cf6e57e13cf372a60bdf843`。
-使用已验证哈希的 `configs/training100_fresh_sources.json`，复用 Training100 的配置派生和模型选择。
-本轮源模型本身在 96k 训练，现有冻结评估器直接保留该 CAM 值；不需要引入归档分支的跨负载修改。
-Combined 仍是联合观测输入、输出五个车队总回报价值的集中式 Critic。
+## 计划及固定配置
 
-## 环境与批次
+| ID | 方法 | 共同 seed | 接受的 32k 配置来源 |
+|---|---|---|---|
+| 0、1 | Shared MAPPO-TDec | 12、13 | Training100-best / shared_tdec |
+| 2、3 | Independent MAPPO-TDec | 12、13 | Training100-best / independent_tdec |
+| 4、5 | Shared MAPPO-Combined | 12、13 | Training100-best / shared_combined |
+| 6、7 | Independent Modified MADDPG-TDec | 12、13 | Training100-best / algorithm2 |
+| 8、9 | Shared Modified MADDPG-TDec | 12、13 | Shared-MADDPG-TDec / shared2 / training/a01 |
 
-在 Windows PowerShell 中设置：
+来源配置及配置/完成标记 SHA256 存在 `configs/cam96k_v2_sources.json`。
+MAPPO 与 Independent MADDPG 来源运行提交为 `04606e15f26f316728430e53a0e0d1e225bdb3e2`；Shared MADDPG 为 `c459115c58d7a465f3a4f2358a6385c649e42019`。
+来源只用于代码、配置核对，不加载历史权重、replay 或训练进度。
+各方法相对其已接受来源只改变 CAM、运行名称和输出路径；周期保存策略独立记入新 manifest，不改变训练配置的原超参数。
+
+十次均 CAM=96,000 bit/周期，P5/N4/K3/gap25，1ms/时隙，每周期 100 时隙，从头训练 2500 周期。
+共 25,000 周期、2,500,000 训练环境步。各 seed 独立 best100，另存 final。
+MADDPG 训练探索 sigma=0.3 fixed；冻结动作 noise=0。训练 target policy smoothing sigma=0.2、clip=0.5 保持原样。
+Shared MADDPG 保留历史一个共享 Actor、十个局部任务 Critic、全局双 Q 及对应目标网络；共享目标为 `(global_loss+sum_leader_task1_task2_losses)/P`，一次 Adam/目标 Actor 更新。
+不启用 NoiseDecay，不增加 Parvini 非 TDec MADDPG。
+
+## Windows 环境与正式批次
 
 ```powershell
 $ErrorActionPreference = 'Stop'
 $repo = 'E:\Jinnan_Edisk\Research\Parvini_Reproduction_core\AoI-Reproduction0804'
 $python = 'E:\Jinnan_Edisk\Research\Parvini_Reproduction_core\.envs\aoi_cuda310\python.exe'
 $study = 'E:\Jinnan_Edisk\Research\Parvini_Reproduction_core\AoI-Reproduction-diagnostics\actor-sharing-study'
-$batch = Join-Path $study 'CAM96k-training-pilot\cam96k_20261025_v1'
+$batch = Join-Path $study 'CAM96k-training-pilot\cam96k_20261025_v2'
 Set-Location -LiteralPath $repo
 ```
 
-Python 3.10.20，PyTorch 2.11.0+cu126，CUDA runtime 12.6，RTX 4090。
-preflight 会逐项检查 `requirements.cuda.lock.txt`、CUDA 矩阵运算、六份配置和环境实际初始需求。
-使用现有环境，不升级依赖，不自动回退 CPU。
-
-正式批次仅在干净的 `research/cam96k-training-pilot*` 分支创建，固定当前提交；之后每条命令复查提交。
-交接 prompt 必须明确填写交付 SHA；下面的变量用于已核对 SHA 后的日常操作，不替代交接核对。
+使用现有 Python3.10.20、torch2.11.0+cu126 和 RTX4090，不升级依赖。
+正式 manifest 由开发交付后绑定最终提交创建；Grok 使用已经创建的新批次，不重新 init。
+需要创建独立批次时，先核对交付 SHA 和干净工作区，再执行唯一名称的 init；不能覆盖原目录。
 
 ```powershell
 $commit = (git rev-parse HEAD).Trim()
-# init 只执行一次。已存在的批次直接使用 preview/status；不删除或重建。
-& $python -B -m analysis.cam96k_training_pilot init --study-root $study --batch-id cam96k_20261025_v1 --expected-commit $commit
-if ($LASTEXITCODE -ne 0) { throw 'init failed' }
-& $python -B -m analysis.cam96k_training_pilot preview --batch-root $batch
+# 仅对尚不存在的新批次执行 init；交付的新正式批次已初始化时跳过。
+# & $python -B -m analysis.cam96k_training_pilot_v2 init --study-root $study --batch-id NEW_UNIQUE_BATCH_ID --expected-commit $commit
+& $python -B -m analysis.cam96k_training_pilot_v2 preview --batch-root $batch
 if ($LASTEXITCODE -ne 0) { throw 'preview failed' }
-& $python -B -m analysis.cam96k_training_pilot preflight --batch-root $batch
+& $python -B -m analysis.cam96k_training_pilot_v2 preflight --batch-root $batch
 if ($LASTEXITCODE -ne 0) { throw 'preflight failed' }
+& $python -B -m analysis.cam96k_training_pilot_v2 status --batch-root $batch
+if ($LASTEXITCODE -ne 0) { throw 'status failed' }
 ```
 
-`preview` 不训练，输出六个单元的全部有效配置和相对于历史配置模板的字段差异。
-`init`、preflight、status 不启动训练或冻结 rollout。
+preflight 检查十个来源、依赖、CUDA 运算、实际初始 CAM、MADDPG replay 与系统资源。
+生产 replay 每进程 49,250,000 bytes，两路合计 98,500,000 bytes；网络、优化器、诊断和 CUDA 上下文另计，实际峰值由 smoke 资源记录给出。
+资源不足直接报告，不自动改并发或 OOM 重试。
 
-## 正式训练（由 Grok 启动）
+## 训练两路，评估八路，分别配置
+
+训练默认并发 **2**：单个监督进程按 `(0,1) → (2,3) → (4,5) → (6,7) → (8,9)` 执行。
+每组两个 seed 全部完成并验收后才进入下一组，不跨组混排、不启动多个监督进程。
+study 训练槽仅限制训练，不应用于冻结评估。监督锁和单元锁保留，遗留锁不自动删除。
 
 ```powershell
-& $python -B -u -m analysis.cam96k_training_pilot train --batch-root $batch
-if ($LASTEXITCODE -ne 0) { throw 'training failed; inspect preserved logs and attempts' }
-& $python -B -m analysis.cam96k_training_pilot verify-training --batch-root $batch
-if ($LASTEXITCODE -ne 0) { throw 'six-run verification failed' }
+& $python -B -u -m analysis.cam96k_training_pilot_v2 train --batch-root $batch
+if ($LASTEXITCODE -ne 0) { throw 'training failed; preserve attempts' }
+& $python -B -m analysis.cam96k_training_pilot_v2 verify-training --batch-root $batch
+if ($LASTEXITCODE -ne 0) { throw 'ten-run training verification failed' }
 ```
 
-训练并发固定上限 **2**，顺序为：
-
-| 组 | ID | 算法 | 同时启动的 seed |
-|---|---|---|---|
-| 1 | 0、1 | Shared MAPPO-TDec | 12、13 |
-| 2 | 2、3 | Independent MAPPO-TDec | 12、13 |
-| 3 | 4、5 | Shared MAPPO-Combined | 12、13 |
-
-每组两个 seed 全部完成并验收后，才进入下一组。每个 seed 使用独立进程、初始化、输出、日志和 checkpoint。
-只跳过经过完整重新验收的已接受单元。进程退出为零并不等于验收通过。
-批次 supervisor 锁、单元锁与 study 范围的两个训练槽防止重复监督、重复写入和超过两路训练。
-锁采用独占创建；不自动清除遗留锁。遇到锁冲突先检查记录的 PID 与命令行，不终止无关任务。
-
-`t/a01/cam96k_<model>_s<seed>/` 中保存 `policy_best_training.pt`、`policy_final.pt`、完整训练数组、配置、来源和选择 CSV。
-best100 仍按连续 100 周期的平均训练回报、严格改善和最早并列规则选择。
-best 保存于窗口末周期结束且待执行 PPO 更新之前；final 在第 500 次更新后保存。
-不比较两个 seed 来淘汰其中一个，不使用冻结指标挑 checkpoint。
-
-## 监控、失败与重试
+只有十次训练全部通过，才执行 50 个 best100 单元。冻结默认并发 **8**，单个评估监督进程，每个子进程独占一个 `(方法, seed, best100, world, repeat0)` 单元。
 
 ```powershell
-& $python -B -m analysis.cam96k_training_pilot status --batch-root $batch
-Get-ChildItem -LiteralPath (Join-Path $batch 'logs')
-Get-Content -LiteralPath (Join-Path $batch 'records\heartbeat_0_a01.json')
-nvidia-smi
+& $python -B -u -m analysis.cam96k_training_pilot_v2 evaluate --batch-root $batch --eval-workers 8
+if ($LASTEXITCODE -ne 0) { throw 'evaluation failed; preserve attempts' }
+& $python -B -m analysis.cam96k_training_pilot_v2 summary --batch-root $batch
+if ($LASTEXITCODE -ne 0) { throw 'summary failed' }
+```
+
+每 world 冷重置一次，预热5周期不计分、计分100周期；worlds1001–1005 为已使用探索集。
+MAPPO 随机采样 repeat0；MADDPG noise0，保留各自设备、精度、动作解码和 RNG 派生。
+默认不评估完整 final 或周期快照。Uniform 只读核验后复用，stream12/13 不是训练 seed。
+
+后台运行使用 `scripts/run_cam96k_v2_supervisor.ps1`。它等待 Python 监督进程退出，检查原生退出码，再执行 verify-training/summary，最后原子发布唯一完成回执。
+启动成功或 PID 消失不等于通过；必须检查回执的 `exit_code=0`、`validation_exit_code=0`，再核对批次验收文件。
+交付 prompt 包含隐藏后台启动、日志父目录、PID 记录和回执检查的完整命令。
+
+## 周期策略快照
+
+每个正式 run 除 best100/final 外，保留：
+
+```text
+policies/policy_episode_000500.pt
+policies/policy_episode_001000.pt
+policies/policy_episode_001500.pt
+policies/policy_episode_002000.pt
+policies/policy_episode_002500.pt
+policies/index.json
+```
+
+角色为 `periodic_policy_snapshot`，schema 为 `periodic_policy_snapshot_v1`。
+独立方法包含全部五个 Actor；共享方法包含一个共享 Actor；Actor 所需状态随 state_dict 保存。
+payload 包含算法/变体配置、共享标志、seed、episode、环境步、policy_version、保存时序、配置/hash、Git 身份和角色。
+索引记录各文件大小、SHA256 及元数据。保存采用原子写入和独占防覆盖，保存前后恢复 Python/NumPy/Torch/CUDA RNG，不改变参数或 train/eval 模式。
+
+MAPPO 在该周期结束、原计划的 PPO 更新后保存；不额外 consume rollout 或更新。
+MADDPG 在对应周期在线更新后保存，不额外调用 learn、不改变 replay、探索或 target smoothing。
+episode2500 快照必须与 final 的 Actor 张量逐一相同；角色和元数据不同，文件 SHA256 可不同。
+原 best100 仍逐周期 rolling100、严格改善、最早并列；MAPPO best100 仍在待执行 PPO 更新前保存。
+快照不参与 best100 选择，也不宣称支持训练恢复。
+
+明确加载/验证入口：
+
+```powershell
+$run = Join-Path $batch 't\a01\cam96k_shared_tdec_s12'
+& $python -B -m analysis.cam96k_training_pilot_v2 verify-snapshots --batch-root $batch --run-dir $run
+if ($LASTEXITCODE -ne 0) { throw 'snapshot verification failed' }
+```
+
+Python 可使用 `runtime.periodic_policy.load_periodic_policy(path, expected_seed=12, expected_episode=500)` 或 `load_periodic_actors(...)`。
+加载器独立验证角色、索引 SHA256、配置/hash、Git、seed、episode、policy_version、网络数量和严格 state_dict，不伪装成 best/final，不依赖伪造的 COMPLETE。
+
+## 监控、验收与重试
+
+`records/heartbeat_<ID>_<attempt>.json` 每周期更新；MADDPG 分别记录 critic learning steps、Actor optimizer steps 和 policy_version，不套用 PPO 更新数。
+子进程日志、进程退出码、每组资源采样都在新批次内。资源记录包含 GPU 总用量、CPU 可用内存及每个子进程工作集。
+若没有进度，先检查心跳、进程、日志和 I/O，不只看 GPU 利用率。保留失败 attempt，不因成绩重跑。
+
+```powershell
+& $python -B -m analysis.cam96k_training_pilot_v2 status --batch-root $batch
+Get-ChildItem -LiteralPath (Join-Path $batch 'records') -Filter 'heartbeat_*.json'
 Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' } | Select-Object ProcessId,ParentProcessId,CommandLine
+nvidia-smi
 ```
 
-`records/heartbeat_<id>_<attempt>.json` 每周期原子更新，包含周期、环境步、PPO 更新数、耗时、PID 和 UTC 时间。
-训练子进程每 5 周期输出进度，监督进程每 15 秒输出存活状态。资源可结合进程工作集与 `nvidia-smi` 查看。
-`records/process_*.json` 记录实际启动命令、日志、PID、退出码、耗时。
-没有进度时先检查心跳、进程、日志与资源；不能仅凭 GPU 利用率低判定卡死。
+技术失败诊断后，只重跑实际失败单元，使用新 attempt 和真实原因；policy-only 不支持完整恢复。
+已完成单元完整复核后跳过；原生完成但接受记录缺失时验收既有产物；禁止覆盖或自动删除。
 
-只读 policy checkpoint 不支持可靠续训。保留所有失败 attempt，诊断技术原因后才使用新的 attempt 从头重跑：
+正式最终验收至少为：accepted_training_runs=10、training_episodes_total=25000、training_environment_steps_total=2500000、periodic_snapshot_records=50、accepted_eval_units=50、platoon_rows=250、cam_deadlines=25000、scored_agent_slots=2500000、n_training_seeds_per_method=2、smoke=false。
+训练验收另要求10个 best100、10个 final、各 run 快照周期集合恰为[500,1000,1500,2000,2500]。
+统计保留 CAM 分子分母、线性mW、mean/worst AoI、截止剩余bit、payload比例、失败剩余bit（无失败NA）和 reward 分量。
+先 per_seed 再 across_seeds；world/周期/车队/Random stream 不增加训练 seed 数。
+
+## 开发 smoke 与历史保护
+
+`init --smoke` 必须使用含 smoke 的新唯一批次名。
+MAPPO 每 seed 5周期，MADDPG 每 seed 1周期，保持完整生产网络、replay、设备和原优化参数；总3400训练环境步。
+开发专用快照间隔1周期，生产间隔仍固定500。冻结 smoke 为10 run × worlds1001/1002，共20单元，预热5、计分2，默认八路。
+`compare-smoke` 对混合八路中的前8单元做串行参考，要求全部原始数组及物理 RNG probe 完全相同。
+短周期规则和结果均明确标smoke，不能混入正式结果。生产500周期触发、2500快照/final一致性及 best100 时序使用合成测试，不启动正式长训练。
 
 ```powershell
-# 示例：仅修复确有技术故障的 ID 0，原因必须写实；不因成绩低或曲线差重跑。
-& $python -B -u -m analysis.cam96k_training_pilot train-unit --batch-root $batch --id 0 --attempt a02 --reason '填写已确认的技术故障原因'
+# 仅对独立 smoke 批次执行；正式批次禁止调用 compare-smoke。
+# & $python -B -m analysis.cam96k_training_pilot_v2 compare-smoke --batch-root $smokeBatch
 ```
 
-若原生 COMPLETE 已存在但接受记录未写完，重新执行会验收原产物，不重复训练。
-若两种 attempt 都有完整结果，停止并调查；不自行按分数挑选。
-
-## 冻结评估与汇总（六次训练全部通过后）
-
-```powershell
-& $python -B -u -m analysis.cam96k_training_pilot evaluate --batch-root $batch --eval-workers 2
-if ($LASTEXITCODE -ne 0) { throw 'evaluation failed; inspect preserved attempts' }
-& $python -B -m analysis.cam96k_training_pilot summary --batch-root $batch
-if ($LASTEXITCODE -ne 0) { throw 'summary verification failed' }
-```
-
-只使用各 seed 自己的 best100。3 方法 × 2 训练 seed × worlds1001–1005，共 30 个单元，repeat0。
-每 world 开始时冷重置一次，5 个预热周期不计分，然后 100 个计分周期，每周期 100 时隙。
-保留现有 policy RNG 派生与物理 RNG 隔离；随机采样；无 Critic、优化器或 rollout buffer；权重不变。
-这些 world 是已用过的探索集，不能描述为未见确认集。冻结并发独立设置 1–8，不改变训练两路上限。
-
-输出 `tables/world_platoon.csv`、`world_summary.csv`、`per_seed.csv`、`across_seeds.csv` 和 `verification.json`。
-包含 CAM 成功分子/分母、AoI、逐样本转换后的线性 mW、截止剩余 bit、payload 交付比例、失败剩余 bit（无失败记 NA）、reward 分量。
-world 内最差车队先汇总该车队全部计分周期，再取最小完成率或最大 AoI。
-先分别报告两个训练 seed，再汇总；训练 seed 数始终是 2，world/周期/车队均不是额外训练 seed。
-汇总和验收可以重复执行；既有表格必须与重新计算完全一致，不覆盖已有证据。
-
-既有 96k Uniform 仅在完整环境与协议身份核验后复用：
-`../AoI-Reproduction-diagnostics/actor-sharing-study/Random-frozen-eval/P5_N4_gap25/random_uniform_stream12_13_cam64000_96000_world1001_1005_20261024_v1/`。
-两条 Random stream 是随机动作流，不是两个训练模型。不重新训练或运行 Random。
-历史记录里的 `9e84d25 + dirty` 保留原样，不改成事后归档提交。
-
-```powershell
-$uniform = Join-Path $study 'Random-frozen-eval\P5_N4_gap25\random_uniform_stream12_13_cam64000_96000_world1001_1005_20261024_v1'
-& $python -B -m analysis.cam96k_training_pilot reuse-uniform --batch-root $batch --uniform-root $uniform
-if ($LASTEXITCODE -ne 0) { throw 'Uniform reuse verification failed' }
-```
-
-这条命令不运行 rollout，重新核对十个 96k 单元的完整环境、协议、数组、分子分母和 SHA256，
-在新批次 `protocol/uniform_reuse.json` 中记录来源和复用指标；不改动旧批次。
-
-## 开发 smoke
-
-独立批次名必须含 `smoke`，`init --smoke` 将每个训练限制为 5 周期，并将每个冻结 smoke 限制为 world1001、5 个预热＋2 个计分周期。
-六个 seed 共 3000 训练环境步，六个冻结 smoke 共 4200 环境步，其中仅 1200 步计分。
-smoke 的 final 只用于检查加载和冻结路径，不能作为正式 best100 或正式结果。
-best100 完整窗口、严格加载、策略版本和同分边界通过合成序列测试；不为它进行正式训练。
-smoke 允许开发工作区 dirty，真实记录 dirty 和运行时 HEAD；正式批次不允许。
-
-```powershell
-# 开发用新批次示例；不要对正式批次传 --smoke。
-& $python -B -m analysis.cam96k_training_pilot init --study-root $study --batch-id smoke_NEW_UNIQUE_ID --expected-commit $commit --smoke
-```
-
-禁止启动 128k/160k、seed8–11、MADDPG 或完整 final 冻结评估；不 push、不并入 main、不清理历史目录。
+v1、既有 smoke、历史权重、配置、接受记录和真实 Git 身份均保留。
+不 push、不合并main、不升级环境、不启动seed8–11、128k/160k、NoiseDecay或额外方法。

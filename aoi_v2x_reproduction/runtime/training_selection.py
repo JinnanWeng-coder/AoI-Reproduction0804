@@ -131,7 +131,14 @@ def load_training_policy(path):
         require(payload["policy_version"] == selection["best"]["policy_version"], "best policy version mismatch")
     else:
         require(payload["policy_version"] == selection["final_policy_version"], "final policy version mismatch")
-    expected = 1 if cfg.algorithm == "mappo" and cfg.mappo_actor_sharing else cfg.number_agents
+    shared = bool(cfg.mappo_actor_sharing) if cfg.algorithm == "mappo" else bool(cfg.maddpg_actor_sharing)
+    if cfg.algorithm != "mappo":
+        require(bool(payload.get("actor_sharing", False)) == shared and bool(complete.get("actor_sharing", False)) == shared,
+                "MADDPG sharing identity mismatch")
+        if shared:
+            require(payload.get("model_id") == complete.get("model_id") == "shared_maddpg_tdec" and
+                    payload.get("sharing_schema") == "shared_maddpg_tdec_v1", "shared MADDPG artifact schema")
+    expected = 1 if shared else cfg.number_agents
     require(isinstance(payload.get("actors"), list) and len(payload["actors"]) == expected and all(
         state and all(isinstance(t, torch.Tensor) and torch.isfinite(t).all() for t in state.values()) for state in payload["actors"]),
         "training100 invalid actor states")
@@ -148,7 +155,7 @@ def load_training_actors(path, device="cpu"):
         modules = []
         for state in payload["actors"]:
             actor = (HybridActor(cfg.state_dim, cfg.actor_hidden, cfg.n_rb, cfg.n_modes) if cfg.algorithm == "mappo" else
-                     ActorNetwork(cfg.state_dim, cfg.actor_hidden, cfg.action_dim, cfg.actor_lr, "cpu"))
+                     ActorNetwork(cfg.state_dim, cfg.actor_hidden, cfg.action_dim, cfg.actor_lr, "cpu", create_optimizer=False))
             actor.load_state_dict(state, strict=True)
             actor.requires_grad_(False)
             modules.append(actor.to(device).eval())

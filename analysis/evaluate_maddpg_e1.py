@@ -65,7 +65,7 @@ def _parameters_unchanged(agents, learner, snapshot: Mapping[str, Any]) -> bool:
     return _nested_equal(_parameter_snapshot(agents, learner), snapshot)
 
 
-def _training_policy_system(path, runtime_config):
+def _training_policy_system(path, runtime_config, *, periodic=False):
     """Portable actors only; use the original Agent.choose_action unchanged."""
     from aoi_v2x_reproduction.algorithms.modified_maddpg.agent import Agent
     from aoi_v2x_reproduction.envs.platoon import PaperEnviron
@@ -83,8 +83,13 @@ def _training_policy_system(path, runtime_config):
 
     device = resolve_device(runtime_config.device)
     seed_everything(runtime_config.seed, device)
-    _, actors = load_training_actors(path, device=device)
-    return PaperEnviron(runtime_config), [FrozenAgent(a, runtime_config, device) for a in actors], None, device
+    if periodic:
+        from aoi_v2x_reproduction.runtime.periodic_policy import load_periodic_actors
+        _, actors = load_periodic_actors(path, device=device)
+    else:
+        _, actors = load_training_actors(path, device=device)
+    per_leader = [actors[0]] * runtime_config.number_agents if runtime_config.maddpg_actor_sharing else actors
+    return PaperEnviron(runtime_config), [FrozenAgent(a, runtime_config, device) for a in per_leader], None, device
 
 
 def reduce_heldout_metrics(
@@ -241,14 +246,18 @@ def evaluate_maddpg_e1(
     deployment: bool = False,
     world_role: str | None = None,
     training_policy: bool = False,
+    periodic_policy: bool = False,
 ) -> dict[str, Any]:
     from analysis.deployment_rng import action_seed_words, exogenous_probe
+    if training_policy and periodic_policy:
+        raise ValueError("choose one explicit policy artifact role")
+    portable_policy = training_policy or periodic_policy
     if action_repeat < 0:
         raise ValueError("action_repeat must be non-negative")
-    if training_policy and (not deployment or source_override is None):
+    if portable_policy and (not deployment or source_override is None):
         raise ValueError("training100 policies require explicit deployment/source override")
     allowed_roles = {None, "locked_new_worlds", "reused_development_worlds"}
-    if training_policy:
+    if portable_policy:
         allowed_roles.add("user_fixed_exploratory_worlds")
     if world_role not in allowed_roles:
         raise ValueError("invalid deployment world role")
@@ -275,9 +284,9 @@ def evaluate_maddpg_e1(
     )
     if deployment:
         eval_name += f"_deployment_{target_scenario or SCENARIO}_r{action_repeat}"
-    if training_policy:
+    if portable_policy:
         eval_name = f"training100_{Path(source['checkpoint']).stem}_episode{expected_episode}_noise{noise}_r{action_repeat}"
-    eval_dir = (output_root / "native" if training_policy else
+    eval_dir = (output_root / "native" if portable_policy else
                 output_root / "evaluations" / source["canonical_run_name"] / eval_name)
     if not deployment and eval_dir.exists() and (eval_dir / "EVAL_COMPLETE.json").is_file():
         existing = json.loads((eval_dir / "EVAL_COMPLETE.json").read_text(encoding="utf-8"))
@@ -289,9 +298,13 @@ def evaluate_maddpg_e1(
     source_before = _source_fingerprint(source["run_dir"])
     caller_rng = capture_rng_state()
     try:
-        if training_policy:
+        if portable_policy:
             from aoi_v2x_reproduction.runtime.training_selection import load_training_policy
-            cfg, payload = load_training_policy(source["checkpoint"])
+            if periodic_policy:
+                from aoi_v2x_reproduction.runtime.periodic_policy import load_periodic_policy
+                cfg, payload = load_periodic_policy(source["checkpoint"], expected_seed=seed, expected_episode=expected_episode)
+            else:
+                cfg, payload = load_training_policy(source["checkpoint"])
             if cfg.seed != seed or cfg.algorithm != algorithm or payload["episode"] != expected_episode:
                 raise ValueError("training100 source seed/algorithm/selected episode mismatch")
         else:
@@ -309,7 +322,7 @@ def evaluate_maddpg_e1(
             raise ValueError("checkpoint config is not P5/N4/gap25 with n_rb=3")
         if int(training_config.number_agents) != N_AGENTS or int(training_config.steps_per_episode) != STEPS_PER_EPISODE:
             raise ValueError("checkpoint config agent/step contract mismatch")
-        if not training_policy and payload.get("config_hash") != training_config.canonical_hash():
+        if not portable_policy and payload.get("config_hash") != training_config.canonical_hash():
             raise ValueError("checkpoint config hash does not match reconstructed config")
 
         runtime_config = copy.deepcopy(training_config)
@@ -317,8 +330,8 @@ def evaluate_maddpg_e1(
             runtime_config = build_frozen_maddpg_target_config(training_config, target_scenario, device)
         runtime_config.device = str(device)
         runtime_config.is_formal_result = False
-        if training_policy:
-            environment, agents, learner, resolved_device = _training_policy_system(source["checkpoint"], runtime_config)
+        if portable_policy:
+            environment, agents, learner, resolved_device = _training_policy_system(source["checkpoint"], runtime_config, periodic=True) if periodic_policy else _training_policy_system(source["checkpoint"], runtime_config)
         else:
             environment, agents, learner, _replay, _metrics, resolved_device = _make_system(runtime_config)
             for agent, state in zip(agents, payload["agents"]):
@@ -433,11 +446,13 @@ def evaluate_maddpg_e1(
     summary = {
         **({"checkpoint_role": payload["checkpoint_role"], "policy_version": payload["policy_version"],
             "training_budget_episodes": training_config.episodes, "critic_constructed": False,
-            "replay_constructed": False} if training_policy else {}),
+            "replay_constructed": False} if portable_policy else {}),
         "status": "complete",
         "algorithm": algorithm,
         "algorithm_label": source["algorithm_label"],
-        "actor_sharing": False,
+        "actor_sharing": bool(training_config.maddpg_actor_sharing),
+        **({"actor_network_count": 1 if training_config.maddpg_actor_sharing else runtime_config.number_agents,
+            "optimizer_constructed": False, "runtime_config": runtime_config.to_dict()} if portable_policy else {}),
         "training_seed": int(seed),
         "training_run_name": source["canonical_run_name"],
         "historical_run_name": source["historical_run_name"],
@@ -445,9 +460,9 @@ def evaluate_maddpg_e1(
         "source_run_dir_resolved": str(source["resolved_run_dir"]),
         "source_is_symlink": bool(source["is_symlink"]),
         "checkpoint": str(source["checkpoint"]),
-        "checkpoint_name": Path(source["checkpoint"]).name if training_policy else "latest.pt",
+        "checkpoint_name": Path(source["checkpoint"]).name if portable_policy else "latest.pt",
         "checkpoint_episode": int(payload.get("episode", -1)),
-        "checkpoint_completed": True,
+        "checkpoint_completed": bool(payload.get("training_complete_at_save", False)) if periodic_policy else True,
         "noise_std": noise,
         "action_repeat": int(action_repeat),
         "action_seed_words": [action_seed_words(seed, w, action_repeat, "maddpg") for w in eval_seeds],
@@ -476,7 +491,7 @@ def evaluate_maddpg_e1(
         "wrote_to_source_run": False,
         "data_role": "new",
         "world_role": world_role if deployment else "reused_development_worlds",
-        "worlds_are_reused_development_worlds": (None if training_policy else
+        "worlds_are_reused_development_worlds": (None if portable_policy else
             ((world_role == "reused_development_worlds" if world_role else None) if deployment else True)),
         "reproduction_git_commit": git.get("reproduction_git_commit"),
         "reproduction_git_branch": git.get("reproduction_git_branch"),
@@ -495,7 +510,7 @@ def evaluate_maddpg_e1(
     provenance = {
         **git,
         **({"checkpoint_role": payload["checkpoint_role"], "policy_version": payload["policy_version"]}
-           if training_policy else {}),
+           if portable_policy else {}),
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "algorithm": algorithm,
         "training_seed": int(seed),
@@ -504,7 +519,7 @@ def evaluate_maddpg_e1(
         "source_run_dir": str(source["run_dir"]),
         "source_run_dir_resolved": str(source["resolved_run_dir"]),
         "checkpoint": str(source["checkpoint"]),
-        "checkpoint_name": Path(source["checkpoint"]).name if training_policy else "latest.pt",
+        "checkpoint_name": Path(source["checkpoint"]).name if portable_policy else "latest.pt",
         "checkpoint_episode": int(payload.get("episode", -1)),
         "noise_std": noise,
         "eval_id": eval_name,

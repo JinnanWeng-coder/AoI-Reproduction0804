@@ -18,7 +18,7 @@ def _hidden_pair(hidden: Iterable[int]) -> List[int]:
 
 
 class ActorNetwork(nn.Module):
-    def __init__(self, input_dims, hidden_dims, n_actions, actor_lr, device="cpu"):
+    def __init__(self, input_dims, hidden_dims, n_actions, actor_lr, device="cpu", *, create_optimizer=True):
         super().__init__()
         h1, h2 = _hidden_pair(hidden_dims)
         self.fc1 = nn.Linear(int(input_dims), h1)
@@ -27,7 +27,8 @@ class ActorNetwork(nn.Module):
         self.norm2 = nn.LayerNorm(h2)
         self.mu = nn.Linear(h2, int(n_actions))
         self._init_weights()
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=float(actor_lr))
+        if create_optimizer:
+            self.optimizer = torch.optim.Adam(self.parameters(), lr=float(actor_lr))
         self.device = torch.device(device)
         self.to(self.device)
 
