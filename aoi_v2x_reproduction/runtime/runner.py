@@ -805,7 +805,7 @@ def _train_mappo(
     resume: Optional[str] = None,
     max_episodes: Optional[int] = None,
     recover_empty_run: bool = False,
-    *, training_reward_best: bool = False,
+    *, training_reward_best: bool = False, progress_callback=None,
 ) -> Dict[str, Any]:
     if training_reward_best:
         from .training_selection import validate_request
@@ -913,6 +913,13 @@ def _train_mappo(
             diagnostics = trainer.update(batch)
             metrics.append_mappo_update(episode + 1, diagnostics)
 
+        if progress_callback is not None:
+            progress_callback({"episode": episode + 1, "episodes": stop_episode,
+                               "environment_steps": int(trainer.environment_steps),
+                               "update_count": int(trainer.update_count),
+                               "policy_version": int(trainer.policy_version),
+                               "elapsed_seconds": time.perf_counter() - started})
+
     if len(rollout) != 0:
         raise RuntimeError("MAPPO rollout was not consumed at the training boundary")
     shapes = metrics.save(run_dir)
@@ -1009,10 +1016,11 @@ def train(
     resume: Optional[str] = None,
     max_episodes: Optional[int] = None,
     recover_empty_run: bool = False,
-    *, training_reward_best: bool = False,
+    *, training_reward_best: bool = False, progress_callback=None,
 ) -> Dict[str, Any]:
     if config.algorithm == "mappo":
-        return _train_mappo(config, resume, max_episodes, recover_empty_run, training_reward_best=training_reward_best)
+        return _train_mappo(config, resume, max_episodes, recover_empty_run,
+                            training_reward_best=training_reward_best, progress_callback=progress_callback)
     if training_reward_best:
         from .training_selection import validate_request
         validate_request(config, resume, max_episodes, recover_empty_run)

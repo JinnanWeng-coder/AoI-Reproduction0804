@@ -211,6 +211,7 @@ def evaluate_zero_shot(
     deployment: bool = False,
     world_role: str | None = None,
     training_policy: bool = False,
+    compact_output: bool = False,
 ) -> dict:
     from analysis.deployment_rng import policy_seed, action_seed_words, exogenous_probe
     if action_repeat < 0:
@@ -218,7 +219,7 @@ def evaluate_zero_shot(
     if training_policy and not deployment:
         raise ValueError("training100 policies require explicit deployment mode")
     allowed_roles = {None, "locked_new_worlds", "reused_development_worlds"}
-    if training_policy:
+    if training_policy or compact_output:
         allowed_roles.add("user_fixed_exploratory_worlds")
     if world_role not in allowed_roles:
         raise ValueError("invalid deployment world role")
@@ -261,7 +262,7 @@ def evaluate_zero_shot(
             eval_name = eval_name.replace("policy_final", f"{payload['checkpoint_role']}_e{payload['episode']}")
         # The selected-eval wrapper already isolates the complete unit key.
         # Short native paths also avoid Windows MAX_PATH nesting problems.
-        eval_dir = (output_root / "native" if training_policy else
+        eval_dir = (output_root / "native" if training_policy or compact_output else
                     output_root / target_config.scenario.id / structure / run_dir.name / eval_name)
         if eval_dir.exists():
             raise FileExistsError(f"refusing to overwrite zero-shot evaluation: {eval_dir}")
