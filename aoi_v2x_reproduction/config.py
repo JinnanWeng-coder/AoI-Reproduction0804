@@ -45,7 +45,7 @@ MAPPO_CONFIG_FIELDS = (
 )
 
 MAPPO_VALUE_CLIP_MODES = ("normalized", "legacy_raw")
-MAPPO_VARIANTS = ("combined", "tdec")
+MAPPO_VARIANTS = ("combined", "tdec", "no_tdec")
 
 
 DEFAULT_SCENARIOS: Dict[str, Dict[str, Any]] = {
@@ -555,6 +555,8 @@ def validate_config(config: ExperimentConfig) -> None:
         raise ValueError(f"mappo_variant must be one of {MAPPO_VARIANTS}")
     if not isinstance(config.mappo_actor_sharing, bool):
         raise ValueError("mappo_actor_sharing must be boolean")
+    if config.mappo_variant == "no_tdec" and not config.mappo_actor_sharing:
+        raise ValueError("no_tdec currently requires the explicitly authorized shared actor")
     for name in ("mappo_value_loss_coef", "mappo_entropy_coef_rb", "mappo_entropy_coef_mode", "mappo_entropy_coef_power"):
         if not math.isfinite(float(getattr(config, name))) or float(getattr(config, name)) < 0.0:
             raise ValueError(f"{name} must be finite and non-negative")
@@ -778,7 +780,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--mappo-variant",
         choices=MAPPO_VARIANTS,
         default=None,
-        help="combined-reward MAPPO baseline (default) or task-decomposed MAPPO",
+        help="combined centralized-P baseline, task-decomposed tdec, or shared global+local-sum no_tdec",
     )
     parser.add_argument(
         "--mappo-actor-sharing",

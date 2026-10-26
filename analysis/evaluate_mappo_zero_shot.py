@@ -242,7 +242,7 @@ def evaluate_zero_shot(
             source_complete = json.loads((run_dir / "COMPLETE.json").read_text(encoding="utf-8"))
         else:
             run_dir, source_config, source_complete = _validate_mappo_policy_artifact(policy_path, payload)
-        allowed_variants = {"tdec", "combined"} if deployment else {"tdec"}
+        allowed_variants = {"tdec", "combined", "no_tdec"} if deployment else {"tdec"}
         if source_config.algorithm != "mappo" or source_config.mappo_variant not in allowed_variants:
             raise RuntimeError("zero-shot evaluation requires a TDec MAPPO policy")
         target_config = build_target_config(source_config, target_scenario, device)

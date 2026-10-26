@@ -154,7 +154,7 @@ class MAPPOTrainer:
                 eps=float(config.mappo_adam_eps),
             )
             self.value_norm = RunningValueNorm(self.number_agents).to(self.device)
-        elif self.variant == "tdec":
+        elif self.variant in {"tdec", "no_tdec"}:
             self.global_critic = CentralValueCritic(
                 config.state_dim * config.number_agents,
                 config.global_critic_hidden,
@@ -164,7 +164,7 @@ class MAPPOTrainer:
                 LocalValueCritic(config.state_dim, config.local_critic_hidden)
                 for _ in range(self.number_agents)
             ]).to(self.device)
-            self.task2_critics = torch.nn.ModuleList([
+            self.task2_critics = None if self.variant == "no_tdec" else torch.nn.ModuleList([
                 LocalValueCritic(config.state_dim, config.local_critic_hidden)
                 for _ in range(self.number_agents)
             ]).to(self.device)
@@ -174,10 +174,12 @@ class MAPPOTrainer:
             }
             self.global_critic_optimizer = torch.optim.Adam(self.global_critic.parameters(), **optimizer_kwargs)
             self.task1_critic_optimizer = torch.optim.Adam(self.task1_critics.parameters(), **optimizer_kwargs)
-            self.task2_critic_optimizer = torch.optim.Adam(self.task2_critics.parameters(), **optimizer_kwargs)
+            if self.task2_critics is not None:
+                self.task2_critic_optimizer = torch.optim.Adam(self.task2_critics.parameters(), **optimizer_kwargs)
             self.global_value_norm = RunningValueNorm(1).to(self.device)
             self.task1_value_norm = RunningValueNorm(self.number_agents).to(self.device)
-            self.task2_value_norm = RunningValueNorm(self.number_agents).to(self.device)
+            if self.task2_critics is not None:
+                self.task2_value_norm = RunningValueNorm(self.number_agents).to(self.device)
         else:
             raise ValueError(f"unsupported MAPPO variant: {self.variant}")
         self.policy_version = 0
@@ -248,7 +250,7 @@ class MAPPOTrainer:
 
     @torch.no_grad()
     def tdec_values(self, observations) -> TDecValueStep:
-        if self.variant != "tdec":
+        if self.variant not in {"tdec", "no_tdec"}:
             raise RuntimeError("task-decomposed values require mappo_variant=tdec")
         tensor = self._observations_tensor(observations)
         global_value, task1_values, task2_values = self._tdec_values_tensor(tensor)
@@ -259,14 +261,16 @@ class MAPPOTrainer:
         )
 
     def _tdec_values_tensor(self, observations: torch.Tensor):
-        if self.variant != "tdec":
+        if self.variant not in {"tdec", "no_tdec"}:
             raise RuntimeError("task-decomposed values require mappo_variant=tdec")
         global_value = self.global_critic(observations.reshape(1, -1)).squeeze(0)
         task1_values = torch.stack([
             critic(observations[index:index + 1]).squeeze(0)
             for index, critic in enumerate(self.task1_critics)
         ])
-        task2_values = torch.stack([
+        # no_tdec uses task1 storage for the single LOCAL-SUM stream. The padded
+        # second rollout stream is identically zero, with NO network/norm/Adam.
+        task2_values = torch.zeros_like(task1_values) if self.variant == "no_tdec" else torch.stack([
             critic(observations[index:index + 1]).squeeze(0)
             for index, critic in enumerate(self.task2_critics)
         ])
@@ -334,7 +338,7 @@ class MAPPOTrainer:
     def update(self, rollout: Union[RolloutBatch, TDecRolloutBatch]) -> Dict[str, object]:
         if self.variant == "combined" and not isinstance(rollout, RolloutBatch):
             raise ValueError("combined MAPPO requires a combined-reward rollout")
-        if self.variant == "tdec" and not isinstance(rollout, TDecRolloutBatch):
+        if self.variant in {"tdec", "no_tdec"} and not isinstance(rollout, TDecRolloutBatch):
             raise ValueError("TDec MAPPO requires a task-decomposed rollout")
         batch = rollout.to(self.device)
         if batch.observations.ndim != 3 or batch.observations.shape[1:] != (self.number_agents, self.observation_dim):
@@ -364,7 +368,11 @@ class MAPPOTrainer:
             advantages = weighted_global_advantages + batch.task1_advantages + batch.task2_advantages
             self.global_value_norm.update(batch.global_returns)
             self.task1_value_norm.update(batch.task1_returns)
-            self.task2_value_norm.update(batch.task2_returns)
+            if self.variant == "tdec":
+                self.task2_value_norm.update(batch.task2_returns)
+            elif any(torch.count_nonzero(getattr(batch, k)) for k in
+                     ("task2_advantages", "task2_returns", "old_task2_values", "task2_rewards")):
+                raise ValueError("NoTDec padded rollout stream must be identically zero")
             component_diagnostics = {
                 "global_advantage_mean_per_agent_before_composition": weighted_global_advantages.mean(dim=0).detach().cpu().tolist(),
                 "global_advantage_std_per_agent_before_composition": weighted_global_advantages.std(dim=0, unbiased=False).detach().cpu().tolist(),
@@ -520,7 +528,7 @@ class MAPPOTrainer:
                     self.task1_value_norm,
                     clip_param,
                 )
-                task2_loss, task2_grad = self._optimize_value_stream(
+                task2_loss, task2_grad = (0., 0.) if self.variant == "no_tdec" else self._optimize_value_stream(
                     self.task2_critics,
                     self.task2_critic_optimizer,
                     self._local_value_predictions(self.task2_critics, batch.observations),
@@ -547,7 +555,7 @@ class MAPPOTrainer:
             else:
                 final_global = self.global_critic(batch.observations.reshape(batch.size, -1))
                 final_task1 = self._local_value_predictions(self.task1_critics, batch.observations)
-                final_task2 = self._local_value_predictions(self.task2_critics, batch.observations)
+                final_task2 = torch.zeros_like(final_task1) if self.variant == "no_tdec" else self._local_value_predictions(self.task2_critics, batch.observations)
                 global_explained_variance = self._explained_variance(final_global, batch.global_returns)
                 task1_explained_variance = self._explained_variance(final_task1, batch.task1_returns)
                 task2_explained_variance = self._explained_variance(final_task2, batch.task2_returns)
@@ -563,11 +571,11 @@ class MAPPOTrainer:
                     task1_critic_grad_records,
                     task2_critic_grad_records,
                 )
-                explained_variance = float(np.mean([
+                explained_variance = float(np.mean(([
                     global_explained_variance,
                     task1_explained_variance,
                     task2_explained_variance,
-                ]))
+                ] if self.variant == "tdec" else [global_explained_variance, task1_explained_variance])))
                 critic_diagnostics = {
                     "global_critic_loss": global_critic_loss,
                     "task1_critic_loss": task1_critic_loss,
@@ -640,6 +648,11 @@ class MAPPOTrainer:
             **critic_diagnostics,
             **component_diagnostics,
         }
+        if self.variant == "no_tdec":
+            diagnostics = {k.replace("task1", "local"): v for k, v in diagnostics.items() if "task2" not in k}
+            diagnostics.update(critic_loss_aggregate_semantics="mean_over_epochs_of_global_plus_local_sum_losses",
+                critic_grad_norm_aggregate_semantics="mean_over_epochs_of_joint_rss_global_local_grad_l2_before_clipping",
+                explained_variance_aggregate_semantics="unweighted_mean_of_global_and_local_sum_explained_variance")
         numeric = [
             value
             for key, value in diagnostics.items()
@@ -675,8 +688,13 @@ class MAPPOTrainer:
             }
         global_count = sum(parameter.numel() for parameter in self.global_critic.parameters())
         task1_count = sum(parameter.numel() for parameter in self.task1_critics.parameters())
-        task2_count = sum(parameter.numel() for parameter in self.task2_critics.parameters())
+        task2_count = 0 if self.task2_critics is None else sum(parameter.numel() for parameter in self.task2_critics.parameters())
         critic_count = global_count + task1_count + task2_count
+        if self.variant == "no_tdec":
+            return {"actors": int(actor_count), "actor_network_count": len(self.actors),
+                    "actor_parameters_per_network": int(per_actor_count), "critic": int(critic_count),
+                    "global_critic": int(global_count), "local_critics": int(task1_count),
+                    "local_critic_network_count": self.number_agents, "total": int(actor_count + critic_count)}
         return {
             "actors": int(actor_count),
             "actor_network_count": len(self.actors),
@@ -692,4 +710,6 @@ class MAPPOTrainer:
     def critic_structure(self) -> str:
         if self.variant == "combined":
             return "joint_observation_per_agent_value"
+        if self.variant == "no_tdec":
+            return "joint_observation_scalar_global_plus_independent_local_sum_values"
         return "joint_observation_scalar_global_plus_independent_local_task1_task2_values"

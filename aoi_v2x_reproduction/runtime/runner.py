@@ -128,7 +128,7 @@ def _make_mappo_system(config):
     seed_everything(config.seed, device)
     environment = _make_environment(config)
     trainer = MAPPOTrainer(config, device)
-    rollout_class = TDecOnPolicyRollout if config.mappo_variant == "tdec" else OnPolicyRollout
+    rollout_class = TDecOnPolicyRollout if config.mappo_variant in {"tdec", "no_tdec"} else OnPolicyRollout
     rollout = rollout_class(config.number_agents, config.state_dim)
     metrics = MetricStore(
         config.number_agents,
@@ -493,6 +493,8 @@ def _run_provenance(config: ExperimentConfig, git: Dict[str, Any]) -> Dict[str, 
             if config.mappo_variant == "tdec"
             else "joint_observation_per_agent_value"
         )
+        if config.mappo_variant == "no_tdec":
+            provenance["mappo_critic_structure"] = "joint_observation_scalar_global_plus_independent_local_sum_values"
     provenance.update(git)
     return provenance
 
@@ -877,7 +879,7 @@ def _train_mappo(
             next_observations, reward_global, reward_task1, reward_task2, terminated, info = environment.step(
                 sampled.environment_actions
             )
-            if config.mappo_variant == "tdec":
+            if config.mappo_variant in {"tdec", "no_tdec"}:
                 if sampled.tdec_values is None:
                     raise RuntimeError("TDec MAPPO policy step omitted decomposed values")
                 if terminated:
@@ -903,8 +905,10 @@ def _train_mappo(
                     task1_values=sampled.tdec_values.task1_values,
                     task2_values=sampled.tdec_values.task2_values,
                     global_rewards=np.asarray([reward_global], dtype=np.float32),
-                    task1_rewards=np.asarray(reward_task1, dtype=np.float32),
-                    task2_rewards=np.asarray(reward_task2, dtype=np.float32),
+                    task1_rewards=(np.asarray(reward_task1, dtype=np.float32) + np.asarray(reward_task2, dtype=np.float32)
+                                   if config.mappo_variant == "no_tdec" else np.asarray(reward_task1, dtype=np.float32)),
+                    task2_rewards=(np.zeros(config.number_agents, dtype=np.float32)
+                                   if config.mappo_variant == "no_tdec" else np.asarray(reward_task2, dtype=np.float32)),
                     done=terminated,
                     policy_version=trainer.policy_version,
                     **next_tdec_values,
@@ -1037,6 +1041,9 @@ def _train_mappo(
         "metrics_shapes": shapes,
         "audit": audit,
     }
+    if config.mappo_variant == "no_tdec":
+        complete["reward_semantics"] = "separate_global_plus_local_task1_task2_sum_GAE"
+        complete["central_critic_output"] = "scalar_global_and_independent_per_agent_local_sum_values"
     if periodic is not None:
         complete["periodic_policy_snapshots"] = {"index": "policies/index.json", "count": len(periodic.records),
                 "interval": periodic.interval, "smoke": periodic.smoke, "role": "periodic_policy_snapshot"}
