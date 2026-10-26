@@ -801,6 +801,30 @@ def _repair_selection_best_after_resume(run_dir: Path, latest_payload: Dict[str,
     )
 
 
+def _full_training_setup(run_dir, config, system, training_best, periodic_interval, periodic_smoke,
+                         full_interval, full_smoke, recovery, retained_full):
+    from .full_training_checkpoint import (FullTrainingCheckpoints, restore_selector, restore_system, resumed_periodic)
+    from .periodic_policy import PeriodicPolicySnapshots
+    from .training_selection import TrainingRewardBest
+    if recovery is not None:
+        if (recovery["selector"] is not None) != training_best or recovery["interval"] != full_interval or recovery["smoke"] != full_smoke:
+            raise ValueError("resume selection/interval/smoke contract mismatch")
+        selector = restore_selector(run_dir, config, recovery["selector"])
+        periodic = resumed_periodic(run_dir, config, recovery)
+        full = FullTrainingCheckpoints(run_dir, config, full_interval, full_smoke, retained_full)
+        restore_system(config, system, recovery["state"])
+        restore_rng_state(recovery["rng"])  # Last, after all module/optimizer construction and restoration.
+    else:
+        selector = TrainingRewardBest(run_dir, config) if training_best else None
+        periodic = PeriodicPolicySnapshots(run_dir, config, periodic_interval, smoke=periodic_smoke) if periodic_interval is not None else None
+        full = FullTrainingCheckpoints(run_dir, config, full_interval, full_smoke) if full_interval is not None else None
+        if full is not None and selector is not None:
+            provenance = _read_json_object(run_dir / "provenance.json", "new full-state run provenance")
+            provenance.update(training100_resume_supported=True, full_training_checkpoint_schema="cam96k_full_training_state_v1")
+            _write_json(run_dir / "provenance.json", provenance)
+    return selector, periodic, full
+
+
 def _train_mappo(
     config: ExperimentConfig,
     resume: Optional[str] = None,
@@ -808,7 +832,13 @@ def _train_mappo(
     recover_empty_run: bool = False,
     *, training_reward_best: bool = False, progress_callback=None,
     periodic_policy_interval=None, periodic_policy_smoke=False,
+    full_checkpoint_interval=None, full_checkpoint_smoke=False, resume_training_checkpoint=None,
 ) -> Dict[str, Any]:
+    if full_checkpoint_interval is not None:
+        if resume or max_episodes is not None or recover_empty_run or periodic_policy_interval != full_checkpoint_interval:
+            raise ValueError("full training recovery requires paired periodic policies and its dedicated resume entry")
+    elif resume_training_checkpoint:
+        raise ValueError("full resume requires full_checkpoint_interval")
     if training_reward_best:
         from .training_selection import validate_request
         validate_request(config, resume, max_episodes, recover_empty_run)
@@ -818,24 +848,25 @@ def _train_mappo(
         raise ValueError("the first MAPPO baseline supports checkpoint_mode none or policy_only")
     if max_episodes is not None and int(max_episodes) < int(config.episodes):
         raise ValueError("the first MAPPO baseline does not support partial training runs")
-    run_dir, is_resume = _prepare_run(config, None, recover_empty_run=False)
-    if is_resume:
-        raise RuntimeError("MAPPO exploratory runs must start from a new run directory")
+    recovery = None
+    if resume_training_checkpoint:
+        from .full_training_checkpoint import prepare_full_resume
+        run_dir, recovery, retained_full = prepare_full_resume(config, resume_training_checkpoint)
+    else:
+        run_dir, is_resume = _prepare_run(config, None, recover_empty_run=False)
+        if is_resume:
+            raise RuntimeError("MAPPO exploratory runs must start from a new run directory")
     environment, trainer, rollout, metrics, device = _make_mappo_system(config)
-    selector = None
-    if training_reward_best:
-        from .training_selection import TrainingRewardBest
-        selector = TrainingRewardBest(run_dir, config)
-    periodic = None
-    if periodic_policy_interval is not None:
-        from .periodic_policy import PeriodicPolicySnapshots
-        periodic = PeriodicPolicySnapshots(run_dir, config, periodic_policy_interval, smoke=periodic_policy_smoke)
+    system = (environment, trainer, rollout, metrics, device)
+    selector, periodic, full = _full_training_setup(run_dir, config, system, training_reward_best,
+        periodic_policy_interval, periodic_policy_smoke, full_checkpoint_interval, full_checkpoint_smoke, recovery,
+        retained_full if recovery else None)
     if hasattr(environment, "reset_world") and not getattr(environment, "_world_initialized", False):
         environment.reset_world(config.seed)
 
     started = time.perf_counter()
     stop_episode = int(config.episodes)
-    for episode in range(stop_episode):
+    for episode in range(recovery["episode"] if recovery else 0, stop_episode):
         observations = environment.start_episode(episode)
         task1_steps: List[np.ndarray] = []
         task2_steps: List[np.ndarray] = []
@@ -921,6 +952,8 @@ def _train_mappo(
 
         if periodic is not None:
             periodic.observe(episode + 1, trainer, trainer.policy_version)
+        if full is not None:
+            full.observe(episode + 1, system, selector, periodic)
         if progress_callback is not None:
             progress_callback({"episode": episode + 1, "episodes": stop_episode,
                                "environment_steps": int(trainer.environment_steps),
@@ -1010,6 +1043,9 @@ def _train_mappo(
     if training_selection is not None:
         complete["training_reward_selection"] = training_selection
         complete["policy_best_training"] = training_selection["policy_best"]
+    if full is not None:
+        complete["full_training_checkpoints"] = {"index": "training_checkpoints/index.json", "count": len(full.records),
+            "interval": full.interval, "role": "periodic_full_training_checkpoint", "resume_supported": True}
     _write_json(run_dir / "COMPLETE.json", complete)
     with (run_dir / "stdout.log").open("a", encoding="utf-8") as handle:
         handle.write("MAPPO run completed\n")
@@ -1029,29 +1065,39 @@ def train(
     recover_empty_run: bool = False,
     *, training_reward_best: bool = False, progress_callback=None,
     periodic_policy_interval=None, periodic_policy_smoke=False,
+    full_checkpoint_interval=None, full_checkpoint_smoke=False, resume_training_checkpoint=None,
 ) -> Dict[str, Any]:
     if config.algorithm == "mappo":
         return _train_mappo(config, resume, max_episodes, recover_empty_run,
                             training_reward_best=training_reward_best, progress_callback=progress_callback,
-                            periodic_policy_interval=periodic_policy_interval, periodic_policy_smoke=periodic_policy_smoke)
+                            periodic_policy_interval=periodic_policy_interval, periodic_policy_smoke=periodic_policy_smoke,
+                            full_checkpoint_interval=full_checkpoint_interval, full_checkpoint_smoke=full_checkpoint_smoke,
+                            resume_training_checkpoint=resume_training_checkpoint)
     if periodic_policy_interval is not None and (resume or max_episodes is not None or recover_empty_run):
         raise ValueError("periodic policy snapshots do not support training resume/partial recovery")
+    if full_checkpoint_interval is not None:
+        if resume or max_episodes is not None or recover_empty_run or periodic_policy_interval != full_checkpoint_interval:
+            raise ValueError("full training recovery requires paired periodic policies and its dedicated resume entry")
+    elif resume_training_checkpoint:
+        raise ValueError("full resume requires full_checkpoint_interval")
     if training_reward_best:
         from .training_selection import validate_request
         validate_request(config, resume, max_episodes, recover_empty_run)
     if resume and config.checkpoint_mode != "resumable":
         raise ValueError("training resume requires checkpoint_mode=resumable")
-    run_dir, is_resume = _prepare_run(config, resume, recover_empty_run=recover_empty_run)
+    recovery = None
+    if resume_training_checkpoint:
+        from .full_training_checkpoint import prepare_full_resume
+        run_dir, recovery, retained_full = prepare_full_resume(config, resume_training_checkpoint)
+        is_resume = False
+    else:
+        run_dir, is_resume = _prepare_run(config, resume, recover_empty_run=recover_empty_run)
     environment, agents, learner, replay, metrics, device = _make_system(config)
-    start_episode = 0
-    selector = None
-    if training_reward_best:
-        from .training_selection import TrainingRewardBest
-        selector = TrainingRewardBest(run_dir, config)
-    periodic = None
-    if periodic_policy_interval is not None:
-        from .periodic_policy import PeriodicPolicySnapshots
-        periodic = PeriodicPolicySnapshots(run_dir, config, periodic_policy_interval, smoke=periodic_policy_smoke)
+    system = (environment, agents, learner, replay, metrics, device)
+    start_episode = recovery["episode"] if recovery else 0
+    selector, periodic, full = _full_training_setup(run_dir, config, system, training_reward_best,
+        periodic_policy_interval, periodic_policy_smoke, full_checkpoint_interval, full_checkpoint_smoke, recovery,
+        retained_full if recovery else None)
     selection_state: Optional[Dict[str, Any]] = None
     if config.checkpoint_mode == "resumable":
         selection_state = {
@@ -1109,6 +1155,8 @@ def train(
                              int(learner.learn_step_counter) // int(config.policy_delay), "after_episode_online_actor_updates")
         if periodic is not None:
             periodic.observe(episode + 1, agents, int(learner.learn_step_counter) // int(config.policy_delay))
+        if full is not None:
+            full.observe(episode + 1, system, selector, periodic)
         if progress_callback is not None:
             version = int(learner.learn_step_counter) // int(config.policy_delay)
             progress_callback({"episode": episode + 1, "episodes": stop_episode,
@@ -1236,6 +1284,9 @@ def train(
     if periodic is not None:
         complete["periodic_policy_snapshots"] = {"index": "policies/index.json", "count": len(periodic.records),
                 "interval": periodic.interval, "smoke": periodic.smoke, "role": "periodic_policy_snapshot"}
+    if full is not None:
+        complete["full_training_checkpoints"] = {"index": "training_checkpoints/index.json", "count": len(full.records),
+            "interval": full.interval, "role": "periodic_full_training_checkpoint", "resume_supported": True}
     _write_json(run_dir / "COMPLETE.json", complete)
     with (run_dir / "stdout.log").open("a", encoding="utf-8") as handle:
         handle.write("run completed\n")
